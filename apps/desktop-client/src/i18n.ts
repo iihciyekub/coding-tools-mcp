@@ -24,6 +24,10 @@ const zh: Record<string, string> = {
   "Authentication": "身份验证",
   "Connection": "连接信息",
   "Logs": "日志",
+  "Configuration": "配置",
+  "Log output": "日志输出",
+  "Help": "帮助",
+  "Workspace views": "工作区视图",
   "Name": "名称",
   "Path": "路径",
   "Tunnel": "隧道",
@@ -71,6 +75,17 @@ const zh: Record<string, string> = {
   "Runtime and tunnel are healthy.": "运行时与隧道状态正常。",
   "The runtime is local-only.": "运行时仅供本机访问。",
   "Language": "语言",
+  "Quick setup": "快速设置",
+  "What needs to be installed": "需要安装什么",
+  "Install these two command-line dependencies before starting a workspace.": "启动工作区前，请先安装下面两个命令行依赖。",
+  "MCP runtime": "MCP 运行时",
+  "Install uv so the app can launch coding-tools-mcp with uvx.": "安装 uv，应用即可通过 uvx 启动 coding-tools-mcp。",
+  "Cloudflare Tunnel": "Cloudflare 隧道",
+  "Required for ChatGPT on the web to reach this Mac.": "网页版 ChatGPT 需要通过它访问这台 Mac。",
+  "ChatGPT connection": "连接 ChatGPT",
+  "Start the workspace, copy the public MCP URL, then add it in ChatGPT Developer mode and finish OAuth authorization.": "启动工作区，复制公网 MCP 地址，然后在 ChatGPT 开发者模式中添加并完成 OAuth 授权。",
+  "Fixed domain": "固定域名",
+  "For long-term use, create a Cloudflare Named Tunnel and route your hostname to the local port shown in Configuration.": "长期使用时，请创建 Cloudflare 固定隧道，并将域名路由到配置页显示的本地端口。",
 };
 
 export function detectLanguage(): Language {

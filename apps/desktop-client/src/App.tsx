@@ -26,6 +26,7 @@ function App() {
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [reveal, setReveal] = useState<Record<string, boolean>>({});
+  const [activeTab, setActiveTab] = useState<"configuration" | "logs" | "help">("configuration");
 
   const selected = profiles.find((profile) => profile.id === selectedId) ?? null;
   const status = selected
@@ -244,7 +245,25 @@ function App() {
             {error && <div className="banner error"><strong>{t("Operation failed")}</strong><span>{error}</span><button onClick={() => setError("")}>×</button></div>}
             {notice && <div className="toast">✓ {notice}</div>}
 
-            <div className="dashboard-grid">
+            <nav className="content-tabs" role="tablist" aria-label={t("Workspace views")}>
+              {([
+                ["configuration", "Configuration"],
+                ["logs", "Log output"],
+                ["help", "Help"],
+              ] as const).map(([tab, label]) => (
+                <button
+                  key={tab}
+                  className={activeTab === tab ? "active" : ""}
+                  role="tab"
+                  aria-selected={activeTab === tab}
+                  onClick={() => setActiveTab(tab)}
+                >
+                  {t(label)}
+                </button>
+              ))}
+            </nav>
+
+            {activeTab === "configuration" && <div className="dashboard-grid" role="tabpanel">
               <section className="card workspace-card">
                 <CardTitle icon="folder" title={t("Workspace")} />
                 <div className="form-grid">
@@ -328,12 +347,49 @@ function App() {
                 <UrlRow label={t("Public MCP URL")} value={publicEndpoint(selected, status?.public_url)} empty={t("No public URL yet")} onCopy={copy} />
                 {selected.tunnel.type === "frp" && <button className="text-button" onClick={() => copy(frpSnippet(selected))}>{t("Copy FRP snippet")}</button>}
               </section>
+            </div>}
 
-              <section className="card logs-card">
+            {activeTab === "logs" && (
+              <section className="card logs-card logs-view" role="tabpanel">
                 <CardTitle icon="terminal" title={t("Logs")} action={<button className="icon-button small" onClick={() => selectedId && api.logs(selectedId).then(setLogs)}>↻</button>} />
                 <pre>{[logs.cloudflared && `[cloudflared.log]\n${logs.cloudflared}`, logs.stderr && `[stderr.log]\n${logs.stderr}`, logs.stdout && `[stdout.log]\n${logs.stdout}`].filter(Boolean).join("\n\n") || t("No logs yet.")}</pre>
               </section>
-            </div>
+            )}
+
+            {activeTab === "help" && (
+              <section className="help-view" role="tabpanel">
+                <div className="help-intro">
+                  <span className="help-kicker">{t("Quick setup")}</span>
+                  <h3>{t("What needs to be installed")}</h3>
+                  <p>{t("Install these two command-line dependencies before starting a workspace.")}</p>
+                </div>
+                <div className="help-grid">
+                  <article className="card help-card">
+                    <span className="help-number">01</span>
+                    <h4>{t("MCP runtime")}</h4>
+                    <p>{t("Install uv so the app can launch coding-tools-mcp with uvx.")}</p>
+                    <code>brew install uv</code>
+                  </article>
+                  <article className="card help-card">
+                    <span className="help-number">02</span>
+                    <h4>{t("Cloudflare Tunnel")}</h4>
+                    <p>{t("Required for ChatGPT on the web to reach this Mac.")}</p>
+                    <code>brew install cloudflared</code>
+                  </article>
+                  <article className="card help-card">
+                    <span className="help-number">03</span>
+                    <h4>{t("ChatGPT connection")}</h4>
+                    <p>{t("Start the workspace, copy the public MCP URL, then add it in ChatGPT Developer mode and finish OAuth authorization.")}</p>
+                    <code>{publicEndpoint(selected, status?.public_url) || "https://mcp.example.com/mcp"}</code>
+                  </article>
+                </div>
+                <div className="card help-note">
+                  <strong>{t("Fixed domain")}</strong>
+                  <p>{t("For long-term use, create a Cloudflare Named Tunnel and route your hostname to the local port shown in Configuration.")}</p>
+                  <code>http://127.0.0.1:{selected.runtime.local_port}</code>
+                </div>
+              </section>
+            )}
           </>
         )}
       </section>
