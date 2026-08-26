@@ -105,6 +105,18 @@ class RuntimeManager:
                     command=conflict_command or tr("RuntimeManager", "Unknown"),
                 )
             )
+        if self._port_is_listening(profile.runtime.local_port):
+            unknown = tr("RuntimeManager", "Unknown")
+            raise RuntimeError(
+                tr(
+                    "RuntimeManager",
+                    "The local port is already in use.\nPort: {port}\nProcess PID: {pid}\nCommand: {command}",
+                ).format(
+                    port=profile.runtime.local_port,
+                    pid=unknown,
+                    command=unknown,
+                )
+            )
 
         runtime_process, runtime_pid = self._start_runtime_process(profile)
         tunnel_process: subprocess.Popen[str] | None = None
@@ -320,13 +332,21 @@ class RuntimeManager:
             )
         runtime_pid = self._find_pid_by_port(profile.runtime.local_port)
         if runtime_pid is None:
-            self._terminate_live_process_tree(process.pid)
-            raise RuntimeError(
-                tr(
-                    "RuntimeManager",
-                    "The MCP runtime started, but the process listening on port {port} could not be identified.",
-                ).format(port=profile.runtime.local_port)
-            )
+            # macOS can omit PIDs from psutil.net_connections() for processes
+            # owned by this user even though a loopback connection proves that
+            # the freshly spawned runtime is listening. Keep managing the
+            # Popen process in that case; its command already contains the
+            # workspace and port identity used by status/stop recovery.
+            if process.poll() is None:
+                runtime_pid = process.pid
+            else:
+                self._terminate_live_process_tree(process.pid)
+                raise RuntimeError(
+                    tr(
+                        "RuntimeManager",
+                        "The MCP runtime started, but the process listening on port {port} could not be identified.",
+                    ).format(port=profile.runtime.local_port)
+                )
         return process, runtime_pid
 
     def _start_cloudflare_tunnel(self, profile: WorkspaceProfile) -> tuple[subprocess.Popen[str], str]:

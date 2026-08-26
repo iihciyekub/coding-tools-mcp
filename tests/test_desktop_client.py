@@ -186,6 +186,56 @@ class DesktopI18nTests(unittest.TestCase):
 
 
 class DesktopRuntimeSafetyTests(unittest.TestCase):
+    def test_start_rejects_listening_port_when_pid_is_unavailable(self) -> None:
+        manager = runtime.RuntimeManager()
+        profile = build_profile(str(REPO_ROOT), "review")
+
+        with (
+            mock.patch.object(manager, "_validate_tunnel_requirements"),
+            mock.patch.object(manager, "_cleanup_orphan_tunnel"),
+            mock.patch.object(manager, "_find_runtime_pid", return_value=None),
+            mock.patch.object(manager, "_find_state_runtime", return_value=None),
+            mock.patch.object(manager, "_find_pid_by_port", return_value=None),
+            mock.patch.object(manager, "_port_is_listening", return_value=True),
+            mock.patch.object(manager, "_start_runtime_process") as start_runtime,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "already in use"):
+                manager.start(profile)
+
+        start_runtime.assert_not_called()
+
+    def test_started_runtime_uses_live_child_when_port_pid_is_unavailable(self) -> None:
+        manager = runtime.RuntimeManager()
+        profile = build_profile(str(REPO_ROOT), "review")
+
+        class FakePopen:
+            pid = 4242
+
+            def poll(self) -> None:
+                return None
+
+        process = FakePopen()
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            with (
+                mock.patch.object(
+                    manager, "_resolve_command", return_value=["coding-tools-mcp"]
+                ),
+                mock.patch.object(manager, "_wait_for_port_state", return_value=True),
+                mock.patch.object(manager, "_find_pid_by_port", return_value=None),
+                mock.patch.object(manager, "_terminate_live_process_tree") as terminate,
+                mock.patch.object(
+                    runtime,
+                    "log_dir_for_profile",
+                    return_value=Path(temporary_directory),
+                ),
+                mock.patch.object(runtime.subprocess, "Popen", return_value=process),
+            ):
+                started_process, runtime_pid = manager._start_runtime_process(profile)
+
+        self.assertIs(started_process, process)
+        self.assertEqual(runtime_pid, 4242)
+        terminate.assert_not_called()
+
     def test_bearer_token_is_passed_via_environment_only(self) -> None:
         profile = build_profile(str(REPO_ROOT), "review")
         profile.auth.type = "bearer"
