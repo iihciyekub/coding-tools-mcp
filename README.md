@@ -114,12 +114,16 @@ authenticated Cloudflare Tunnel. Ephemeral compute, no server of your own.
 **5. Drive it from a GUI.**
 
 ```bash
-python -m pip install "coding-tools-mcp[desktop]"
-coding-tools-mcp-desktop
+cd apps/desktop-client
+npm install
+npm run tauri dev
 ```
 
-Per-workspace profiles, server and tunnel start/stop, credential setup with
-clipboard helpers, live health checks. English and 简体中文.
+The Tauri desktop app provides per-workspace profiles, server and tunnel
+start/stop, OS-keychain credential storage, clipboard helpers, and live health
+checks. It uses the native system webview and ships one React UI for macOS,
+Windows, and Linux. English and 简体中文. →
+[Desktop client](apps/desktop-client/README.md)
 
 **6. Keep an interactive command alive.** `exec_command` starts a REPL or
 debugger under a real PTY; `write_stdin` feeds it across turns; `read_output`

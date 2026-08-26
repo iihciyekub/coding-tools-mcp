@@ -1,0 +1,280 @@
+use rand::distr::{Alphanumeric, SampleString};
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+use uuid::Uuid;
+
+pub const MCP_ENDPOINT_PATH: &str = "/mcp";
+
+fn default_tunnel_type() -> String {
+    "cloudflare".into()
+}
+fn default_cloudflare_mode() -> String {
+    "quick".into()
+}
+fn default_auth_type() -> String {
+    "oauth".into()
+}
+fn default_permission_mode() -> String {
+    "trusted".into()
+}
+fn default_port() -> u16 {
+    28766
+}
+
+fn new_secret() -> String {
+    Alphanumeric.sample_string(&mut rand::rng(), 48)
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct TunnelConfig {
+    #[serde(default = "default_tunnel_type")]
+    pub r#type: String,
+    #[serde(default)]
+    pub public_url: String,
+    #[serde(default)]
+    pub frp_server: String,
+    #[serde(default)]
+    pub frp_subdomain: String,
+    #[serde(default = "default_cloudflare_mode")]
+    pub cloudflare_mode: String,
+    #[serde(default)]
+    pub cloudflare_token: String,
+}
+
+impl Default for TunnelConfig {
+    fn default() -> Self {
+        Self {
+            r#type: default_tunnel_type(),
+            public_url: String::new(),
+            frp_server: String::new(),
+            frp_subdomain: String::new(),
+            cloudflare_mode: default_cloudflare_mode(),
+            cloudflare_token: String::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AuthConfig {
+    #[serde(default = "default_auth_type")]
+    pub r#type: String,
+    #[serde(default = "new_secret")]
+    pub oauth_password: String,
+    #[serde(default = "new_secret")]
+    pub oauth_token_secret: String,
+    #[serde(default = "new_secret")]
+    pub bearer_token: String,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            r#type: default_auth_type(),
+            oauth_password: new_secret(),
+            oauth_token_secret: new_secret(),
+            bearer_token: new_secret(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RuntimeConfig {
+    #[serde(default = "default_port")]
+    pub local_port: u16,
+    #[serde(default = "default_permission_mode")]
+    pub permission_mode: String,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            local_port: default_port(),
+            permission_mode: default_permission_mode(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct WorkspaceProfile {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    #[serde(default)]
+    pub tunnel: TunnelConfig,
+    #[serde(default)]
+    pub auth: AuthConfig,
+    #[serde(default)]
+    pub runtime: RuntimeConfig,
+}
+
+impl WorkspaceProfile {
+    pub fn new(path: String, port: u16) -> Result<Self, String> {
+        let cleaned = Path::new(path.trim());
+        if !cleaned.is_dir() {
+            return Err(format!(
+                "Workspace directory does not exist: {}",
+                cleaned.display()
+            ));
+        }
+        let name = cleaned
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("Workspace")
+            .to_string();
+        Ok(Self {
+            id: Uuid::new_v4().simple().to_string(),
+            name,
+            path: cleaned.to_string_lossy().to_string(),
+            tunnel: TunnelConfig::default(),
+            auth: AuthConfig::default(),
+            runtime: RuntimeConfig {
+                local_port: port,
+                ..RuntimeConfig::default()
+            },
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !Path::new(&self.path).is_dir() {
+            return Err(format!("Workspace directory does not exist: {}", self.path));
+        }
+        if self.name.trim().is_empty() {
+            return Err("Workspace name cannot be empty.".into());
+        }
+        if self.runtime.local_port < 1024 {
+            return Err("Local port must be between 1024 and 65535.".into());
+        }
+        if !matches!(
+            self.runtime.permission_mode.as_str(),
+            "safe" | "trusted" | "dangerous"
+        ) {
+            return Err("Unknown permission mode.".into());
+        }
+        if !matches!(self.auth.r#type.as_str(), "oauth" | "bearer") {
+            return Err("Unknown authentication type.".into());
+        }
+        if self.auth.r#type == "oauth" && self.auth.oauth_password.trim().is_empty() {
+            return Err("OAuth mode requires an authorization password.".into());
+        }
+        if self.auth.r#type == "bearer" && self.auth.bearer_token.trim().is_empty() {
+            return Err("Bearer mode requires a token.".into());
+        }
+        match self.tunnel.r#type.as_str() {
+            "cloudflare" => {
+                if !matches!(self.tunnel.cloudflare_mode.as_str(), "quick" | "named") {
+                    return Err("Unknown Cloudflare mode.".into());
+                }
+                if self.tunnel.cloudflare_mode == "named" {
+                    if self.tunnel.cloudflare_token.trim().is_empty() {
+                        return Err("A named Cloudflare tunnel requires a Tunnel Token.".into());
+                    }
+                    let url = self.tunnel.public_url.trim();
+                    let origin = url
+                        .strip_prefix("https://")
+                        .unwrap_or_default()
+                        .trim_end_matches('/');
+                    if origin.is_empty()
+                        || origin.contains(['/', '?', '#'])
+                        || origin.chars().any(char::is_whitespace)
+                    {
+                        return Err("Public URL must be an HTTPS origin without a path.".into());
+                    }
+                }
+            }
+            "frp" => {
+                if self.tunnel.frp_server.trim().is_empty()
+                    || self.tunnel.frp_subdomain.trim().is_empty()
+                {
+                    return Err("FRP requires a server domain and subdomain.".into());
+                }
+            }
+            _ => return Err("Unknown tunnel type.".into()),
+        }
+        Ok(())
+    }
+
+    pub fn public_url(&self) -> String {
+        if self.tunnel.r#type == "frp" {
+            format!(
+                "https://{}.{}",
+                self.tunnel.frp_subdomain.trim(),
+                self.tunnel.frp_server.trim()
+            )
+        } else if self.tunnel.cloudflare_mode == "named" {
+            self.tunnel.public_url.trim_end_matches('/').to_string()
+        } else {
+            String::new()
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct RuntimeStatus {
+    pub state: String,
+    pub pid: Option<u32>,
+    pub local_message: String,
+    pub public_message: String,
+    pub public_url: String,
+    pub local_url: String,
+}
+
+impl RuntimeStatus {
+    pub fn stopped(port: u16) -> Self {
+        Self {
+            state: "stopped".into(),
+            pid: None,
+            local_message: "Not running".into(),
+            public_message: "Unknown".into(),
+            public_url: String::new(),
+            local_url: format!("http://127.0.0.1:{port}{MCP_ENDPOINT_PATH}"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct LogBundle {
+    pub cloudflared: String,
+    pub stderr: String,
+    pub stdout: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_urls_are_deterministic() {
+        let mut profile = WorkspaceProfile::new(
+            std::env::current_dir()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+            28766,
+        )
+        .unwrap();
+        profile.tunnel.r#type = "frp".into();
+        profile.tunnel.frp_server = "example.com".into();
+        profile.tunnel.frp_subdomain = "code".into();
+        assert_eq!(profile.public_url(), "https://code.example.com");
+    }
+
+    #[test]
+    fn named_tunnels_require_a_clean_https_origin() {
+        let mut profile = WorkspaceProfile::new(
+            std::env::current_dir()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+            28766,
+        )
+        .unwrap();
+        profile.tunnel.cloudflare_mode = "named".into();
+        profile.tunnel.cloudflare_token = "eyJ-example".into();
+        profile.tunnel.public_url = "https://mcp.example.com/path".into();
+        assert!(profile.validate().is_err());
+
+        profile.tunnel.public_url = "https://mcp.example.com/".into();
+        assert!(profile.validate().is_ok());
+        assert_eq!(profile.public_url(), "https://mcp.example.com");
+    }
+}

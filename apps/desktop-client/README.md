@@ -1,70 +1,90 @@
-# MCP 桌面客户端
+# Coding Tools MCP Desktop
 
-这是 `coding-tools-mcp` 的 Python 桌面客户端 MVP，核心目标是让研发同学用一个中文界面完成：
+The desktop client is a Tauri 2 application with a React/Vite webview and a
+small Rust control plane. The Python MCP runtime remains independent and is
+started as a child process; the webview never receives a general-purpose shell
+API.
 
-- 管理多个 Workspace
-- 配置公网暴露地址，当前支持外部托管的 FRP 和由客户端管理的 Cloudflare
-- 配置 OAuth / Bearer / NoAuth
-- 启动和停止本地 MCP 运行时
-- 查看运行日志和当前入口地址
-- 直接复制 ChatGPT 自定义 MCP 应用需要填写的核心字段
+## Features
 
-## 运行
+- Multiple workspace profiles with one fixed local port per workspace
+- Safe, trusted, and dangerous MCP permission modes
+- OAuth and bearer-token authentication
+- Cloudflare quick and named tunnels, plus externally managed FRP
+- Live runtime/tunnel status and bounded logs
+- Secrets stored in the operating-system keychain
+- English and Simplified Chinese UI
+- Native process-group cleanup when the app exits
 
-```bash
-python -m pip install -e ".[desktop]"
-coding-tools-mcp-desktop
-```
+The first launch imports the previous PySide client's `profiles.json`. Legacy
+`secrets.json` values are moved into the system keychain and the plaintext file
+is removed after a successful migration.
 
-也可以继续从源码直接运行：
+## Development
 
-```bash
-python apps/desktop-client/main.py
-```
+Requirements:
 
-## 依赖
-
-- Python 3.11+
-- PySide6
-- psutil
-- `uvx` 或 `coding-tools-mcp` 已在 PATH 中可用
-
-## 语言
-
-客户端首次启动时跟随系统语言，目前内置：
-
-- English
-- 简体中文
-
-可以在左侧语言选择框中即时切换，选择结果会通过 Qt 设置持久化。系统语言不受支持时默认使用英文。
-
-更新界面文本后，使用 PySide6 Linguist 工具刷新并检查翻译目录：
+- Node.js 24+
+- Rust 1.84+
+- `uvx` or `coding-tools-mcp` on the login-shell PATH
+- `cloudflared` for Cloudflare profiles
 
 ```bash
-make desktop-i18n-update
-make desktop-i18n-release
-python scripts/check_desktop_i18n.py
+cd apps/desktop-client
+npm install
+npm run tauri dev
 ```
 
-## ChatGPT 接入
+Frontend and Rust checks:
 
-当认证方式选择 `oauth` 后，界面里会直接展示并支持复制：
+```bash
+make desktop-check
+```
 
-- 连接地址
-- OAuth 客户端 ID
-- OAuth 客户端密钥
-- 授权口令
+Build the native application bundle/installer:
 
-如果你使用 FRP，请把 Workspace、本地端口、FRP 子域名和服务器域名配好，复制界面生成的 FRP 片段，并在同一台主机上的 `frpc` 配置中应用它。桌面客户端只管理本地 MCP 运行时，不会替你启动或重载 `frpc`；界面显示的 FRP 公网地址也需要外部 `frpc` 正常运行后才可访问。
+```bash
+make desktop-build
+```
 
-如果你使用 Cloudflare，有两种模式：
+On Apple Silicon, install native tools through `/opt/homebrew`; the runtime
+resolver deliberately prefers `/opt/homebrew/bin/cloudflared` over an older
+Rosetta `/usr/local/bin/cloudflared`.
 
-- 临时隧道：使用 `cloudflared tunnel --url`，启动后自动分配一个 `trycloudflare.com` 公网地址
-- 固定域名：使用 `Tunnel Token` 启动命名隧道，并在界面里填写固定公网地址
+## ChatGPT on the web
 
-## 当前限制
+ChatGPT cannot reach the local `127.0.0.1` URL on your Mac. Start the workspace
+and wait for the Cloudflare tunnel to become healthy, then use the top-right
+**Copy MCP** button. It copies the public HTTPS endpoint ending in `/mcp` and
+stays disabled until that endpoint exists. **Copy auth code** copies the OAuth
+authorization password (or the bearer token for a bearer profile).
 
-- FRP 当前是外部托管模式；客户端只生成配置片段，不管理 `frpc` 进程
-- `Ngrok`、`Dev Tunnel` 还没有实现真实隧道启动能力
-- Cloudflare 命名隧道模式依赖你提前在 Cloudflare 仪表盘里配置好 tunnel 和 hostname
-- Cloudflare 命名隧道模式下，本地服务地址需要和 Cloudflare Tunnel 的 ingress 目标一致，通常是 `http://127.0.0.1:<本地端口>`
+A Quick Tunnel is suitable for personal/developer testing while this app stays
+open; its hostname changes after restart. Use a named Cloudflare tunnel and a
+stable HTTPS hostname for a durable ChatGPT connection or production use.
+
+For example, to use `mcp.iiaide.com` with local port `28767`:
+
+1. In Cloudflare, open **Networking → Tunnels**, create/select a remotely
+   managed tunnel, and add a **Published application** route.
+2. Set the hostname to `mcp.iiaide.com` and the service URL to
+   `http://127.0.0.1:28767`.
+3. Choose **Add a replica** and copy only the `eyJ…` token from the generated
+   `cloudflared` installation command.
+4. In this app choose **Cloudflare → Named tunnel (recommended)**, enter
+   `https://mcp.iiaide.com` and that Tunnel Token, then save and start.
+5. When the status is Running, **Copy MCP** returns
+   `https://mcp.iiaide.com/mcp` for ChatGPT on the web.
+
+## Security model
+
+- The webview can call only the commands declared in `src-tauri/src/lib.rs`.
+- There is no arbitrary command field or shell command bridge.
+- The MCP server always binds to `127.0.0.1`.
+- Public access is handled by an authenticated tunnel.
+- NoAuth remains available in the core CLI for loopback-only development, but
+  is intentionally excluded from this public-tunnel desktop client.
+- Runtime and tunnel processes are placed in dedicated process groups and are
+  stopped together on app exit.
+- Configuration is public metadata in `~/.coding-tools-mcp-desktop/profiles.json`;
+  credentials are stored in Keychain/Credential Manager/Secret Service.

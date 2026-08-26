@@ -104,12 +104,16 @@ PR，用完即毁。→ [docs/docker.md](docs/docker.md)
 **5. 用图形界面操作。**
 
 ```bash
-python -m pip install "coding-tools-mcp[desktop]"
-coding-tools-mcp-desktop
+cd apps/desktop-client
+npm install
+npm run tauri dev
 ```
 
-按工作区管理配置、一键启停服务器与隧道、凭证设置带剪贴板助手、实时健康
-检查。支持英文与简体中文。
+全新的 Tauri 桌面端使用系统 WebView 和一套 React 界面覆盖 macOS、Windows 与
+Linux：按工作区管理配置、一键启停服务器与隧道、凭证写入系统钥匙串、剪贴板
+助手和实时健康检查。右上角可直接复制网页版 ChatGPT 所需的公网 MCP 地址和
+授权口令；公网隧道尚未就绪时不会误复制本地 `127.0.0.1` 地址。支持英文与简体中文。
+→ [桌面客户端](apps/desktop-client/README.md)
 
 **6. 保持一个活着的交互式命令。**`exec_command` 在真实 PTY 下启动 REPL 或
 调试器；`write_stdin` 跨轮次喂输入；`read_output` 分页读取长输出；

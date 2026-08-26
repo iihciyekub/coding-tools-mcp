@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Replaced the PySide/psutil desktop client with a Tauri 2 application using a
+  React system-webview UI and a small Rust process controller. The new client
+  owns runtime and tunnel process groups directly, stores credentials in the
+  OS keychain, supports Cloudflare Quick and named tunnels, and exposes
+  ChatGPT-web copy actions only when a public MCP endpoint is running.
 - Moved the source-checkout tunnel launchers to `integrations/tunnels/` so user-facing runtime integrations no longer live under repository-maintenance scripts. The previously documented `scripts/tunnel.sh` entry point remains as a compatibility wrapper.
 - Organized repository-owned components by responsibility: the npm launcher now lives in `packages/npm-launcher/`, the Cloudflare sandbox control plane in `infra/cloudflare/sandbox-control/`, and promo-video sources in `media/promo-video/`.
 
