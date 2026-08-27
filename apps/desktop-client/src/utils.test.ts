@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { WorkspaceProfile } from "./types";
-import { frpSnippet, publicEndpoint } from "./utils";
+import { frpSnippet, normalizeDomain, publicEndpoint, recommendedPublicUrl } from "./utils";
 
 const profile: WorkspaceProfile = {
   id: "a".repeat(32),
@@ -8,6 +8,7 @@ const profile: WorkspaceProfile = {
   path: "/work/tax",
   tunnel: {
     type: "frp",
+    domain: "",
     public_url: "",
     frp_server: "example.com",
     frp_subdomain: "tax",
@@ -26,5 +27,10 @@ describe("desktop URL helpers", () => {
   it("builds a safe FRP snippet", () => {
     expect(frpSnippet(profile)).toContain('name = "tax-review-mcp"');
     expect(frpSnippet(profile)).toContain("localPort = 28767");
+  });
+
+  it("normalizes a domain and recommends a workspace-specific public URL", () => {
+    expect(normalizeDomain(" HTTPS://Example.COM/path ")).toBe("example.com");
+    expect(recommendedPublicUrl("Tax Review", "example.com")).toBe("https://tax-review-mcp.example.com");
   });
 });

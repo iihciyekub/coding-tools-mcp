@@ -87,8 +87,11 @@ impl ProfileStore {
                 .keys()
                 .all(|profile_id| profile_ids.contains(profile_id.as_str()));
         for profile in &mut document.profiles {
-            match load_secrets(&profile.id) {
-                Ok(Some(secrets)) => secrets.apply(profile),
+            let can_repair_secret = match load_secrets(&profile.id) {
+                Ok(Some(secrets)) => {
+                    secrets.apply(profile);
+                    true
+                }
                 Ok(None) => {
                     if let Some(secrets) = legacy.get(&profile.id) {
                         secrets.clone().apply(profile);
@@ -96,13 +99,20 @@ impl ProfileStore {
                             migrated_all = false;
                         }
                     }
+                    true
                 }
                 Err(_) => {
                     migrated_all = false;
                     if let Some(secrets) = legacy.get(&profile.id) {
                         secrets.clone().apply(profile);
+                        true
+                    } else {
+                        false
                     }
                 }
+            };
+            if can_repair_secret && profile.auth.repair_oauth_token_secret() {
+                save_secrets(profile)?;
             }
         }
         if migrated_all {
@@ -137,6 +147,25 @@ impl ProfileStore {
             .cloned()
     }
 
+    pub fn prepare_for_start(&mut self, id: &str) -> Result<WorkspaceProfile, String> {
+        let candidate = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .cloned()
+            .ok_or("Workspace profile was not found.")?;
+        validate_profile_uniqueness(&self.profiles, &candidate)?;
+        let profile = self
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.id == id)
+            .ok_or("Workspace profile was not found.")?;
+        if profile.auth.repair_oauth_token_secret() {
+            save_secrets(profile)?;
+        }
+        Ok(profile.clone())
+    }
+
     pub fn next_port(&self) -> u16 {
         (28766..=65535)
             .find(|port| {
@@ -153,6 +182,7 @@ impl ProfileStore {
         if self.profiles.iter().any(|item| item.id == profile.id) {
             return Err("Workspace profile already exists.".into());
         }
+        validate_profile_uniqueness(&self.profiles, &profile)?;
         save_secrets(&profile)?;
         self.profiles.push(profile.clone());
         self.persist()?;
@@ -161,11 +191,7 @@ impl ProfileStore {
 
     pub fn update(&mut self, profile: WorkspaceProfile) -> Result<WorkspaceProfile, String> {
         profile.validate()?;
-        if self.profiles.iter().any(|item| {
-            item.id != profile.id && item.runtime.local_port == profile.runtime.local_port
-        }) {
-            return Err("Another workspace already uses this local port.".into());
-        }
+        validate_profile_uniqueness(&self.profiles, &profile)?;
         let target = self
             .profiles
             .iter_mut()
@@ -215,6 +241,41 @@ impl ProfileStore {
             },
         )
     }
+}
+
+fn validate_profile_uniqueness(
+    profiles: &[WorkspaceProfile],
+    candidate: &WorkspaceProfile,
+) -> Result<(), String> {
+    for existing in profiles
+        .iter()
+        .filter(|existing| existing.id != candidate.id)
+    {
+        if existing.runtime.local_port == candidate.runtime.local_port {
+            return Err("Another workspace already uses this local port.".into());
+        }
+        let both_named = existing.tunnel.r#type == "cloudflare"
+            && existing.tunnel.cloudflare_mode == "named"
+            && candidate.tunnel.r#type == "cloudflare"
+            && candidate.tunnel.cloudflare_mode == "named";
+        if !both_named {
+            continue;
+        }
+        let existing_url = existing.tunnel.public_url.trim_end_matches('/');
+        let candidate_url = candidate.tunnel.public_url.trim_end_matches('/');
+        if existing_url.eq_ignore_ascii_case(candidate_url) {
+            return Err("Another workspace already uses this Cloudflare public URL.".into());
+        }
+        let existing_token = existing.tunnel.cloudflare_token.trim();
+        let candidate_token = candidate.tunnel.cloudflare_token.trim();
+        if !candidate_token.is_empty() && existing_token == candidate_token {
+            return Err(
+                "Another workspace already uses this Cloudflare Tunnel Token. Create a separate named tunnel for this workspace."
+                    .into(),
+            );
+        }
+    }
+    Ok(())
 }
 
 fn save_secrets(profile: &WorkspaceProfile) -> Result<(), String> {
@@ -288,5 +349,33 @@ mod tests {
         let value = serde_json::json!({"local_port": 28766, "permission_mode": "trusted", "runtime_command": "unsafe"});
         let runtime: crate::models::RuntimeConfig = serde_json::from_value(value).unwrap();
         assert_eq!(runtime.local_port, 28766);
+    }
+
+    #[test]
+    fn independent_workspaces_require_unique_ports_urls_and_tunnel_tokens() {
+        let root = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let mut first = WorkspaceProfile::new(root.clone(), 28766).unwrap();
+        first.tunnel.cloudflare_mode = "named".into();
+        first.tunnel.public_url = "https://tax-mcp.example.com".into();
+        first.tunnel.cloudflare_token = "tax-token".into();
+
+        let mut second = WorkspaceProfile::new(root, 28766).unwrap();
+        assert!(validate_profile_uniqueness(&[first.clone()], &second).is_err());
+
+        second.runtime.local_port = 28767;
+        second.tunnel.cloudflare_mode = "named".into();
+        second.tunnel.public_url = "https://tax-mcp.example.com/".into();
+        second.tunnel.cloudflare_token = "wos-token".into();
+        assert!(validate_profile_uniqueness(&[first.clone()], &second).is_err());
+
+        second.tunnel.public_url = "https://wos-mcp.example.com".into();
+        second.tunnel.cloudflare_token = "tax-token".into();
+        assert!(validate_profile_uniqueness(&[first.clone()], &second).is_err());
+
+        second.tunnel.cloudflare_token = "wos-token".into();
+        assert!(validate_profile_uniqueness(&[first], &second).is_ok());
     }
 }

@@ -1,1 +1,1 @@
-{"main-window":{"identifier":"main-window","description":"The desktop UI can select workspaces and copy connection details.","local":true,"windows":["main"],"permissions":["core:default","dialog:allow-open","clipboard-manager:allow-write-text"]}}
+{"main-window":{"identifier":"main-window","description":"The desktop UI can select workspaces and copy connection details.","local":true,"windows":["main"],"permissions":["core:default","core:window:allow-start-dragging","dialog:allow-open","clipboard-manager:allow-write-text"]}}

@@ -103,10 +103,8 @@ async fn start_profile(
     let runtime = Arc::clone(&state.runtime);
     tauri::async_runtime::spawn_blocking(move || {
         let (profile, log_dir) = {
-            let store = store.lock().map_err(|_| "Profile store is unavailable.")?;
-            let profile = store
-                .get(&profile_id)
-                .ok_or("Workspace profile was not found.")?;
+            let mut store = store.lock().map_err(|_| "Profile store is unavailable.")?;
+            let profile = store.prepare_for_start(&profile_id)?;
             let log_dir = store.log_dir(&profile_id)?;
             (profile, log_dir)
         };

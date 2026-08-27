@@ -6,6 +6,7 @@ export type RuntimeState = "stopped" | "starting" | "running" | "stopping" | "er
 
 export interface TunnelConfig {
   type: TunnelType;
+  domain: string;
   public_url: string;
   frp_server: string;
   frp_subdomain: string;

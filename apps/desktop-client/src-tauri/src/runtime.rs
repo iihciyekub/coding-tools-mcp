@@ -502,4 +502,11 @@ mod tests {
     fn loopback_probe_rejects_an_unused_port() {
         assert!(!port_is_listening(1));
     }
+
+    #[test]
+    fn loopback_probe_detects_a_running_listener() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(port_is_listening(port));
+    }
 }

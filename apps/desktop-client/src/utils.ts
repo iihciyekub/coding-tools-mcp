@@ -1,5 +1,25 @@
 import type { WorkspaceProfile } from "./types";
 
+export function normalizeDomain(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .split(/[/?#]/, 1)[0]
+    .replace(/^\.+|\.+$/g, "");
+}
+
+export function recommendedPublicUrl(workspaceName: string, domain: string): string {
+  const normalizedDomain = normalizeDomain(domain);
+  if (!normalizedDomain) return "";
+  const workspaceSlug = workspaceName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "workspace";
+  const hostname = workspaceSlug.endsWith("-mcp") ? workspaceSlug : `${workspaceSlug}-mcp`;
+  return `https://${hostname}.${normalizedDomain}`;
+}
+
 export function publicEndpoint(profile: WorkspaceProfile, resolvedUrl = ""): string {
   let base = resolvedUrl.trim();
   if (!base && profile.tunnel.type === "cloudflare" && profile.tunnel.cloudflare_mode === "named") {

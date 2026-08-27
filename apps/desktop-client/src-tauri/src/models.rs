@@ -25,10 +25,29 @@ fn new_secret() -> String {
     Alphanumeric.sample_string(&mut rand::rng(), 48)
 }
 
+fn new_oauth_token_secret() -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let bytes: [u8; 32] = rand::random();
+    let mut secret = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        secret.push(HEX[(byte >> 4) as usize] as char);
+        secret.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    secret
+}
+
+fn valid_oauth_token_secret(secret: &str) -> bool {
+    secret.len() >= 64
+        && secret.len() % 2 == 0
+        && secret.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TunnelConfig {
     #[serde(default = "default_tunnel_type")]
     pub r#type: String,
+    #[serde(default)]
+    pub domain: String,
     #[serde(default)]
     pub public_url: String,
     #[serde(default)]
@@ -45,6 +64,7 @@ impl Default for TunnelConfig {
     fn default() -> Self {
         Self {
             r#type: default_tunnel_type(),
+            domain: String::new(),
             public_url: String::new(),
             frp_server: String::new(),
             frp_subdomain: String::new(),
@@ -60,7 +80,7 @@ pub struct AuthConfig {
     pub r#type: String,
     #[serde(default = "new_secret")]
     pub oauth_password: String,
-    #[serde(default = "new_secret")]
+    #[serde(default = "new_oauth_token_secret")]
     pub oauth_token_secret: String,
     #[serde(default = "new_secret")]
     pub bearer_token: String,
@@ -71,7 +91,7 @@ impl Default for AuthConfig {
         Self {
             r#type: default_auth_type(),
             oauth_password: new_secret(),
-            oauth_token_secret: new_secret(),
+            oauth_token_secret: new_oauth_token_secret(),
             bearer_token: new_secret(),
         }
     }
@@ -208,6 +228,16 @@ impl WorkspaceProfile {
     }
 }
 
+impl AuthConfig {
+    pub(crate) fn repair_oauth_token_secret(&mut self) -> bool {
+        if valid_oauth_token_secret(&self.oauth_token_secret) {
+            return false;
+        }
+        self.oauth_token_secret = new_oauth_token_secret();
+        true
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct RuntimeStatus {
     pub state: String,
@@ -276,5 +306,27 @@ mod tests {
         profile.tunnel.public_url = "https://mcp.example.com/".into();
         assert!(profile.validate().is_ok());
         assert_eq!(profile.public_url(), "https://mcp.example.com");
+    }
+
+    #[test]
+    fn oauth_token_secrets_are_hex_encoded_32_byte_keys() {
+        let auth = AuthConfig::default();
+        assert_eq!(auth.oauth_token_secret.len(), 64);
+        assert!(auth
+            .oauth_token_secret
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn invalid_oauth_token_secrets_are_repaired_without_rotating_valid_keys() {
+        let mut auth = AuthConfig {
+            oauth_token_secret: "not-hex".into(),
+            ..AuthConfig::default()
+        };
+        assert!(auth.repair_oauth_token_secret());
+        let repaired = auth.oauth_token_secret.clone();
+        assert!(!auth.repair_oauth_token_secret());
+        assert_eq!(auth.oauth_token_secret, repaired);
     }
 }

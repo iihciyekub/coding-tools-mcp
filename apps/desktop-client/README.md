@@ -56,8 +56,8 @@ Rosetta `/usr/local/bin/cloudflared`.
 ChatGPT cannot reach the local `127.0.0.1` URL on your Mac. Start the workspace
 and wait for the Cloudflare tunnel to become healthy, then use the top-right
 **Copy MCP** button. It copies the public HTTPS endpoint ending in `/mcp` and
-stays disabled until that endpoint exists. **Copy auth code** copies the OAuth
-authorization password (or the bearer token for a bearer profile).
+stays disabled until that endpoint exists. **Copy password** copies the OAuth
+authorization password; bearer profiles show **Copy token** instead.
 
 A Quick Tunnel is suitable for personal/developer testing while this app stays
 open; its hostname changes after restart. Use a named Cloudflare tunnel and a
