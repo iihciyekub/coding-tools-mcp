@@ -6,7 +6,19 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-const KEYRING_SERVICE: &str = "coding-tools-mcp-desktop";
+fn keyring_service() -> &'static str {
+    match option_env!("CODING_TOOLS_MCP_BUILD_CHANNEL") {
+        Some("preview") => "coding-tools-mcp-desktop-preview",
+        _ => "coding-tools-mcp-desktop",
+    }
+}
+
+fn storage_directory_name() -> &'static str {
+    match option_env!("CODING_TOOLS_MCP_BUILD_CHANNEL") {
+        Some("preview") => ".coding-tools-mcp-desktop-preview",
+        _ => ".coding-tools-mcp-desktop",
+    }
+}
 
 #[derive(Default, Deserialize, Serialize)]
 struct ProfileDocument {
@@ -53,7 +65,7 @@ impl ProfileStore {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .ok_or("Could not resolve the user home directory.")?
-            .join(".coding-tools-mcp-desktop");
+            .join(storage_directory_name());
         Self::open(home)
     }
 
@@ -209,7 +221,7 @@ impl ProfileStore {
         if self.profiles.len() == length {
             return Err("Workspace profile was not found.".into());
         }
-        if let Ok(entry) = Entry::new(KEYRING_SERVICE, id) {
+        if let Ok(entry) = Entry::new(keyring_service(), id) {
             let _ = entry.delete_credential();
         }
         let _ = fs::remove_dir_all(self.log_dir(id)?);
@@ -281,14 +293,14 @@ fn validate_profile_uniqueness(
 fn save_secrets(profile: &WorkspaceProfile) -> Result<(), String> {
     let encoded = serde_json::to_string(&ProfileSecrets::from_profile(profile))
         .map_err(|error| error.to_string())?;
-    Entry::new(KEYRING_SERVICE, &profile.id)
+    Entry::new(keyring_service(), &profile.id)
         .map_err(|error| format!("Could not open the system keychain: {error}"))?
         .set_password(&encoded)
         .map_err(|error| format!("Could not save secrets to the system keychain: {error}"))
 }
 
 fn load_secrets(id: &str) -> Result<Option<ProfileSecrets>, String> {
-    let entry = Entry::new(KEYRING_SERVICE, id).map_err(|error| error.to_string())?;
+    let entry = Entry::new(keyring_service(), id).map_err(|error| error.to_string())?;
     match entry.get_password() {
         Ok(encoded) => serde_json::from_str(&encoded)
             .map(Some)

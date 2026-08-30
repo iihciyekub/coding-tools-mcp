@@ -5,7 +5,9 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "core:window:allow-start-dragging",
+    "core:window:allow-set-focus",
+    "core:window:allow-set-size",
+    "core:window:allow-show",
     "dialog:allow-open",
     "clipboard-manager:allow-write-text"
   ]

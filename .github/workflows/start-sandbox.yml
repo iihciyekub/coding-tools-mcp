@@ -297,7 +297,6 @@ jobs:
           if [[ -n "$PUBLIC_SERVER_URL" ]]; then
             docker_args+=(-e "CODING_TOOLS_MCP_SERVER_URL=$PUBLIC_SERVER_URL")
           fi
-
           docker run "${docker_args[@]}" "$IMAGE"
 
           for _ in {1..60}; do

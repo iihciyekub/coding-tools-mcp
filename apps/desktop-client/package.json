@@ -1,7 +1,7 @@
 {
   "name": "coding-tools-mcp-desktop",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.3.9",
   "type": "module",
   "scripts": {
     "dev": "vite",

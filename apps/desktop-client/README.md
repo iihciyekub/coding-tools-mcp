@@ -7,11 +7,10 @@ API.
 
 ## Features
 
-- Multiple workspace profiles with one fixed local port per workspace
-- Safe, trusted, and dangerous MCP permission modes
-- OAuth and bearer-token authentication
-- Cloudflare quick and named tunnels, plus externally managed FRP
-- Live runtime/tunnel status and bounded logs
+- Compact menu-bar panel with no macOS Dock icon
+- Multiple workspace profiles with one automatically assigned local port per workspace
+- One-click OAuth runtime startup through Cloudflare Quick Tunnels
+- Live runtime/tunnel status with copyable Server URL and OAuth authorization passcode
 - Secrets stored in the operating-system keychain
 - English and Simplified Chinese UI
 - Native process-group cleanup when the app exits
@@ -53,28 +52,15 @@ Rosetta `/usr/local/bin/cloudflared`.
 
 ## ChatGPT on the web
 
-ChatGPT cannot reach the local `127.0.0.1` URL on your Mac. Start the workspace
-and wait for the Cloudflare tunnel to become healthy, then use the top-right
-**Copy MCP** button. It copies the public HTTPS endpoint ending in `/mcp` and
-stays disabled until that endpoint exists. **Copy password** copies the OAuth
-authorization password; bearer profiles show **Copy token** instead.
+ChatGPT cannot reach the local `127.0.0.1` URL on your Mac. Click the menu-bar
+icon, add a workspace folder, and start it. The app creates a Cloudflare Quick
+Tunnel automatically. When the status is healthy, **Server URL** copies the
+temporary public HTTPS endpoint ending in `/mcp`, and **Authorization passcode**
+copies the OAuth authorization passcode. Starting a workspace also copies its
+Server URL to the clipboard automatically.
 
-A Quick Tunnel is suitable for personal/developer testing while this app stays
-open; its hostname changes after restart. Use a named Cloudflare tunnel and a
-stable HTTPS hostname for a durable ChatGPT connection or production use.
-
-For example, to use `mcp.iiaide.com` with local port `28767`:
-
-1. In Cloudflare, open **Networking → Tunnels**, create/select a remotely
-   managed tunnel, and add a **Published application** route.
-2. Set the hostname to `mcp.iiaide.com` and the service URL to
-   `http://127.0.0.1:28767`.
-3. Choose **Add a replica** and copy only the `eyJ…` token from the generated
-   `cloudflared` installation command.
-4. In this app choose **Cloudflare → Named tunnel (recommended)**, enter
-   `https://mcp.iiaide.com` and that Tunnel Token, then save and start.
-5. When the status is Running, **Copy MCP** returns
-   `https://mcp.iiaide.com/mcp` for ChatGPT on the web.
+The temporary hostname changes whenever the workspace tunnel restarts. Update
+the custom MCP app address in ChatGPT after starting a new tunnel.
 
 ## Security model
 

@@ -1,6 +1,6 @@
 [package]
 name = "coding-tools-mcp-desktop"
-version = "0.3.0"
+version = "0.3.9"
 description = "Cross-platform desktop control plane for Coding Tools MCP"
 authors = ["Coding Tools MCP Contributors"]
 license = "Apache-2.0"
@@ -22,7 +22,7 @@ rand = "0.9"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-dialog = "2"
 thiserror = "2"
@@ -31,3 +31,7 @@ which = "8"
 
 [dev-dependencies]
 tempfile = "3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSView", "objc2-quartz-core"] }
+objc2-quartz-core = { version = "0.3", features = ["CALayer"] }
