@@ -6,7 +6,7 @@ properties, annotations, and error codes with the contract.
 
 ## Fixed inventory
 
-The default catalog contains exactly 18 tools:
+The default catalog contains exactly 49 tools:
 
 - `server_info`: server, workspace, automatic project context, policy, runtime,
   auth, protocol, and fixed-catalog metadata.
@@ -28,10 +28,89 @@ The default catalog contains exactly 18 tools:
 - `git_blame`: structured bounded line attribution.
 - `request_permissions`: report elicitation status without silently granting.
 - `view_image`: one MCP image content block plus structured metadata.
+- `browser_status`: connect to a loopback Chrome CDP endpoint through Playwright.
+- `browser_tabs`: list inspectable Chrome tabs.
+- `browser_active_tab`: return the currently visible Chrome tab when detectable.
+- `browser_snapshot`: return bounded visible text and simplified interactive DOM elements.
+- `browser_screenshot`: capture the selected tab as one MCP PNG image content block.
+- `browser_evaluate`: evaluate JavaScript in the selected tab.
+- `browser_click`: click an element using a Playwright selector.
+- `browser_type`: fill or type into an element using a Playwright selector.
+- `browser_console`: capture bounded console messages and page errors.
+- `browser_network`: inspect current resource timing and bounded network events.
+- `browser_inspect`: inspect one element's geometry, style, HTML, parents, and animations.
+- `code_symbols`: list bounded language-aware symbol definitions.
+- `code_definition`: find definitions for one symbol.
+- `code_references`: find exact identifier references for one symbol.
+- `chrome_extension_install`: install the local Native Messaging manifest and unpacked bridge extension files.
+- `chrome_extension_status`: report bridge install/connectivity state.
+- `chrome_extensions`: list installed Chrome extensions through the bridge.
+- `chrome_extension_tabs`: list Chrome tabs through extension APIs.
+- `chrome_extension_execute`: evaluate JavaScript through Chrome's debugger API.
+- `chrome_extension_send`: send an external message to an extension that permits it.
+- `app_accessibility`: report Accessibility trust and optionally open System Settings.
+- `app_list`: list running macOS applications.
+- `app_launch`: launch an application by name or bundle identifier.
+- `app_activate`: bring an application to the foreground.
+- `app_windows`: list Accessibility window metadata.
+- `app_snapshot`: return a bounded Accessibility UI hierarchy.
+- `app_click`: press or click a matched Accessibility element.
+- `app_type`: set/type text using Accessibility and keyboard events.
+- `app_press`: send a key plus modifiers.
+- `app_menu`: choose a hierarchical app menu item.
+- `app_screenshot`: capture an app window as one MCP PNG image block.
 
 `view_image` may be disabled when an installation cannot accept binary image
-content. That capability gate is not a tool profile. The other 17 tools are
+content. That capability gate is not a tool profile. The other 48 tools are
 always advertised, and `listChanged` is `false`.
+
+## Chrome extension bridge
+
+`chrome_extension_install` writes a per-user Chrome Native Messaging host
+manifest and copies the bundled Manifest V3 bridge extension to the user's
+application-support directory. Google Chrome requires the user to enable
+Developer mode and choose **Load unpacked** once; official Chrome builds no
+longer accept command-line unpacked-extension loading. By default the install
+tool opens `chrome://extensions` after staging the files. The bridge has a stable
+extension id and uses a local user-only Unix socket between the Native Messaging
+host and MCP runtimes. macOS release builds bundle one self-contained PyInstaller
+`onedir` MCP runtime plus a tiny Native Messaging launcher that `exec`s that
+same signed runtime in `--chrome-native-host` mode. This avoids a second Python
+bundle and avoids temporary extracted libraries under Hardened Runtime.
+
+`chrome_extension_send` can message another extension only when that target
+extension explicitly permits external messaging. Chrome's extension isolation
+is not bypassed.
+
+## macOS application control
+
+The `app_*` tools use macOS Accessibility/CGEvent APIs. UI inspection and input
+require Accessibility permission for Coding Tools MCP; `app_screenshot` may
+also require Screen Recording permission. Unsupported platforms return a
+structured `UNSUPPORTED_PLATFORM` failure instead of emulating GUI control.
+
+## Local Chrome connection
+
+The browser tools use Python Playwright only and attach to an already-running
+Chromium CDP endpoint. The default is `http://127.0.0.1:9222`; set
+`CODING_TOOLS_MCP_BROWSER_CDP_URL` or pass `endpoint` to override it. Remote
+hosts are rejected: the endpoint must be loopback (`127.0.0.1`, `localhost`, or
+`::1`).
+
+On macOS, a simple development launch is:
+
+```bash
+/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
+  --remote-debugging-address=127.0.0.1 \
+  --remote-debugging-port=9222 \
+  --user-data-dir=/tmp/coding-tools-mcp-chrome
+```
+
+Recent Chrome releases may ignore remote debugging against the normal default
+profile, so a non-default `--user-data-dir` is the reliable configuration. The
+MCP server never launches a browser and never calls `browser.close()` on an
+attached Chrome instance; each tool call opens a short-lived Playwright CDP
+client connection and drops only that connection when the call finishes.
 
 ## Result envelope
 
@@ -144,6 +223,9 @@ than labeling pipes as a TTY.
   snippets while retaining secret and destructive-command checks.
 - `dangerous`: disables command permission gates and Landlock; use only inside
   an isolated container or VM.
+- `host`: disables command gates and Landlock and preserves the server process's
+  full host environment, including HOME, SSH agent, Git credentials, and cache
+  locations. Use only with a trusted client and repository.
 
 These modes do not change the tool list. Direct path tools retain workspace
 confinement in every mode.

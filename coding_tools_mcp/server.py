@@ -32,6 +32,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
 from . import __version__
+from . import browser as browser_tools
+from . import chrome_bridge
+from . import code_intel
+from . import macos_apps
 from .envutils import ENV_PREFIX, truthy_env
 from .errors import JsonRpcError, ToolFailure
 from .landlock_exec import libc_syscall
@@ -130,6 +134,11 @@ RISKY_ENV_NAMES = {
     "RUBYOPT",
     "RUBYLIB",
 }
+SERVER_INTERNAL_SECRET_ENV_NAMES = {
+    f"{ENV_PREFIX}_AUTH_TOKEN",
+    f"{ENV_PREFIX}_OAUTH_PASSWORD",
+    f"{ENV_PREFIX}_OAUTH_TOKEN_SECRET",
+}
 SHELL_ENV_INHERIT_CHOICES = ("core", "all", "none")
 
 
@@ -144,6 +153,7 @@ class ModeCapabilities:
     secret_env_filter: bool
     global_tmp_write: str  # "blocked" | "tmp-prefix" | "allowed"
     skip_all_permissions: bool
+    host_environment: bool
 
 
 PERMISSION_MODE_CAPABILITIES: dict[str, ModeCapabilities] = {
@@ -155,6 +165,7 @@ PERMISSION_MODE_CAPABILITIES: dict[str, ModeCapabilities] = {
         secret_env_filter=True,
         global_tmp_write="blocked",
         skip_all_permissions=False,
+        host_environment=False,
     ),
     "trusted": ModeCapabilities(
         network=True,
@@ -164,6 +175,7 @@ PERMISSION_MODE_CAPABILITIES: dict[str, ModeCapabilities] = {
         secret_env_filter=True,
         global_tmp_write="tmp-prefix",
         skip_all_permissions=False,
+        host_environment=False,
     ),
     "dangerous": ModeCapabilities(
         network=True,
@@ -173,6 +185,17 @@ PERMISSION_MODE_CAPABILITIES: dict[str, ModeCapabilities] = {
         secret_env_filter=False,
         global_tmp_write="allowed",
         skip_all_permissions=True,
+        host_environment=False,
+    ),
+    "host": ModeCapabilities(
+        network=True,
+        shell_expansion=True,
+        inline_script=True,
+        landlock=False,
+        secret_env_filter=False,
+        global_tmp_write="allowed",
+        skip_all_permissions=True,
+        host_environment=True,
     ),
 }
 PERMISSION_MODE_CHOICES = tuple(PERMISSION_MODE_CAPABILITIES)
@@ -478,8 +501,13 @@ def fallback_runtime_dir_for_workspace(workspace: Path, instance_id: str) -> Pat
     return fallback / workspace_runtime_hash(workspace) / instance_id
 
 
-def shell_env_policy_from_args(args: argparse.Namespace) -> ShellEnvPolicy:
-    raw_inherit = args.shell_env_inherit or os.environ.get(f"{ENV_PREFIX}_SHELL_ENV_INHERIT") or "core"
+def shell_env_policy_from_args(args: argparse.Namespace, permission_mode: str = "safe") -> ShellEnvPolicy:
+    default_inherit = "all" if PERMISSION_MODE_CAPABILITIES[permission_mode].host_environment else "core"
+    raw_inherit = (
+        args.shell_env_inherit
+        or os.environ.get(f"{ENV_PREFIX}_SHELL_ENV_INHERIT")
+        or default_inherit
+    )
     inherit = raw_inherit.strip().lower()
     if inherit not in SHELL_ENV_INHERIT_CHOICES:
         supported = ", ".join(SHELL_ENV_INHERIT_CHOICES)
@@ -512,9 +540,9 @@ def fake_readonly_annotations_from_args(args: argparse.Namespace, permission_mod
     requested = bool(getattr(args, "dangerously_fake_readonly_annotations", False)) or truthy_env(
         os.environ.get(f"{ENV_PREFIX}_DANGEROUSLY_FAKE_READONLY_ANNOTATIONS")
     )
-    if requested and permission_mode != "dangerous":
+    if requested and not PERMISSION_MODE_CAPABILITIES[permission_mode].skip_all_permissions:
         raise ValueError(
-            "--dangerously-fake-readonly-annotations requires --permission-mode dangerous"
+            "--dangerously-fake-readonly-annotations requires --permission-mode dangerous or host"
         )
     return requested
 
@@ -528,7 +556,7 @@ def runtime_policy_from_args(args: argparse.Namespace) -> RuntimePolicy:
     )
     return RuntimePolicy(
         permission_mode=permission_mode,
-        shell_env_policy=shell_env_policy_from_args(args),
+        shell_env_policy=shell_env_policy_from_args(args, permission_mode),
         allow_network=allow_network,
         fake_readonly_annotations=fake_readonly_annotations_from_args(args, permission_mode),
     )
@@ -693,6 +721,206 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         idempotent=True,
         content_builder=_image_content,
         gated_by="enable_view_image",
+    ),
+    "browser_status": ToolSpec(
+        title="Browser status",
+        description="Connect to the local Chrome CDP endpoint with Playwright and report connection status.",
+        read_only=True,
+        idempotent=True,
+        open_world=True,
+    ),
+    "browser_tabs": ToolSpec(
+        title="Browser tabs",
+        description="List inspectable tabs in the connected local Chrome instance.",
+        read_only=True,
+        idempotent=True,
+        open_world=True,
+    ),
+    "browser_active_tab": ToolSpec(
+        title="Browser active tab",
+        description="Return the currently visible Chrome tab, falling back to the last inspectable tab.",
+        read_only=True,
+        idempotent=True,
+        open_world=True,
+    ),
+    "browser_snapshot": ToolSpec(
+        title="Browser snapshot",
+        description="Return bounded visible page text and simplified interactive DOM elements from Chrome.",
+        read_only=True,
+        idempotent=True,
+        open_world=True,
+    ),
+    "browser_screenshot": ToolSpec(
+        title="Browser screenshot",
+        description="Capture the selected Chrome tab as one MCP PNG image content block.",
+        read_only=True,
+        idempotent=True,
+        open_world=True,
+        content_builder=_image_content,
+    ),
+    "browser_evaluate": ToolSpec(
+        title="Browser evaluate",
+        description="Evaluate JavaScript in the selected Chrome tab through Playwright.",
+        destructive=True,
+        open_world=True,
+    ),
+    "browser_click": ToolSpec(
+        title="Browser click",
+        description="Click the first element matching a Playwright selector in the selected Chrome tab.",
+        destructive=True,
+        open_world=True,
+    ),
+    "browser_type": ToolSpec(
+        title="Browser type",
+        description="Fill or type text into the first element matching a Playwright selector.",
+        destructive=True,
+        open_world=True,
+    ),
+    "browser_console": ToolSpec(
+        title="Browser console",
+        description="Capture console messages and page errors from the selected Chrome tab for a bounded interval.",
+        destructive=True,
+        open_world=True,
+    ),
+    "browser_network": ToolSpec(
+        title="Browser network",
+        description="Inspect current resource timing and capture bounded network events from the selected Chrome tab.",
+        destructive=True,
+        open_world=True,
+    ),
+    "browser_inspect": ToolSpec(
+        title="Browser inspect",
+        description="Inspect one DOM element including geometry, computed style, parent chain, HTML, and animations.",
+        read_only=True,
+        idempotent=True,
+        open_world=True,
+    ),
+    "code_symbols": ToolSpec(
+        title="Code symbols",
+        description="List bounded language-aware symbol definitions under a workspace path.",
+        read_only=True,
+        idempotent=True,
+    ),
+    "code_definition": ToolSpec(
+        title="Code definition",
+        description="Find language-aware definitions for a symbol under a workspace path.",
+        read_only=True,
+        idempotent=True,
+    ),
+    "code_references": ToolSpec(
+        title="Code references",
+        description="Find bounded exact identifier references for a symbol under a workspace path.",
+        read_only=True,
+        idempotent=True,
+    ),
+    "chrome_extension_install": ToolSpec(
+        title="Install Chrome extension bridge",
+        description="Install the local Chrome Native Messaging host manifest and unpacked bridge extension files.",
+        destructive=True,
+        open_world=True,
+    ),
+    "chrome_extension_status": ToolSpec(
+        title="Chrome extension status",
+        description="Report Native Messaging bridge installation and connection status.",
+        read_only=True,
+        idempotent=True,
+        open_world=True,
+    ),
+    "chrome_extensions": ToolSpec(
+        title="Chrome extensions",
+        description="List installed Chrome extensions visible to the local bridge extension.",
+        read_only=True,
+        idempotent=True,
+        open_world=True,
+    ),
+    "chrome_extension_tabs": ToolSpec(
+        title="Chrome extension tabs",
+        description="List Chrome tabs through the Native Messaging bridge extension.",
+        read_only=True,
+        idempotent=True,
+        open_world=True,
+    ),
+    "chrome_extension_execute": ToolSpec(
+        title="Chrome extension execute",
+        description="Evaluate JavaScript in a Chrome tab through the bridge extension debugger API.",
+        destructive=True,
+        open_world=True,
+    ),
+    "chrome_extension_send": ToolSpec(
+        title="Chrome extension send",
+        description="Send an external runtime message to a target Chrome extension that permits external messaging.",
+        destructive=True,
+        open_world=True,
+    ),
+    "app_accessibility": ToolSpec(
+        title="App accessibility",
+        description="Report macOS Accessibility trust and optionally open the Accessibility settings pane.",
+        open_world=True,
+    ),
+    "app_list": ToolSpec(
+        title="App list",
+        description="List running macOS applications with bundle identifiers, pids, and foreground state.",
+        read_only=True,
+        idempotent=True,
+        open_world=True,
+    ),
+    "app_launch": ToolSpec(
+        title="App launch",
+        description="Launch a macOS application by name or bundle identifier.",
+        destructive=True,
+        open_world=True,
+    ),
+    "app_activate": ToolSpec(
+        title="App activate",
+        description="Bring a macOS application to the foreground.",
+        destructive=True,
+        open_world=True,
+    ),
+    "app_windows": ToolSpec(
+        title="App windows",
+        description="List Accessibility window metadata for a running macOS application.",
+        read_only=True,
+        idempotent=True,
+        open_world=True,
+    ),
+    "app_snapshot": ToolSpec(
+        title="App snapshot",
+        description="Return a bounded macOS Accessibility UI hierarchy for a running application.",
+        read_only=True,
+        idempotent=True,
+        open_world=True,
+    ),
+    "app_click": ToolSpec(
+        title="App click",
+        description="Click a macOS Accessibility element matched by role, title, or identifier.",
+        destructive=True,
+        open_world=True,
+    ),
+    "app_type": ToolSpec(
+        title="App type",
+        description="Set or type text into a macOS application using Accessibility and keyboard events.",
+        destructive=True,
+        open_world=True,
+    ),
+    "app_press": ToolSpec(
+        title="App press",
+        description="Send a keyboard key and optional modifiers to a macOS application.",
+        destructive=True,
+        open_world=True,
+    ),
+    "app_menu": ToolSpec(
+        title="App menu",
+        description="Select a macOS application menu item by hierarchical menu path.",
+        destructive=True,
+        open_world=True,
+    ),
+    "app_screenshot": ToolSpec(
+        title="App screenshot",
+        description="Capture a macOS application window as one MCP PNG image content block.",
+        read_only=True,
+        idempotent=True,
+        open_world=True,
+        content_builder=_image_content,
     ),
 }
 
@@ -1298,17 +1526,19 @@ class Runtime:
         self.capabilities = PERMISSION_MODE_CAPABILITIES[permission_mode]
         self.dangerously_skip_all_permissions = self.capabilities.skip_all_permissions
         # Faking annotations is only defensible where the caller has already
-        # asserted the workspace is disposable, so bind it to that assertion
+        # selected unrestricted execution, so bind it to that assertion
         # instead of letting it be set orthogonally.
-        if fake_readonly_annotations and permission_mode != "dangerous":
+        if fake_readonly_annotations and not self.capabilities.skip_all_permissions:
             raise ToolFailure(
                 "INVALID_ARGUMENT",
-                "fake_readonly_annotations requires permission_mode=dangerous.",
+                "fake_readonly_annotations requires permission_mode=dangerous or host.",
                 category="validation",
                 details={"permission_mode": permission_mode},
             )
         self.fake_readonly_annotations = fake_readonly_annotations
-        self.shell_env_policy = shell_env_policy or ShellEnvPolicy()
+        self.shell_env_policy = shell_env_policy or ShellEnvPolicy(
+            inherit="all" if self.capabilities.host_environment else "core"
+        )
         if self.shell_env_policy.inherit not in SHELL_ENV_INHERIT_CHOICES:
             raise ToolFailure(
                 "INVALID_ARGUMENT",
@@ -1432,10 +1662,25 @@ class Runtime:
             )
 
     def command_home_dir(self) -> Path:
+        if self.capabilities.host_environment:
+            configured = os.environ.get("HOME") or os.environ.get("USERPROFILE")
+            return Path(configured).expanduser() if configured else Path.home()
         return self.home_dir
 
     def command_tmp_dir(self) -> Path:
+        if self.capabilities.host_environment:
+            configured = os.environ.get("TMPDIR") or os.environ.get("TEMP") or os.environ.get("TMP")
+            return Path(configured).expanduser() if configured else Path(tempfile.gettempdir())
         return self.tmp_dir
+
+    def command_cache_dir(self) -> Path:
+        if not self.capabilities.host_environment:
+            return self.cache_dir
+        configured = os.environ.get("XDG_CACHE_HOME") or os.environ.get("LOCALAPPDATA")
+        if configured:
+            return Path(configured).expanduser()
+        home = self.command_home_dir()
+        return home / ("Library/Caches" if sys.platform == "darwin" else ".cache")
 
     def global_tmp_write_policy(self) -> str:
         return self.capabilities.global_tmp_write
@@ -1553,7 +1798,26 @@ class Runtime:
             "runtime_dir": str(self.runtime_dir),
             "home": str(self.command_home_dir()),
             "tmpdir": str(self.command_tmp_dir()),
-            "cache_dir": str(self.cache_dir),
+            "cache_dir": str(self.command_cache_dir()),
+            "environment_scope": "host" if self.capabilities.host_environment else "isolated",
+            "host_integrations": self._host_integration_summary(),
+        }
+
+    def _host_integration_summary(self) -> dict[str, Any]:
+        home = self.command_home_dir()
+        ssh_auth_sock = os.environ.get("SSH_AUTH_SOCK", "")
+        ssh_dir = home / ".ssh"
+        git_config_home = home / ".gitconfig"
+        git_config_xdg = home / ".config" / "git" / "config"
+        ssh_auth_sock_reachable = bool(
+            ssh_auth_sock and (os.name == "nt" or Path(ssh_auth_sock).exists())
+        )
+        return {
+            "enabled": self.capabilities.host_environment,
+            "ssh_auth_sock_present": bool(ssh_auth_sock),
+            "ssh_auth_sock_reachable": ssh_auth_sock_reachable,
+            "ssh_config_present": (ssh_dir / "config").is_file(),
+            "git_global_config_present": git_config_home.is_file() or git_config_xdg.is_file(),
         }
 
     def _landlock_enforced(self, landlock: dict[str, Any]) -> bool:
@@ -1671,7 +1935,13 @@ class Runtime:
         warnings: list[str] = []
         if not landlock.get("available"):
             warnings.append("Linux Landlock filesystem confinement is unavailable")
-        if self.capabilities.skip_all_permissions:
+        if self.capabilities.host_environment:
+            warnings.append(
+                "permission_mode=host exposes the host environment, credentials, filesystem, and network"
+            )
+            if not self._host_integration_summary()["ssh_auth_sock_reachable"]:
+                warnings.append("SSH agent socket is not available to host-mode commands")
+        elif self.capabilities.skip_all_permissions:
             warnings.append("permission_mode=dangerous disables MCP safety gates")
         if self.fake_readonly_annotations:
             warnings.append(
@@ -2639,13 +2909,14 @@ class Runtime:
                 if env_pattern_matches(key, self.shell_env_policy.include_only)
             }
         env.update({str(key): str(value) for key, value in self.shell_env_policy.set.items()})
-        self._ensure_runtime_dirs()
-        tmp_dir = self.command_tmp_dir()
-        env["HOME"] = str(self.command_home_dir())
-        env["TMPDIR"] = str(tmp_dir)
-        if os.name == "nt":
-            env["TEMP"] = str(tmp_dir)
-            env["TMP"] = str(tmp_dir)
+        if not self.capabilities.host_environment:
+            self._ensure_runtime_dirs()
+            tmp_dir = self.command_tmp_dir()
+            env["HOME"] = str(self.command_home_dir())
+            env["TMPDIR"] = str(tmp_dir)
+            if os.name == "nt":
+                env["TEMP"] = str(tmp_dir)
+                env["TMP"] = str(tmp_dir)
         if isinstance(extra, dict):
             for key, value in extra.items():
                 key_text = str(key)
@@ -2653,6 +2924,8 @@ class Runtime:
                 if not self.dangerously_skip_all_permissions and is_filtered_env_var(key_text, value_text):
                     continue
                 env[key_text] = value_text
+        for key in SERVER_INTERNAL_SECRET_ENV_NAMES:
+            env.pop(key, None)
         return env
 
     def _git_env(self) -> dict[str, str]:
@@ -3396,19 +3669,23 @@ class Runtime:
 
     def request_permissions(self, args: dict[str, Any]) -> dict[str, Any]:
         if self.dangerously_skip_all_permissions:
+            grant_mode = "host" if self.capabilities.host_environment else "dangerously_skip_all_permissions"
+            warning = (
+                "host mode is enabled; permission-gated operations are auto-granted with host-user authority"
+                if self.capabilities.host_environment
+                else "dangerously-skip-all-permissions is enabled; permission-gated operations are auto-granted"
+            )
             return {
                 "ok": True,
                 "status": "granted",
-                "grant_id": "dangerously-skip-all-permissions",
+                "grant_id": grant_mode.replace("_", "-"),
                 "expires_at": None,
                 "constraints": {
-                    "mode": "dangerously_skip_all_permissions",
+                    "mode": grant_mode,
                     "workspace": str(self.workspace.root),
                     "requested": args,
                 },
-                "warnings": [
-                    "dangerously-skip-all-permissions is enabled; permission-gated operations are auto-granted"
-                ],
+                "warnings": [warning],
             }
         return {
             "ok": False,
@@ -3464,6 +3741,102 @@ class Runtime:
             "warnings": warnings,
         }
         return payload
+
+    def browser_status(self, args: dict[str, Any]) -> dict[str, Any]:
+        return browser_tools.status(args)
+
+    def browser_tabs(self, args: dict[str, Any]) -> dict[str, Any]:
+        return browser_tools.tabs(args)
+
+    def browser_active_tab(self, args: dict[str, Any]) -> dict[str, Any]:
+        return browser_tools.active_tab(args)
+
+    def browser_snapshot(self, args: dict[str, Any]) -> dict[str, Any]:
+        return browser_tools.snapshot(args)
+
+    def browser_screenshot(self, args: dict[str, Any]) -> dict[str, Any]:
+        return browser_tools.screenshot(args)
+
+    def browser_evaluate(self, args: dict[str, Any]) -> dict[str, Any]:
+        return browser_tools.evaluate(args)
+
+    def browser_click(self, args: dict[str, Any]) -> dict[str, Any]:
+        return browser_tools.click(args)
+
+    def browser_type(self, args: dict[str, Any]) -> dict[str, Any]:
+        return browser_tools.type_text(args)
+
+    def browser_console(self, args: dict[str, Any]) -> dict[str, Any]:
+        return browser_tools.console(args)
+
+    def browser_network(self, args: dict[str, Any]) -> dict[str, Any]:
+        return browser_tools.network(args)
+
+    def browser_inspect(self, args: dict[str, Any]) -> dict[str, Any]:
+        return browser_tools.inspect(args)
+
+    def code_symbols(self, args: dict[str, Any]) -> dict[str, Any]:
+        resolved = self.resolve_existing(str(args.get("path", ".")))
+        return code_intel.symbols(self.workspace.root, resolved.path, args)
+
+    def code_definition(self, args: dict[str, Any]) -> dict[str, Any]:
+        resolved = self.resolve_existing(str(args.get("path", ".")))
+        return code_intel.definition(self.workspace.root, resolved.path, args)
+
+    def code_references(self, args: dict[str, Any]) -> dict[str, Any]:
+        resolved = self.resolve_existing(str(args.get("path", ".")))
+        return code_intel.references(self.workspace.root, resolved.path, args)
+
+    def chrome_extension_install(self, args: dict[str, Any]) -> dict[str, Any]:
+        return chrome_bridge.install(args)
+
+    def chrome_extension_status(self, args: dict[str, Any]) -> dict[str, Any]:
+        return chrome_bridge.status(args)
+
+    def chrome_extensions(self, args: dict[str, Any]) -> dict[str, Any]:
+        return chrome_bridge.extensions(args)
+
+    def chrome_extension_tabs(self, args: dict[str, Any]) -> dict[str, Any]:
+        return chrome_bridge.tabs(args)
+
+    def chrome_extension_execute(self, args: dict[str, Any]) -> dict[str, Any]:
+        return chrome_bridge.execute(args)
+
+    def chrome_extension_send(self, args: dict[str, Any]) -> dict[str, Any]:
+        return chrome_bridge.send(args)
+
+    def app_accessibility(self, args: dict[str, Any]) -> dict[str, Any]:
+        return macos_apps.accessibility(args)
+
+    def app_list(self, args: dict[str, Any]) -> dict[str, Any]:
+        return macos_apps.list_apps(args)
+
+    def app_launch(self, args: dict[str, Any]) -> dict[str, Any]:
+        return macos_apps.launch(args)
+
+    def app_activate(self, args: dict[str, Any]) -> dict[str, Any]:
+        return macos_apps.activate(args)
+
+    def app_windows(self, args: dict[str, Any]) -> dict[str, Any]:
+        return macos_apps.windows(args)
+
+    def app_snapshot(self, args: dict[str, Any]) -> dict[str, Any]:
+        return macos_apps.snapshot(args)
+
+    def app_click(self, args: dict[str, Any]) -> dict[str, Any]:
+        return macos_apps.click(args)
+
+    def app_type(self, args: dict[str, Any]) -> dict[str, Any]:
+        return macos_apps.type_text(args)
+
+    def app_press(self, args: dict[str, Any]) -> dict[str, Any]:
+        return macos_apps.press(args)
+
+    def app_menu(self, args: dict[str, Any]) -> dict[str, Any]:
+        return macos_apps.menu(args)
+
+    def app_screenshot(self, args: dict[str, Any]) -> dict[str, Any]:
+        return macos_apps.screenshot(args)
 
 
 def walk_files(root: Path) -> Iterator[Path]:
@@ -4762,6 +5135,254 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             },
             ["path"],
         ),
+        "browser_status": object_schema(
+            {
+                "endpoint": string,
+                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
+            }
+        ),
+        "browser_tabs": object_schema(
+            {
+                "endpoint": string,
+                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
+            }
+        ),
+        "browser_active_tab": object_schema(
+            {
+                "endpoint": string,
+                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
+            }
+        ),
+        "browser_snapshot": object_schema(
+            {
+                "endpoint": string,
+                "tab_index": {**integer, "minimum": 0},
+                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
+                "max_chars": {**integer, "minimum": 1, "maximum": 200000, "default": 50000},
+                "max_elements": {**integer, "minimum": 1, "maximum": 500, "default": 150},
+            }
+        ),
+        "browser_screenshot": object_schema(
+            {
+                "endpoint": string,
+                "tab_index": {**integer, "minimum": 0},
+                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
+                "full_page": {**boolean, "default": False},
+            }
+        ),
+        "browser_evaluate": object_schema(
+            {
+                "script": {**string, "minLength": 1},
+                "endpoint": string,
+                "tab_index": {**integer, "minimum": 0},
+                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
+            },
+            ["script"],
+        ),
+        "browser_click": object_schema(
+            {
+                "selector": {**string, "minLength": 1},
+                "endpoint": string,
+                "tab_index": {**integer, "minimum": 0},
+                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
+            },
+            ["selector"],
+        ),
+        "browser_type": object_schema(
+            {
+                "selector": {**string, "minLength": 1},
+                "text": string,
+                "endpoint": string,
+                "tab_index": {**integer, "minimum": 0},
+                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
+                "clear": {**boolean, "default": True},
+                "delay_ms": {**integer, "minimum": 0, "maximum": 1000, "default": 0},
+            },
+            ["selector", "text"],
+        ),
+        "browser_console": object_schema(
+            {
+                "endpoint": string,
+                "tab_index": {**integer, "minimum": 0},
+                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
+                "wait_ms": {**integer, "minimum": 0, "maximum": 10000, "default": 250},
+                "max_entries": {**integer, "minimum": 1, "maximum": 2000, "default": 200},
+                "reload": {**boolean, "default": False},
+            }
+        ),
+        "browser_network": object_schema(
+            {
+                "endpoint": string,
+                "tab_index": {**integer, "minimum": 0},
+                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
+                "wait_ms": {**integer, "minimum": 0, "maximum": 10000, "default": 250},
+                "max_entries": {**integer, "minimum": 1, "maximum": 5000, "default": 300},
+                "reload": {**boolean, "default": False},
+                "include_resources": {**boolean, "default": True},
+            }
+        ),
+        "browser_inspect": object_schema(
+            {
+                "selector": {**string, "minLength": 1},
+                "endpoint": string,
+                "tab_index": {**integer, "minimum": 0},
+                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
+                "max_html_chars": {**integer, "minimum": 1, "maximum": 200000, "default": 20000},
+            },
+            ["selector"],
+        ),
+        "code_symbols": object_schema(
+            {
+                "path": {**string, "default": "."},
+                "query": string,
+                "kind": string,
+                "max_results": {**integer, "minimum": 1, "maximum": 5000, "default": 500},
+                "max_files": {**integer, "minimum": 1, "maximum": 20000, "default": 2000},
+            }
+        ),
+        "code_definition": object_schema(
+            {
+                "symbol": {**string, "minLength": 1},
+                "path": {**string, "default": "."},
+                "max_results": {**integer, "minimum": 1, "maximum": 500, "default": 50},
+                "max_files": {**integer, "minimum": 1, "maximum": 20000, "default": 2000},
+            },
+            ["symbol"],
+        ),
+        "code_references": object_schema(
+            {
+                "symbol": {**string, "minLength": 1},
+                "path": {**string, "default": "."},
+                "case_sensitive": {**boolean, "default": True},
+                "max_results": {**integer, "minimum": 1, "maximum": 10000, "default": 500},
+                "max_files": {**integer, "minimum": 1, "maximum": 20000, "default": 2000},
+            },
+            ["symbol"],
+        ),
+        "chrome_extension_install": object_schema(
+            {
+                "host_path": string,
+                "open_extensions_page": {**boolean, "default": True},
+            }
+        ),
+        "chrome_extension_status": object_schema(
+            {
+                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
+            }
+        ),
+        "chrome_extensions": object_schema(
+            {
+                "query": string,
+                "max_results": {**integer, "minimum": 1, "maximum": 2000, "default": 200},
+                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
+            }
+        ),
+        "chrome_extension_tabs": object_schema(
+            {
+                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
+            }
+        ),
+        "chrome_extension_execute": object_schema(
+            {
+                "tab_id": {**integer, "minimum": 0},
+                "script": {**string, "minLength": 1},
+                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
+            },
+            ["tab_id", "script"],
+        ),
+        "chrome_extension_send": object_schema(
+            {
+                "extension_id": {**string, "minLength": 1},
+                "message": {},
+                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
+            },
+            ["extension_id", "message"],
+        ),
+        "app_accessibility": object_schema(
+            {
+                "open_settings": {**boolean, "default": False},
+            }
+        ),
+        "app_list": object_schema(
+            {
+                "query": string,
+                "include_background": {**boolean, "default": False},
+                "max_results": {**integer, "minimum": 1, "maximum": 2000, "default": 200},
+            }
+        ),
+        "app_launch": object_schema(
+            {
+                "app": {**string, "minLength": 1},
+                "new_instance": {**boolean, "default": False},
+            },
+            ["app"],
+        ),
+        "app_activate": object_schema(
+            {
+                "app": {**string, "minLength": 1},
+                "wait_ms": {**integer, "minimum": 0, "maximum": 2000, "default": 150},
+            },
+            ["app"],
+        ),
+        "app_windows": object_schema(
+            {
+                "app": {**string, "minLength": 1},
+            },
+            ["app"],
+        ),
+        "app_snapshot": object_schema(
+            {
+                "app": {**string, "minLength": 1},
+                "max_depth": {**integer, "minimum": 0, "maximum": 12, "default": 6},
+                "max_elements": {**integer, "minimum": 1, "maximum": 5000, "default": 500},
+            },
+            ["app"],
+        ),
+        "app_click": object_schema(
+            {
+                "app": {**string, "minLength": 1},
+                "role": string,
+                "title": string,
+                "identifier": string,
+                "index": {**integer, "minimum": 0, "default": 0},
+            },
+            ["app"],
+        ),
+        "app_type": object_schema(
+            {
+                "app": {**string, "minLength": 1},
+                "text": string,
+                "role": string,
+                "title": string,
+                "identifier": string,
+                "index": {**integer, "minimum": 0, "default": 0},
+                "clear": {**boolean, "default": True},
+            },
+            ["app", "text"],
+        ),
+        "app_press": object_schema(
+            {
+                "app": {**string, "minLength": 1},
+                "key": {**string, "minLength": 1},
+                "modifiers": string_array,
+                "wait_ms": {**integer, "minimum": 0, "maximum": 2000, "default": 100},
+            },
+            ["app", "key"],
+        ),
+        "app_menu": object_schema(
+            {
+                "app": {**string, "minLength": 1},
+                "path": {"type": "array", "items": {**string, "minLength": 1}, "minItems": 1, "maxItems": 10},
+            },
+            ["app", "path"],
+        ),
+        "app_screenshot": object_schema(
+            {
+                "app": {**string, "minLength": 1},
+                "window_index": {**integer, "minimum": 0, "default": 0},
+            },
+            ["app"],
+        ),
     }
 
 
@@ -5542,10 +6163,13 @@ def build_runtime(
         command_manager=command_manager,
     )
     if emit_warning and runtime.capabilities.skip_all_permissions:
-        print(
-            "WARNING: permission_mode=dangerous disables MCP safety gates. Use only inside an isolated container or VM.",
-            file=sys.stderr,
+        warning = (
+            "WARNING: permission_mode=host gives commands the server process's full host environment, "
+            "credentials, filesystem, and network access."
+            if runtime.capabilities.host_environment
+            else "WARNING: permission_mode=dangerous disables MCP safety gates. Use only inside an isolated container or VM."
         )
+        print(warning, file=sys.stderr)
     if emit_warning and runtime.fake_readonly_annotations:
         print(
             "WARNING: tools/list reports every tool as read-only and non-destructive. "
@@ -5718,6 +6342,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--stdio", action="store_true", help="serve newline-delimited JSON-RPC over stdio")
     parser.add_argument(
+        "--chrome-native-host",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--auth-token",
         default=None,
         help=f"require Authorization: Bearer <token> on /mcp; defaults to {ENV_PREFIX}_AUTH_TOKEN",
@@ -5748,7 +6377,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "exec_command permission mode: safe denies network/shell-expansion/inline-script gates; "
             "trusted allows local development network, shell expansion, and inline scripts; "
-            "dangerous disables permission gates"
+            "dangerous disables permission gates while keeping an isolated command home; "
+            "host disables permission gates and inherits the full host environment"
         ),
     )
     parser.add_argument(
@@ -5777,7 +6407,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "report every tool in tools/list as read-only and non-destructive for clients that gate on "
-            "annotations; mutation and execution still happen; requires --permission-mode dangerous, and "
+            "annotations; mutation and execution still happen; requires --permission-mode dangerous or host, and "
             "requires auth over HTTP; server_info and the server card keep reporting the real annotations; "
             f"can also be enabled with {ENV_PREFIX}_DANGEROUSLY_FAKE_READONLY_ANNOTATIONS=1"
         ),
@@ -5807,6 +6437,10 @@ def install_sigterm_handler() -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.chrome_native_host:
+        from .chrome_native_host import main as chrome_native_host_main
+
+        return chrome_native_host_main()
     install_sigterm_handler()
     return run_stdio(args) if args.stdio else run_http(args)
 

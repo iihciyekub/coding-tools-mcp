@@ -237,6 +237,31 @@ button:disabled { cursor: default; opacity: .38; }
 .connection-detail { padding: 2px 3px 1px 57px; }
 .idle-copy { margin: 6px 0 5px; color: var(--panel-muted); font-size: 9px; line-height: 1.45; }
 
+.permission-mode-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 0;
+  border-top: 1px solid var(--panel-line);
+}
+
+.permission-mode-copy { min-width: 0; flex: 1; }
+.permission-mode-copy strong { display: block; font-size: 9px; font-weight: 700; }
+.permission-mode-copy small { display: block; margin-top: 2px; color: var(--panel-muted); font-size: 8px; line-height: 1.35; }
+.permission-mode-control.host-enabled .permission-mode-copy strong { color: var(--panel-danger); }
+.permission-select {
+  width: 104px;
+  min-height: 25px;
+  padding: 2px 22px 2px 7px;
+  border: 1px solid var(--panel-line);
+  border-radius: 6px;
+  color: var(--panel-text);
+  background: var(--panel-control);
+  font: inherit;
+  font-size: 9px;
+}
+.host-warning { margin: 0 0 5px; color: var(--panel-danger); font-size: 8px; font-weight: 650; line-height: 1.4; }
+
 .value-row {
   display: flex;
   min-height: 42px;

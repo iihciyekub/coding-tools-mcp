@@ -1,11 +1,13 @@
 {
   "name": "coding-tools-mcp-desktop",
   "private": true,
-  "version": "0.3.9",
+  "version": "0.3.14",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:runtime": "node ./build-bundled-runtime.mjs",
+    "build:bundle": "npm run build:runtime && npm run build",
     "test": "vitest run",
     "check": "tsc --noEmit && vitest run",
     "tauri": "tauri"

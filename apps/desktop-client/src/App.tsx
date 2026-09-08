@@ -5,7 +5,7 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
 import { detectLanguage, translator } from "./i18n";
-import type { RuntimeStatus, WorkspaceProfile } from "./types";
+import type { PermissionMode, RuntimeStatus, WorkspaceProfile } from "./types";
 import { publicEndpoint } from "./utils";
 
 const PANEL_WIDTH = 358;
@@ -32,7 +32,6 @@ const quickTunnelProfile = (profile: WorkspaceProfile): WorkspaceProfile => ({
     cloudflare_token: "",
   },
   auth: { ...profile.auth, type: "oauth" },
-  runtime: { ...profile.runtime, permission_mode: "trusted" },
 });
 
 function App() {
@@ -231,6 +230,25 @@ function App() {
     }
   };
 
+  const setPermissionMode = async (profile: WorkspaceProfile, permissionMode: PermissionMode) => {
+    const status = statuses[profile.id] ?? stoppedStatus(profile.runtime.local_port);
+    if (status.pid) return;
+    setBusyId(profile.id);
+    setError("");
+    try {
+      const updated: WorkspaceProfile = {
+        ...profile,
+        runtime: { ...profile.runtime, permission_mode: permissionMode },
+      };
+      const saved = await api.saveProfile(updated);
+      setProfiles((current) => current.map((item) => (item.id === saved.id ? saved : item)));
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   const statusLabel = selectedStatus?.pid
     ? selectedStatus.state === "error" ? t("Connection error") : t("Cloudflare quick tunnel is running")
     : selected ? t("Workspace stopped") : t("Add a workspace to begin.");
@@ -321,6 +339,26 @@ function App() {
               </>
             ) : (
               <p className="idle-copy">{t("Starting automatically creates a Cloudflare quick tunnel. No domain or token is needed.")}</p>
+            )}
+            <label className={`permission-mode-control ${selected.runtime.permission_mode === "host" ? "host-enabled" : ""}`}>
+              <span className="permission-mode-copy">
+                <strong>{t("Permission mode")}</strong>
+                <small>{t("Choose how much command access this workspace receives.")}</small>
+              </span>
+              <select
+                className="permission-select"
+                value={selected.runtime.permission_mode}
+                disabled={Boolean(selectedStatus?.pid) || busyId === selected.id}
+                onChange={(event) => void setPermissionMode(selected, event.target.value as PermissionMode)}
+              >
+                <option value="safe">{t("Safe")}</option>
+                <option value="trusted">{t("Trusted")}</option>
+                <option value="dangerous">{t("Dangerous")}</option>
+                <option value="host">{t("Host")}</option>
+              </select>
+            </label>
+            {selected.runtime.permission_mode === "host" && (
+              <p className="host-warning">{t("High risk: authenticated MCP commands can access this Mac as you.")}</p>
             )}
           </div>
         )}

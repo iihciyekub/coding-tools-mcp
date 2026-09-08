@@ -14,6 +14,14 @@ node_modules/
 dist/
 build/
 target/
+.build-cache/
+.build/
+.toolchain/
+.xcrun-tmp/
+apps/desktop-client/release/
+apps/desktop-client/src-tauri/resources/
+*.dmg
+*.pkg
 .DS_Store
 cloudflare/**/.dev.vars
 cloudflare/**/.dev.vars.*

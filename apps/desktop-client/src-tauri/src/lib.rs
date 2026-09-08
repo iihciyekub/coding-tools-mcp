@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use storage::ProfileStore;
 use tauri::image::Image;
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -341,7 +341,6 @@ fn quick_tunnel_profile(mut profile: WorkspaceProfile) -> WorkspaceProfile {
     profile.tunnel.frp_subdomain.clear();
     profile.tunnel.cloudflare_token.clear();
     profile.auth.r#type = "oauth".into();
-    profile.runtime.permission_mode = "trusted".into();
     profile
 }
 
@@ -382,6 +381,16 @@ fn status_text(status: &RuntimeStatus) -> &'static str {
         "Running"
     } else {
         "Starting / connection issue"
+    }
+}
+
+fn permission_mode_label(mode: &str) -> &'static str {
+    match mode {
+        "safe" => "Safe",
+        "trusted" => "Trusted",
+        "dangerous" => "Dangerous",
+        "host" => "Host · full access",
+        _ => "Unknown",
     }
 }
 
@@ -480,6 +489,30 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
         workspace.append(&path_item).map_err(menu_error)?;
         let separator = PredefinedMenuItem::separator(app).map_err(menu_error)?;
         workspace.append(&separator).map_err(menu_error)?;
+
+        let permission_menu = Submenu::with_id(
+            app,
+            format!("permission-menu:{}", profile.id),
+            format!(
+                "Permission mode · {}",
+                permission_mode_label(&profile.runtime.permission_mode)
+            ),
+            true,
+        )
+        .map_err(menu_error)?;
+        for mode in ["safe", "trusted", "dangerous", "host"] {
+            let item = CheckMenuItem::with_id(
+                app,
+                format!("permission:{mode}:{}", profile.id),
+                permission_mode_label(mode),
+                !running,
+                profile.runtime.permission_mode == mode,
+                None::<&str>,
+            )
+            .map_err(menu_error)?;
+            permission_menu.append(&item).map_err(menu_error)?;
+        }
+        workspace.append(&permission_menu).map_err(menu_error)?;
 
         let power_item = MenuItem::with_id(
             app,
@@ -698,6 +731,40 @@ fn stop_workspace_from_menu(app: AppHandle, profile_id: String) {
     });
 }
 
+fn set_permission_mode_from_menu(
+    app: &AppHandle,
+    profile_id: &str,
+    permission_mode: &str,
+) -> Result<(), String> {
+    if !matches!(permission_mode, "safe" | "trusted" | "dangerous" | "host") {
+        return Err("Unknown permission mode.".into());
+    }
+    let state = app.state::<DesktopState>();
+    let mut profile = state
+        .store
+        .lock()
+        .map_err(|_| "Profile store is unavailable.".to_string())?
+        .get(profile_id)
+        .ok_or_else(|| "Workspace profile was not found.".to_string())?;
+    if state
+        .runtime
+        .lock()
+        .map_err(|_| "Runtime manager is unavailable.".to_string())?
+        .status(&profile)
+        .pid
+        .is_some()
+    {
+        return Err("Stop the workspace before changing its permission mode.".into());
+    }
+    profile.runtime.permission_mode = permission_mode.into();
+    state
+        .store
+        .lock()
+        .map_err(|_| "Profile store is unavailable.".to_string())?
+        .update(profile)?;
+    Ok(())
+}
+
 fn copy_server_url(app: &AppHandle, profile_id: &str) -> Result<(), String> {
     let state = app.state::<DesktopState>();
     let profile = state
@@ -826,6 +893,13 @@ fn handle_tray_menu_event(app: &AppHandle, id: &str) {
         if let Err(error) = copy_passcode(app, profile_id) {
             show_error(app, error);
         }
+    } else if let Some(selection) = id.strip_prefix("permission:") {
+        if let Some((permission_mode, profile_id)) = selection.split_once(':') {
+            if let Err(error) = set_permission_mode_from_menu(app, profile_id, permission_mode) {
+                show_error(app, error);
+            }
+            let _ = refresh_tray_menu(app);
+        }
     } else if let Some(profile_id) = id.strip_prefix("remove:") {
         remove_workspace_from_menu(app, profile_id.to_string());
     }
@@ -884,4 +958,31 @@ pub fn run() {
             }
             _ => {}
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quick_tunnel_start_preserves_host_permission_mode() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut profile =
+            WorkspaceProfile::new(workspace.path().to_string_lossy().to_string(), 28766).unwrap();
+        profile.runtime.permission_mode = "host".into();
+
+        let profile = quick_tunnel_profile(profile);
+
+        assert_eq!(profile.runtime.permission_mode, "host");
+        assert_eq!(profile.auth.r#type, "oauth");
+        assert_eq!(profile.tunnel.cloudflare_mode, "quick");
+    }
+
+    #[test]
+    fn permission_mode_labels_cover_every_supported_mode() {
+        assert_eq!(permission_mode_label("safe"), "Safe");
+        assert_eq!(permission_mode_label("trusted"), "Trusted");
+        assert_eq!(permission_mode_label("dangerous"), "Dangerous");
+        assert_eq!(permission_mode_label("host"), "Host · full access");
+    }
 }

@@ -11,6 +11,12 @@ The boundary is:
 - safe mode blocks network-looking commands, shell expansion, and inline scripts
 - Landlock confines filesystem access when available
 
+`host` mode is an explicit opt-out from the command boundary. It preserves the
+server process's host environment and disables command gates and Landlock so
+`exec_command` can use local SSH/Git credentials and operate outside the
+workspace. Direct file tools remain workspace-confined. Treat a host-mode MCP
+endpoint as remote command execution with the authority of the server user.
+
 The boundary is not:
 
 - a complete OS sandbox on every platform

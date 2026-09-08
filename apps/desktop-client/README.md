@@ -10,6 +10,7 @@ API.
 - Compact menu-bar panel with no macOS Dock icon
 - Multiple workspace profiles with one automatically assigned local port per workspace
 - One-click OAuth runtime startup through Cloudflare Quick Tunnels
+- Per-workspace Safe, Trusted, Dangerous, and Host permission-mode menus
 - Live runtime/tunnel status with copyable Server URL and OAuth authorization passcode
 - Secrets stored in the operating-system keychain
 - English and Simplified Chinese UI
@@ -25,7 +26,7 @@ Requirements:
 
 - Node.js 24+
 - Rust 1.84+
-- `uvx` or `coding-tools-mcp` on the login-shell PATH
+- `uv` for building the bundled Python runtime
 - `cloudflared` for Cloudflare profiles
 
 ```bash
@@ -45,6 +46,12 @@ Build the native application bundle/installer:
 ```bash
 make desktop-build
 ```
+
+Release bundles include self-contained `coding-tools-mcp-runtime` and
+`coding-tools-mcp-chrome-host` executables under the app resources. At runtime
+the desktop client prefers that bundled MCP binary, then falls back to an
+explicit override, PATH installation, source checkout, or `uvx` only when the
+bundled resource is unavailable.
 
 On Apple Silicon, install native tools through `/opt/homebrew`; the runtime
 resolver deliberately prefers `/opt/homebrew/bin/cloudflared` over an older
@@ -70,6 +77,8 @@ the custom MCP app address in ChatGPT after starting a new tunnel.
 - Public access is handled by an authenticated tunnel.
 - NoAuth remains available in the core CLI for loopback-only development, but
   is intentionally excluded from this public-tunnel desktop client.
+- Full host access is opt-in per stopped workspace. It keeps OAuth enabled but
+  allows authenticated MCP commands to act with the desktop user's authority.
 - Runtime and tunnel processes are placed in dedicated process groups and are
   stopped together on app exit.
 - Configuration is public metadata in `~/.coding-tools-mcp-desktop/profiles.json`;

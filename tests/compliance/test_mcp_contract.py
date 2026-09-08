@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from coding_tools_mcp import __version__
-from coding_tools_mcp.server import MAX_HTTP_REQUEST_BYTES
+from coding_tools_mcp.server import MAX_HTTP_REQUEST_BYTES, TOOL_REGISTRY
 from tests.compliance.fixtures import workspace_from_fixture
 from tests.compliance.mcp_client import (
     FORBIDDEN_TOOL_NAMES,
@@ -228,37 +228,17 @@ class MCPContractTests(ComplianceTestCase):
                 self.assertIn("ok", output_schema.get("required", []))
 
     def test_tool_annotations_match_mcp_sdk_hint_shape(self) -> None:
-        expected = {
-            "server_info": (True, False, True, False),
-            "check_exec_environment": (True, False, True, False),
-            "read_file": (True, False, True, False),
-            "list_dir": (True, False, True, False),
-            "list_files": (True, False, True, False),
-            "search_text": (True, False, True, False),
-            "apply_patch": (False, True, False, False),
-            "exec_command": (False, True, False, True),
-            "write_stdin": (False, False, False, False),
-            "kill_command": (False, True, False, False),
-            "read_output": (True, False, True, False),
-            "git_status": (True, False, True, False),
-            "git_diff": (True, False, True, False),
-            "git_log": (True, False, True, False),
-            "git_show": (True, False, True, False),
-            "git_blame": (True, False, True, False),
-            "request_permissions": (True, False, False, False),
-            "view_image": (True, False, True, False),
-        }
         for tool in self.client.list_tools():
             name = str(tool.get("name"))
             annotations = tool.get("annotations")
             with self.subTest(tool=name):
                 self.assertIsInstance(annotations, dict)
                 self.assertIsInstance(annotations.get("title"), str)
-                read_only, destructive, idempotent, open_world = expected[name]
-                self.assertEqual(annotations.get("readOnlyHint"), read_only)
-                self.assertEqual(annotations.get("destructiveHint"), destructive)
-                self.assertEqual(annotations.get("idempotentHint"), idempotent)
-                self.assertEqual(annotations.get("openWorldHint"), open_world)
+                spec = TOOL_REGISTRY[name]
+                self.assertEqual(annotations.get("readOnlyHint"), spec.read_only)
+                self.assertEqual(annotations.get("destructiveHint"), spec.destructive)
+                self.assertEqual(annotations.get("idempotentHint"), spec.idempotent)
+                self.assertEqual(annotations.get("openWorldHint"), spec.open_world)
 
     def test_success_and_failure_paths_return_structured_and_agent_readable_results(self) -> None:
         success = self.client.call_tool("read_file", {"path": "src/math.js"})
@@ -1503,7 +1483,7 @@ class MCPContractTests(ComplianceTestCase):
 
             tools = result.get("tools")
             self.assertIsInstance(tools, list)
-            self.assertEqual(len(tools), 18)
+            self.assertEqual(len(tools), 49)
             self.assertTrue({tool.get("name") for tool in tools} >= set(REQUIRED_TOOLS))
             for tool in tools:
                 # The cache hints describe the catalog, not the entries in it;

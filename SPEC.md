@@ -14,10 +14,10 @@ search, model routing, plugins, image generation, or subagent orchestration.
 
 There is one stable catalog. The runtime has no tool profiles, no `edit_file`,
 no dynamic `tools/list_changed`, and no required `open_workspace` call.
-`apply_patch` is the only direct file-write tool. `safe`, `trusted`, and
-`dangerous` are command permission policies and never alter `tools/list`.
+`apply_patch` is the only direct file-write tool. `safe`, `trusted`, `dangerous`,
+and `host` are command permission policies and never alter `tools/list`.
 
-The default catalog contains 18 tools:
+The default catalog contains 49 tools:
 
 - runtime/context: `server_info`, `check_exec_environment`
 - workspace inspection: `read_file`, `list_dir`, `list_files`, `search_text`
@@ -25,6 +25,16 @@ The default catalog contains 18 tools:
 - processes: `exec_command`, `write_stdin`, `read_output`, `kill_command`
 - Git: `git_status`, `git_diff`, `git_log`, `git_show`, `git_blame`
 - policy/image: `request_permissions`, `view_image`
+- browser: `browser_status`, `browser_tabs`, `browser_active_tab`,
+  `browser_snapshot`, `browser_screenshot`, `browser_evaluate`, `browser_click`,
+  `browser_type`, `browser_console`, `browser_network`, `browser_inspect`
+- code intelligence: `code_symbols`, `code_definition`, `code_references`
+- Chrome extension bridge: `chrome_extension_install`, `chrome_extension_status`,
+  `chrome_extensions`, `chrome_extension_tabs`, `chrome_extension_execute`,
+  `chrome_extension_send`
+- macOS app control: `app_accessibility`, `app_list`, `app_launch`, `app_activate`,
+  `app_windows`, `app_snapshot`, `app_click`, `app_type`, `app_press`, `app_menu`,
+  `app_screenshot`
 
 `view_image` can be disabled as an installation capability. All other tools are
 fixed.

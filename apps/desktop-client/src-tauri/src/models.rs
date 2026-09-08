@@ -166,7 +166,7 @@ impl WorkspaceProfile {
         }
         if !matches!(
             self.runtime.permission_mode.as_str(),
-            "safe" | "trusted" | "dangerous"
+            "safe" | "trusted" | "dangerous" | "host"
         ) {
             return Err("Unknown permission mode.".into());
         }
@@ -306,6 +306,20 @@ mod tests {
         profile.tunnel.public_url = "https://mcp.example.com/".into();
         assert!(profile.validate().is_ok());
         assert_eq!(profile.public_url(), "https://mcp.example.com");
+    }
+
+    #[test]
+    fn host_permission_mode_is_explicitly_supported() {
+        let mut profile = WorkspaceProfile::new(
+            std::env::current_dir()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+            28766,
+        )
+        .unwrap();
+        profile.runtime.permission_mode = "host".into();
+        assert!(profile.validate().is_ok());
     }
 
     #[test]

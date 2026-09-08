@@ -38,7 +38,7 @@ The runtime denies or drops secret-looking variables and values:
 - Shell startup injection variables.
 - Dynamic loader and interpreter path injection variables such as `LD_PRELOAD`, `LD_LIBRARY_PATH`, `DYLD_*`, `BASH_ENV`, `ENV`, `PYTHONPATH`, `RUBYLIB`, and `NODE_OPTIONS`.
 
-`CODING_TOOLS_MCP_SHELL_ENV_INHERIT=all` broadens compatibility for local toolchains, but still applies the default secret and startup-loader filters. Only combine `--permission-mode dangerous` with `inherit=all` when the workspace, client, and child processes are trusted enough to receive the full parent environment.
+`CODING_TOOLS_MCP_SHELL_ENV_INHERIT=all` broadens compatibility for local toolchains. Safe and trusted modes still apply secret and startup-loader filters. Dangerous mode can inherit the complete environment when explicitly configured, but retains its isolated command home. Host mode inherits the complete host environment by default, except for the server's own transport-authentication secrets.
 
 Secret redaction is defense in depth and must not be treated as the primary protection.
 
@@ -57,11 +57,12 @@ Risky capabilities return structured permission-required or unsupported response
 
 `request_permissions` currently returns `ELICITATION_UNSUPPORTED` unless a future MCP client elicitation flow is implemented and tested.
 
-Operators should choose one of three permission modes:
+Operators should choose one of four permission modes:
 
 - `safe`: default mode. Workspace writes are allowed, system toolchain roots are read-only, `HOME`, `TMPDIR`, and `cache_dir` point under an external server-owned runtime directory, network-looking commands are denied, shell expansion and inline scripts are denied, secrets and loader/startup env are filtered, and Landlock is enabled when available.
 - `trusted`: local development mode. It allows network-looking commands, shell expansion, and inline scripts while still filtering secrets and blocking destructive commands and host-root writes. Runtime writes are scoped to the exact external runtime directory, not global `/tmp`.
 - `dangerous`: disables `exec_command` permission gates and Landlock. Use only inside an isolated container or VM. Workspace path boundaries for direct file and patch tools still apply.
+- `host`: explicit full-host development. It disables command gates and Landlock and preserves the real host `HOME`, temporary directories, SSH agent, Git credentials, and complete inherited environment. Direct file and patch tools remain workspace-confined, but commands can access anything available to the user running the server.
 
 `--allow-network` remains a compatibility flag to open only the network-looking command gate. `--dangerously-skip-all-permissions` remains a compatibility alias for dangerous mode.
 
@@ -100,3 +101,4 @@ Report security issues privately to repository maintainers. Include the affected
 - Landlock is Linux-specific and best-effort; non-Linux platforms and Linux hosts without Landlock run `exec_command` with policy checks only and need an external sandbox for untrusted clients or workspaces.
 - Symlink race resistance still depends on platform support for anchored/no-follow file operations.
 - Secret redaction can miss transformed or fragmented secrets.
+- Host mode intentionally removes command-process isolation from the host account; authentication controls who can connect, not what an authenticated client can do.

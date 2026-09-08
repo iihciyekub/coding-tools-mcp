@@ -68,7 +68,7 @@ class RequiredDocsTests(unittest.TestCase):
             "docs/dogfood.md": ["MCP-Only Rule", "view_image", "Direct filesystem/shell bypass"],
             "docs/swe-bench.md": ["Official attempt report", "BLOCKED", "sympy__sympy-12419"],
             "docs/troubleshooting.md": ["SANDBOX_UNAVAILABLE", "MCP-Protocol-Version"],
-            "docs/permission-modes.md": ["safe", "trusted", "dangerous"],
+            "docs/permission-modes.md": ["safe", "trusted", "dangerous", "host"],
             "docs/exec-command-recipes.md": ["MAVEN_USER_HOME", "npm_config_cache", "GOCACHE", "CARGO_HOME"],
             "docs/troubleshooting-exec.md": ["DEV_NULL_DENIED", "DNS_RESOLUTION_FAILED", "OUTPUT_TRUNCATED"],
             "docs/security-boundary.md": ["Landlock", "external container or VM"],

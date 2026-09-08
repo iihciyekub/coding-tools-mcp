@@ -1,7 +1,7 @@
 export type TunnelType = "cloudflare" | "frp";
 export type CloudflareMode = "quick" | "named";
 export type AuthType = "oauth" | "bearer";
-export type PermissionMode = "safe" | "trusted" | "dangerous";
+export type PermissionMode = "safe" | "trusted" | "dangerous" | "host";
 export type RuntimeState = "stopped" | "starting" | "running" | "stopping" | "error";
 
 export interface TunnelConfig {

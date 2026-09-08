@@ -1,7 +1,30 @@
 # Changelog
 
-## Unreleased
+## 0.3.3 - 2026-09-08
 
+- Added Playwright/CDP browser control, browser console/network/element
+  inspection, and lightweight code-symbol/definition/reference tools.
+- Added a Manifest V3 Chrome Native Messaging bridge with extension discovery,
+  tab inspection, JavaScript execution, and externally permitted extension
+  messaging. Chrome's extension-isolation rules remain enforced.
+- Added macOS application automation through Accessibility and CGEvent APIs,
+  including app/window discovery, bounded UI snapshots, clicks, text input,
+  keyboard shortcuts, menu selection, and window screenshots.
+- Expanded the fixed MCP catalog to 49 tools and kept schema/documentation drift
+  checks aligned with the live registry.
+- Desktop 0.3.14 now bundles self-contained arm64 MCP and Chrome Native Host
+  executables in the signed app resources and prefers the bundled runtime before
+  PATH/source-checkout/`uvx` fallbacks.
+
+## 0.3.1 - 2026-09-06
+
+- Added an explicit `host` permission mode for trusted local development. It
+  disables command gates and Landlock and lets commands inherit the real home,
+  temporary directories, SSH agent, Git credentials, and complete host
+  environment, while keeping direct MCP file tools workspace-confined and
+  withholding the server's own transport-authentication secrets. The desktop
+  client exposes all four permission modes in both its panel and native
+  workspace menus.
 - Replaced the PySide/psutil desktop client with a Tauri 2 application using a
   React system-webview UI and a small Rust process controller. The new client
   owns runtime and tunnel process groups directly, stores credentials in the

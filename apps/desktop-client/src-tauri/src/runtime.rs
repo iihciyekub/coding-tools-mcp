@@ -400,6 +400,49 @@ fn resolve_runtime() -> Result<(PathBuf, Vec<String>), String> {
     if let Ok(explicit) = std::env::var("CODING_TOOLS_MCP_DESKTOP_RUNTIME") {
         return Ok((PathBuf::from(explicit), vec![]));
     }
+    if let Ok(executable) = std::env::current_exe() {
+        let suffix = if cfg!(windows) { ".exe" } else { "" };
+        let runtime_name = format!("coding-tools-mcp-runtime{suffix}");
+        let mut candidates = Vec::new();
+        if let Some(parent) = executable.parent() {
+            candidates.push(parent.join(&runtime_name));
+            candidates.push(parent.join(&runtime_name).join(&runtime_name));
+            candidates.push(parent.join("resources").join(&runtime_name));
+            candidates.push(
+                parent
+                    .join("resources")
+                    .join(&runtime_name)
+                    .join(&runtime_name),
+            );
+            if cfg!(target_os = "macos") {
+                if let Some(contents) = parent.parent() {
+                    candidates.push(contents.join("Resources").join(&runtime_name));
+                    candidates.push(
+                        contents
+                            .join("Resources")
+                            .join(&runtime_name)
+                            .join(&runtime_name),
+                    );
+                    candidates.push(
+                        contents
+                            .join("Resources")
+                            .join("resources")
+                            .join(&runtime_name),
+                    );
+                    candidates.push(
+                        contents
+                            .join("Resources")
+                            .join("resources")
+                            .join(&runtime_name)
+                            .join(&runtime_name),
+                    );
+                }
+            }
+        }
+        if let Some(program) = candidates.into_iter().find(|candidate| candidate.is_file()) {
+            return Ok((program, vec![]));
+        }
+    }
     if let Ok(program) = which::which_in("coding-tools-mcp", Some(&path), &cwd) {
         return Ok((program, vec![]));
     }
@@ -415,7 +458,7 @@ fn resolve_runtime() -> Result<(PathBuf, Vec<String>), String> {
     if let Ok(program) = which::which_in("uvx", Some(&path), &cwd) {
         return Ok((program, vec!["coding-tools-mcp".into()]));
     }
-    Err("Could not find coding-tools-mcp or uvx. Install uv and ensure it is available in your login shell PATH.".into())
+    Err("Could not find the bundled Coding Tools MCP runtime, coding-tools-mcp, or uvx. Reinstall the desktop app or install uv.".into())
 }
 
 fn resolve_cloudflared() -> Result<PathBuf, String> {

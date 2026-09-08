@@ -1,6 +1,6 @@
 # Permission Modes
 
-`exec_command` has three permission modes.
+`exec_command` has four permission modes.
 
 ## safe
 
@@ -38,6 +38,35 @@ Dangerous mode disables `exec_command` permission gates and Landlock. Use it onl
 coding-tools-mcp --permission-mode dangerous --workspace /path/to/repo
 ```
 
+Dangerous mode still uses the isolated command `HOME`, `TMPDIR`, and cache
+directories. It is intended for a server that already runs inside a disposable
+container or VM.
+
+## host
+
+Host mode is the explicit full-host development mode. It disables command
+permission gates and Landlock like dangerous mode, defaults environment
+inheritance to `all`, and does not replace `HOME`, `TMPDIR`, or ecosystem cache
+locations. Commands can therefore use the server process's SSH agent, SSH/Git
+configuration, credential helpers, language version managers, and files outside
+the configured workspace:
+
+```bash
+coding-tools-mcp --permission-mode host --workspace /path/to/repo
+```
+
+Direct file tools (`read_file`, `apply_patch`, search, and listing) remain
+workspace-confined; unrestricted host access is available through
+`exec_command`. The server's own transport authentication secrets are always
+removed from child command environments.
+
+Host mode gives an authenticated MCP client the same command authority as the
+user running the server. Use it only with trusted repositories and clients.
+Prefer stdio or loopback. If it is exposed through an HTTPS tunnel, keep OAuth
+or bearer authentication enabled, protect the authorization credential, and
+understand that transport authentication does not make model-generated commands
+safe.
+
 Compatibility aliases:
 
 - `--allow-network`: opens only the network-looking command gate.
@@ -48,7 +77,7 @@ Compatibility aliases:
 Permission modes govern this server's own gates. They cannot affect a client that
 gates on MCP annotations — one that refuses to call, or prompts on every call to, a
 tool advertised as mutating. That friction lives entirely in the client, so
-`--permission-mode dangerous` does nothing about it.
+`--permission-mode dangerous` or `host` does nothing about it.
 
 `--dangerously-fake-readonly-annotations` addresses that one case. It makes
 `tools/list` report every tool with `readOnlyHint: true`, `destructiveHint: false`,
@@ -63,8 +92,8 @@ The annotations are false. `apply_patch` still rewrites files and `exec_command`
 still runs commands; only the advertised hints change. Because the claim is false,
 it is fenced in:
 
-- It requires `--permission-mode dangerous`, so it can only be set alongside an
-  explicit assertion that the workspace is disposable.
+- It requires `--permission-mode dangerous` or `host`, so it can only be set
+  alongside an explicit unrestricted-execution choice.
 - Over HTTP it requires bearer auth or OAuth. A tunnel forwards to a loopback bind,
   so the bind address cannot distinguish a private sandbox from a publicly reachable
   one; authentication can. Use stdio for an unauthenticated local sandbox.

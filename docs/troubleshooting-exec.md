@@ -51,6 +51,35 @@ Fixes, in preference order:
 3. **Broaden inheritance** with `--shell-env-inherit all` /
    `CODING_TOOLS_MCP_SHELL_ENV_INHERIT=all` when commands also need variables
    beyond the core set (`NVM_DIR`, `GOPATH`, `JAVA_HOME`, …). Sensitive-looking
-   variables are still filtered outside dangerous mode. This mirrors Codex's
+   variables are still filtered in safe and trusted modes. This mirrors Codex's
    `shell_environment_policy.inherit = "all"` default while keeping this
    server's stricter `core` default.
+
+## Git over SSH cannot use the host identity
+
+Symptoms include `Permission denied (publickey)`, missing host aliases, a Git
+credential prompt that cannot be completed, or Git behaving differently from a
+normal terminal.
+
+Safe and trusted modes intentionally use an isolated command home. Dangerous
+mode removes command gates but keeps that isolated home. Use `host` mode only
+when the MCP client and repository are trusted and commands must behave exactly
+like the user's terminal:
+
+```bash
+coding-tools-mcp --permission-mode host --workspace /path/to/repo
+```
+
+Host mode inherits `SSH_AUTH_SOCK` and the real HOME by default. It does not load
+keys into the agent itself. Verify the host session before starting the server:
+
+```bash
+ssh-add -l
+ssh -T git@your-git-host.example
+```
+
+On macOS, load a passphrase-protected key into Keychain-backed ssh-agent with
+`ssh-add --apple-use-keychain ~/.ssh/<private-key>`. Restart a GUI launcher if it
+was opened before the correct agent socket or toolchain environment existed.
+`check_exec_environment` reports the environment scope and boolean SSH/Git
+integration availability without returning credential paths or contents.

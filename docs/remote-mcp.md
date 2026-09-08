@@ -183,8 +183,10 @@ curl "$BASE_URL/mcp" \
   loopback-only local process.
 - Use HTTPS, rotate static bearer tokens, and keep OAuth passwords/signing keys
   out of committed files.
-- Keep the MCP runtime in `safe` or `trusted`; use `dangerous` only inside an
-  isolated container or VM with a trusted client.
+- Keep shared MCP endpoints in `safe` or `trusted`; use `dangerous` only inside
+  an isolated container or VM. `host` grants commands the local server user's
+  full authority and should be enabled only for a private, authenticated endpoint
+  with a trusted client.
 - An HTTPS tunnel authenticates transport, not code execution. The server's
   policy and Landlock protections do not replace an external sandbox for
   untrusted repositories.

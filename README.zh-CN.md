@@ -16,7 +16,8 @@ Coding Tools MCP 是一个**模型中立的编程运行时**，通过
 文件读取与搜索、结构化多文件补丁、命令执行、交互式命令、git 操作——
 一个服务器，任何 MCP 客户端都能驱动。Claude Desktop、Claude Code、Codex、
 Cursor、Cline、VS Code、Windsurf、Gemini CLI，或你自己写的 agent，拿到的
-都是同一套久经考验的 18 个工具：限定在单一工作区内，由权限模式层层把关。
+都是同一套久经考验的 18 个工具：默认限定在单一工作区内，由显式权限模式
+层层把关。
 
 [![观看演示](https://img.youtube.com/vi/N9lQaXt1eqQ/maxresdefault.jpg)](https://youtu.be/N9lQaXt1eqQ?si=LyEwvzzQF6QjUxR0)
 
@@ -27,7 +28,8 @@ Cursor、Cline、VS Code、Windsurf、Gemini CLI，或你自己写的 agent，�
 - **安全是产品本身，不是附加项。** 每个服务器进程绑定一个工作区根目录；
   绝对路径、`..` 穿越、符号链接逃逸一律拒绝；权限模式对网络访问、shell
   展开、内联脚本和破坏性命令逐项把关；Linux 上还有
-  [Landlock](docs/security-boundary.md) 提供内核级文件系统隔离。
+  [Landlock](docs/security-boundary.md) 提供内核级文件系统隔离。显式启用
+  `host` 模式后，命令执行会退出这层边界，以满足完整本机开发需要。
 - **模型与厂商中立。** 固定且如实标注的工具目录——没有 profile 切换，
   没有注解把戏。随意更换模型或客户端，运行时行为保持不变。
 - **为上下文窗口精打细算。** 工具结果按设计做摘要、分页与封顶；在确定性
@@ -135,6 +137,10 @@ Linux：按工作区管理配置、一键启停服务器与隧道、凭证写入
 | 执行 | `exec_command` · `write_stdin` · `read_output` · `kill_command` · `request_permissions` |
 | Git | `git_status` · `git_diff` · `git_log` · `git_show` · `git_blame` |
 | 运行时 | `server_info` · `check_exec_environment` |
+| 浏览器 | `browser_status` · `browser_tabs` · `browser_active_tab` · `browser_snapshot` · `browser_screenshot` · `browser_evaluate` · `browser_click` · `browser_type` · `browser_console` · `browser_network` · `browser_inspect` |
+| Chrome 扩展 | `chrome_extension_install` · `chrome_extension_status` · `chrome_extensions` · `chrome_extension_tabs` · `chrome_extension_execute` · `chrome_extension_send` |
+| macOS App | `app_accessibility` · `app_list` · `app_launch` · `app_activate` · `app_windows` · `app_snapshot` · `app_click` · `app_type` · `app_press` · `app_menu` · `app_screenshot` |
+| 代码智能 | `code_symbols` · `code_definition` · `code_references` |
 
 仓库根部的 `AGENTS.md`/`CLAUDE.md` 会自动载入，并随 `initialize` 的
 `instructions` 下发；不握手的客户端则通过 `server/discover` 拿到同一份内容。
@@ -150,9 +156,11 @@ Linux：按工作区管理配置、一键启停服务器与隧道、凭证写入
 | `safe`（默认） | 日常 agent 工作 | 文件工具与常规命令；疑似联网命令、shell 展开、内联脚本、破坏性命令均需显式授权 |
 | `trusted` | 本地开发 | 放开网络、shell 展开与内联脚本；保留敏感值过滤与破坏性命令检查 |
 | `dangerous` | 仅限隔离容器/虚拟机 | 关闭 `exec_command` 权限门；工作区路径边界依然生效 |
+| `host` | 显式的本机完全开发 | 关闭命令权限门与 Landlock，继承服务进程真实的 HOME、临时目录、SSH agent、Git 凭据和完整环境 |
 
 递归列举与搜索默认排除 `.git`、`node_modules`、构建产物、虚拟环境和常见
-缓存。命令在工作区限定的 cwd 下运行，环境经过清洗，带超时与输出上限。
+缓存。命令在工作区限定的 cwd 下运行，带超时与输出上限；除显式启用的
+`host` 模式外，环境会经过清洗。
 支持 Landlock 的 Linux 主机获得内核级文件系统隔离；其他平台会收到明确
 警告——这仍不是完整的操作系统级沙箱，真正不可信的工作请用 Docker 镜像或
 虚拟机。详见：

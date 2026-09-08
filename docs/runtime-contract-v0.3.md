@@ -16,7 +16,7 @@ provided. Permission modes alter command policy, not the advertised catalog.
 One switch, `--dangerously-fake-readonly-annotations`, rewrites the exposure hints
 in `tools/list` for clients that refuse mutating tools by annotation. It is not a
 tool profile: the catalog, the schemas, and what every tool actually does are all
-unchanged, and no tool is hidden. It requires `dangerous` permission mode, requires
+unchanged, and no tool is hidden. It requires `dangerous` or `host` permission mode, requires
 authentication over HTTP, and is reported by `server_info.annotation_override` and
 the server card, both of which continue to publish the real annotations recorded
 below. Unless that switch is set, the annotations in this document are what
@@ -115,7 +115,7 @@ instructions:
     "io.modelcontextprotocol/serverInfo": {
       "name": "coding-tools-mcp",
       "title": "Coding Tools MCP",
-      "version": "0.3.0"
+      "version": "0.3.3"
     }
   }
 }
@@ -293,7 +293,7 @@ Retry: This command_id has expired or never existed; …
 Known tool error codes include:
 
 ```json
-["ABSOLUTE_PATH_DENIED", "BINARY_FILE", "COMMAND_CLOSED", "COMMAND_LIMIT_REACHED", "COMMAND_NOT_FOUND", "ELICITATION_UNSUPPORTED", "GIT_ERROR", "INTERNAL_ERROR", "INVALID_ARGUMENT", "IS_DIRECTORY", "NOT_A_DIRECTORY", "NOT_FOUND", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_UNAVAILABLE", "SYMLINK_ESCAPE", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING"]
+["ABSOLUTE_PATH_DENIED", "ACCESSIBILITY_PERMISSION_REQUIRED", "APP_CONTROL_ERROR", "BINARY_FILE", "BROWSER_ERROR", "CHROME_EXTENSION_ERROR", "CHROME_EXTENSION_UNAVAILABLE", "COMMAND_CLOSED", "COMMAND_LIMIT_REACHED", "COMMAND_NOT_FOUND", "ELICITATION_UNSUPPORTED", "GIT_ERROR", "INTERNAL_ERROR", "INVALID_ARGUMENT", "IS_DIRECTORY", "NOT_A_DIRECTORY", "NOT_FOUND", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_UNAVAILABLE", "SCREEN_RECORDING_PERMISSION_REQUIRED", "SYMLINK_ESCAPE", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING", "UNSUPPORTED_PLATFORM"]
 ```
 
 Error categories are `validation`, `security`, `permission`, `runtime`,
@@ -357,7 +357,7 @@ survive tunnel churn. Forwarded headers are ignored unless
 
 ## Stable tool inventory
 
-The default catalog has 18 tools, including `view_image`. Setting
+The default catalog has 49 tools, including `view_image`. Setting
 `CODING_TOOLS_MCP_ENABLE_VIEW_IMAGE=0` is the sole installation capability gate
 and removes only that optional binary-content tool. It is not a tool profile.
 
@@ -374,7 +374,8 @@ Inputs: none.
 Annotations: `{"title":"Server info","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
 Returns server version, `supported_protocol_versions`, workspace, fixed tool
-count, auth state, permission mode, runtime directories, project-context
+count, auth state, permission mode, environment scope, runtime directories,
+boolean host SSH/Git integration availability, project-context
 metadata, exec policy, and the static retained-output budget. It reports no
 per-session value and no runtime counter: there is no session, and how often a
 budget was hit is a property of the process rather than an answer to whichever
@@ -528,8 +529,8 @@ Inputs: `"tool_name"`, `"permission"`, `"reason"`, `"arguments"`, `"scope"`, `"t
 Annotations: `{"title":"Request permissions","readOnlyHint":true,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false}`.
 
 The current server does not advertise MCP elicitation. This tool therefore
-returns `ELICITATION_UNSUPPORTED`, except that dangerous mode reports the
-operator's explicit auto-grant policy. It never silently escalates safe mode.
+returns `ELICITATION_UNSUPPORTED`, except that dangerous and host modes report
+the operator's explicit auto-grant policy. It never silently escalates safe mode.
 
 ### view_image
 
@@ -540,6 +541,310 @@ Annotations: `{"title":"View image","readOnlyHint":true,"destructiveHint":false,
 The base64 data appears exactly once, in one MCP image content block. Stable
 `structuredContent` contains metadata only; it has no duplicate base64 or data
 URL. Pillow is optional and used only for requested auto-resize.
+
+### browser_status
+
+Inputs: `"endpoint"`, `"timeout_ms"`.
+
+Annotations: `{"title":"Browser status","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
+
+Connects with Playwright to a local loopback Chrome CDP endpoint, defaulting to
+`http://127.0.0.1:9222`, and reports browser version, context count, and tab count.
+
+### browser_tabs
+
+Inputs: `"endpoint"`, `"timeout_ms"`.
+
+Annotations: `{"title":"Browser tabs","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
+
+Lists inspectable Chrome tabs with stable per-call indexes, titles, URLs, and
+document visibility state.
+
+### browser_active_tab
+
+Inputs: `"endpoint"`, `"timeout_ms"`.
+
+Annotations: `{"title":"Browser active tab","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
+
+Returns the last tab reporting `document.visibilityState == "visible"`, with a
+fallback to the last inspectable tab when Chrome cannot expose foreground state.
+
+### browser_snapshot
+
+Inputs: `"endpoint"`, `"tab_index"`, `"timeout_ms"`, `"max_chars"`, `"max_elements"`.
+
+Annotations: `{"title":"Browser snapshot","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
+
+Returns bounded `document.body.innerText` plus a simplified list of visible
+links, buttons, form controls, button/link roles, and editable elements with
+selectors suitable for subsequent browser calls.
+
+### browser_screenshot
+
+Inputs: `"endpoint"`, `"tab_index"`, `"timeout_ms"`, `"full_page"`.
+
+Annotations: `{"title":"Browser screenshot","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
+
+Captures the selected tab as PNG. The base64 appears only in the MCP image
+content block; structured content keeps metadata only.
+
+### browser_evaluate
+
+Inputs: `"script"`, `"endpoint"`, `"tab_index"`, `"timeout_ms"`.
+
+Annotations: `{"title":"Browser evaluate","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Evaluates arbitrary JavaScript in the selected page. It is intentionally marked
+mutating because JavaScript can change page state even when a particular script
+only reads it.
+
+### browser_click
+
+Inputs: `"selector"`, `"endpoint"`, `"tab_index"`, `"timeout_ms"`.
+
+Annotations: `{"title":"Browser click","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Clicks the first element matching the supplied Playwright selector.
+
+### browser_type
+
+Inputs: `"selector"`, `"text"`, `"endpoint"`, `"tab_index"`, `"timeout_ms"`, `"clear"`, `"delay_ms"`.
+
+Annotations: `{"title":"Browser type","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+By default fills the first matching element, replacing its current value. With
+`clear=false`, it types sequentially and optionally applies `delay_ms` between
+characters.
+
+### browser_console
+
+Inputs: `"endpoint"`, `"tab_index"`, `"timeout_ms"`, `"wait_ms"`, `"max_entries"`, `"reload"`.
+
+Annotations: `{"title":"Browser console","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Captures console messages and uncaught page errors emitted after the Playwright
+attachment. `reload=true` reloads the selected page first so page-load console
+output can be observed; for that reason the tool is truthfully marked mutating.
+
+### browser_network
+
+Inputs: `"endpoint"`, `"tab_index"`, `"timeout_ms"`, `"wait_ms"`, `"max_entries"`, `"reload"`, `"include_resources"`.
+
+Annotations: `{"title":"Browser network","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Returns current `PerformanceResourceTiming` entries when requested and captures
+responses/request failures emitted after attachment. `reload=true` reloads the
+page to sample page-load traffic, so the tool is marked mutating.
+
+### browser_inspect
+
+Inputs: `"selector"`, `"endpoint"`, `"tab_index"`, `"timeout_ms"`, `"max_html_chars"`.
+
+Annotations: `{"title":"Browser inspect","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
+
+Inspects the first matching element and returns its attributes, bounded
+`outerHTML`, bounding rectangle, selected computed style properties, parent
+chain, visibility, and element-scoped Web Animations state/keyframes.
+
+### code_symbols
+
+Inputs: `"path"`, `"query"`, `"kind"`, `"max_results"`, `"max_files"`.
+
+Annotations: `{"title":"Code symbols","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+Lists language-aware definitions under a workspace file or directory. Python
+uses the standard-library AST; common JavaScript/TypeScript, Rust, Swift, Go,
+Java/Kotlin, and C/C++ declarations use lightweight language patterns. Results
+include symbol name, kind, workspace-relative path, line, column, and preview.
+
+### code_definition
+
+Inputs: `"symbol"`, `"path"`, `"max_results"`, `"max_files"`.
+
+Annotations: `{"title":"Code definition","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+Finds exact symbol or qualified-name definitions using the same language-aware
+indexing rules as `code_symbols`. Multiple definitions are returned for
+overloads or duplicate names rather than guessing one winner.
+
+### code_references
+
+Inputs: `"symbol"`, `"path"`, `"case_sensitive"`, `"max_results"`, `"max_files"`.
+
+Annotations: `{"title":"Code references","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+Finds exact identifier-token occurrences across supported source files and
+returns bounded workspace-relative path, line, column, and preview metadata.
+This is intentionally a lightweight textual reference scan rather than a
+compiler or persistent LSP service.
+
+### chrome_extension_install
+
+Inputs: `"host_path"`, `"open_extensions_page"`.
+
+Annotations: `{"title":"Install Chrome extension bridge","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+On macOS, copies the bundled Manifest V3 bridge extension into the current
+user's application-support directory and writes Chrome's per-user Native
+Messaging host manifest. `host_path` may override discovery of the bundled
+`coding-tools-mcp-chrome-host` executable. `open_extensions_page=true` opens
+`chrome://extensions` to make the one-time approval step immediate. Chrome
+still requires one explicit **Load unpacked** approval from that page.
+
+### chrome_extension_status
+
+Inputs: `"timeout_ms"`.
+
+Annotations: `{"title":"Chrome extension status","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
+
+Reports the stable bridge extension id, install paths, Native Messaging
+manifest state, local Unix-socket state, and live bridge metadata when the
+extension is connected.
+
+### chrome_extensions
+
+Inputs: `"query"`, `"max_results"`, `"timeout_ms"`.
+
+Annotations: `{"title":"Chrome extensions","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
+
+Uses Chrome's `management` extension API through Native Messaging to list
+installed extensions with ids, names, versions, enablement, type, and install
+type. `query` filters by extension name or id.
+
+### chrome_extension_tabs
+
+Inputs: `"timeout_ms"`.
+
+Annotations: `{"title":"Chrome extension tabs","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
+
+Lists tabs through Chrome's extension `tabs` API. This is independent of the
+Playwright/CDP browser tools and does not require a remote-debugging port.
+
+### chrome_extension_execute
+
+Inputs: `"tab_id"`, `"script"`, `"timeout_ms"`.
+
+Annotations: `{"title":"Chrome extension execute","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Temporarily attaches Chrome's debugger API to the selected tab, evaluates the
+JavaScript expression, returns a by-value result, then detaches. Chrome may
+surface its normal debugger-attached UI while the request is active.
+
+### chrome_extension_send
+
+Inputs: `"extension_id"`, `"message"`, `"timeout_ms"`.
+
+Annotations: `{"title":"Chrome extension send","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Sends a runtime message to another installed Chrome extension. Chrome security
+rules still apply: the target extension must explicitly permit external
+messages from the bridge extension; this tool does not bypass extension
+isolation.
+
+### app_accessibility
+
+Inputs: `"open_settings"`.
+
+Annotations: `{"title":"App accessibility","readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":true}`.
+
+Reports whether macOS Accessibility trusts the current runtime. With
+`open_settings=true`, opens the system Accessibility privacy pane when trust is
+missing.
+
+### app_list
+
+Inputs: `"query"`, `"include_background"`, `"max_results"`.
+
+Annotations: `{"title":"App list","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
+
+Lists running macOS applications with name, bundle id, pid, background-only
+state, foreground state, and current Accessibility trust.
+
+### app_launch
+
+Inputs: `"app"`, `"new_instance"`.
+
+Annotations: `{"title":"App launch","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Launches a macOS application by display name or bundle identifier using the
+system `open` service. `new_instance=true` requests a separate application
+instance where macOS permits one.
+
+### app_activate
+
+Inputs: `"app"`, `"wait_ms"`.
+
+Annotations: `{"title":"App activate","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Brings an application to the foreground and returns the resolved running-app
+metadata after the bounded activation delay.
+
+### app_windows
+
+Inputs: `"app"`.
+
+Annotations: `{"title":"App windows","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
+
+Returns Accessibility metadata for each window, including role/subrole, title,
+identifier, focus, position, and size. Accessibility permission is required.
+
+### app_snapshot
+
+Inputs: `"app"`, `"max_depth"`, `"max_elements"`.
+
+Annotations: `{"title":"App snapshot","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
+
+Walks a bounded portion of the macOS Accessibility hierarchy and returns roles,
+titles, identifiers, descriptions, values, focus/enabled state, geometry, and
+tree depth for subsequent app-control calls.
+
+### app_click
+
+Inputs: `"app"`, `"role"`, `"title"`, `"identifier"`, `"index"`.
+
+Annotations: `{"title":"App click","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Finds an Accessibility element by role/title/identifier (at least one selector
+is required) and invokes `AXPress`, falling back to a synthesized mouse click at
+the element center when appropriate.
+
+### app_type
+
+Inputs: `"app"`, `"text"`, `"role"`, `"title"`, `"identifier"`, `"index"`, `"clear"`.
+
+Annotations: `{"title":"App type","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Sets `AXValue` directly for a matched editable element when possible; otherwise
+uses synthesized keyboard input. With no element selector, text is sent to the
+currently focused control in the target application.
+
+### app_press
+
+Inputs: `"app"`, `"key"`, `"modifiers"`, `"wait_ms"`.
+
+Annotations: `{"title":"App press","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Activates the application and posts one supported keyboard key with optional
+Command, Shift, Control, Option, or Fn modifiers using CGEvent.
+
+### app_menu
+
+Inputs: `"app"`, `"path"`.
+
+Annotations: `{"title":"App menu","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Selects a menu path such as `["File", "Open…"]` through Accessibility
+`AXMenuBarItem`/`AXMenuItem` elements.
+
+### app_screenshot
+
+Inputs: `"app"`, `"window_index"`.
+
+Annotations: `{"title":"App screenshot","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
+
+Captures the Accessibility bounds of one app window as PNG. The image is
+returned once as MCP image content with metadata-only structured content.
+macOS Screen Recording permission may be required in addition to Accessibility.
 
 ## Forbidden product-layer tools
 

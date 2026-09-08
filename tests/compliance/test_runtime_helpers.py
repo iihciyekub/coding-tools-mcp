@@ -620,6 +620,51 @@ class RuntimeHelperTests(unittest.TestCase):
             self.assertFalse(dangerous.landlock_enabled())
             self.assertEqual(dangerous.global_tmp_write_policy(), "allowed")
 
+            host = Runtime(workspace, permission_mode="host")
+            host._check_command_policy("cat /etc/passwd", {})
+            host._check_command_policy("git reset --hard", {})
+            self.assertFalse(host.landlock_enabled())
+            self.assertEqual(host.global_tmp_write_policy(), "allowed")
+            self.assertEqual(host.shell_env_policy.inherit, "all")
+            grant = host.request_permissions({"permission": "network"})
+            self.assertEqual(grant["grant_id"], "host")
+            self.assertEqual(grant["constraints"]["mode"], "host")
+
+    def test_host_mode_preserves_host_home_tmp_credentials_and_ssh_agent(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            host_home = Path(tmp) / "host-home"
+            host_tmp = Path(tmp) / "host-tmp"
+            ssh_socket = Path(tmp) / "ssh-agent.sock"
+            host_home.mkdir()
+            host_tmp.mkdir()
+            ssh_socket.touch()
+            runtime = Runtime(workspace, permission_mode="host")
+            host_env = {
+                "HOME": str(host_home),
+                "TMPDIR": str(host_tmp),
+                "PATH": "/usr/bin",
+                "SSH_AUTH_SOCK": str(ssh_socket),
+                "OPENAI_API_KEY": "sk-test-secret-value",
+                "GIT_CONFIG_GLOBAL": str(host_home / ".gitconfig"),
+                "CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET": "server-control-secret",
+            }
+            with patch.dict(server_module.os.environ, host_env, clear=True):
+                env = runtime._command_env({})
+                info = runtime.server_info_payload()
+
+            self.assertEqual(
+                env,
+                {key: value for key, value in host_env.items() if key != "CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET"},
+            )
+            self.assertEqual(info["home"], str(host_home))
+            self.assertEqual(info["tmpdir"], str(host_tmp))
+            self.assertEqual(info["environment_scope"], "host")
+            self.assertTrue(info["host_integrations"]["enabled"])
+            self.assertTrue(info["host_integrations"]["ssh_auth_sock_reachable"])
+            self.assertFalse(runtime.runtime_dir.exists())
+
     def test_command_env_all_preserves_toolchain_environment_but_filters_sensitive_values(self) -> None:
         with TemporaryDirectory() as tmp:
             workspace = Path(tmp)
@@ -1926,14 +1971,16 @@ class FakeReadonlyAnnotationTests(unittest.TestCase):
                 warnings,
             )
 
-    def test_override_requires_dangerous_permission_mode(self) -> None:
+    def test_override_requires_skip_all_permission_mode(self) -> None:
         with TemporaryDirectory() as tmp:
             for mode in ("safe", "trusted"):
                 with self.subTest(permission_mode=mode):
                     with self.assertRaises(ToolFailure):
                         Runtime(Path(tmp), permission_mode=mode, fake_readonly_annotations=True)
+            host = Runtime(Path(tmp), permission_mode="host", fake_readonly_annotations=True)
+            self.assertTrue(host.fake_readonly_annotations)
 
-    def test_policy_from_args_requires_dangerous_permission_mode(self) -> None:
+    def test_policy_from_args_requires_skip_all_permission_mode(self) -> None:
         parser = server_module.build_parser()
         args = parser.parse_args(["--dangerously-fake-readonly-annotations", "--permission-mode", "trusted"])
         with self.assertRaises(ValueError):
@@ -1941,6 +1988,11 @@ class FakeReadonlyAnnotationTests(unittest.TestCase):
 
         args = parser.parse_args(["--dangerously-fake-readonly-annotations", "--permission-mode", "dangerous"])
         self.assertTrue(server_module.runtime_policy_from_args(args).fake_readonly_annotations)
+
+        args = parser.parse_args(["--dangerously-fake-readonly-annotations", "--permission-mode", "host"])
+        policy = server_module.runtime_policy_from_args(args)
+        self.assertTrue(policy.fake_readonly_annotations)
+        self.assertEqual(policy.shell_env_policy.inherit, "all")
 
     def test_policy_from_args_reads_the_environment_switch(self) -> None:
         parser = server_module.build_parser()

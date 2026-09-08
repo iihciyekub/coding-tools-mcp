@@ -16,8 +16,8 @@ Coding Tools MCP is a **model-neutral coding runtime** served over the
 search, structured multi-file patches, command execution, interactive
 sessions, and git — one server that any MCP client can drive. Claude Desktop,
 Claude Code, Codex, Cursor, Cline, VS Code, Windsurf, Gemini CLI, or an agent
-you build yourself all get the same 18 battle-tested tools, confined to one
-workspace, gated by permission modes.
+you build yourself all get the same 18 battle-tested tools, workspace-confined
+by default and gated by explicit permission modes.
 
 [![Watch the demo](https://img.youtube.com/vi/N9lQaXt1eqQ/maxresdefault.jpg)](https://youtu.be/N9lQaXt1eqQ?si=LyEwvzzQF6QjUxR0)
 
@@ -30,7 +30,8 @@ workspace, gated by permission modes.
   server. Absolute paths, `..` traversal, and symlink escapes are rejected.
   Permission modes gate network access, shell expansion, inline scripts, and
   destructive commands. On Linux, [Landlock](docs/security-boundary.md) adds
-  kernel-level filesystem confinement.
+  kernel-level filesystem confinement. Explicit `host` mode opts command
+  execution out of that boundary for full local development.
 - **It is model- and vendor-neutral.** A fixed, truthfully annotated catalog —
   no profile switching, no annotation games. Swap models or clients freely;
   the runtime and its behavior stay put.
@@ -148,6 +149,10 @@ rollback.
 | Execution | `exec_command` · `write_stdin` · `read_output` · `kill_command` · `request_permissions` |
 | Git | `git_status` · `git_diff` · `git_log` · `git_show` · `git_blame` |
 | Runtime | `server_info` · `check_exec_environment` |
+| Browser | `browser_status` · `browser_tabs` · `browser_active_tab` · `browser_snapshot` · `browser_screenshot` · `browser_evaluate` · `browser_click` · `browser_type` · `browser_console` · `browser_network` · `browser_inspect` |
+| Chrome extensions | `chrome_extension_install` · `chrome_extension_status` · `chrome_extensions` · `chrome_extension_tabs` · `chrome_extension_execute` · `chrome_extension_send` |
+| macOS apps | `app_accessibility` · `app_list` · `app_launch` · `app_activate` · `app_windows` · `app_snapshot` · `app_click` · `app_type` · `app_press` · `app_menu` · `app_screenshot` |
+| Code intelligence | `code_symbols` · `code_definition` · `code_references` |
 
 Root `AGENTS.md`/`CLAUDE.md` files load automatically and come back in the
 `instructions` of `initialize`, or of `server/discover` for a client that
@@ -163,10 +168,11 @@ envelopes: [docs/tools-and-schemas.md](docs/tools-and-schemas.md) ·
 | `safe` (default) | day-to-day agent work | file tools and vetted commands; network-looking commands, shell expansion, inline scripts, and destructive commands all require explicit permission |
 | `trusted` | local development | opens network, shell expansion, and inline scripts; keeps secret filtering and destructive-command checks |
 | `dangerous` | isolated containers/VMs only | disables `exec_command` permission gates; workspace path boundaries still apply |
+| `host` | explicit full-host development | disables command gates and Landlock, inherits the server process's real home, temporary directories, SSH agent, Git credentials, and complete environment |
 
 Recursive listing and search exclude `.git`, `node_modules`, build outputs,
-virtualenvs, and caches. Commands run with workspace-bound cwd, scrubbed
-environment, timeouts, and output caps. Linux hosts with Landlock get
+virtualenvs, and caches. Commands run with workspace-bound cwd, timeouts, and
+output caps; the environment is scrubbed except in explicit `host` mode. Linux hosts with Landlock get
 kernel-enforced filesystem confinement; other platforms get an explicit
 warning — this is still not a complete OS sandbox, so use the Docker image or
 a VM for genuinely untrusted work. Details:

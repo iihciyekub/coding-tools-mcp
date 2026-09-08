@@ -221,7 +221,8 @@ consequences for embedders:
   at startup and reuses it for spawned backends.
 - Set `CODING_TOOLS_MCP_SHELL_ENV_INHERIT=all` (or `--shell-env-inherit all`)
   when the workload genuinely needs the full host environment; sensitive
-  variables are still filtered outside dangerous mode.
+  variables are still filtered in safe and trusted modes. Use host mode when
+  commands also need the real home, credentials, and SSH agent.
 
-*`HOME` is redirected to a per-runtime directory; see the
+*`HOME` is redirected to a per-runtime directory except in host mode; see the
 [runtime contract](runtime-contract-v0.3.md).
