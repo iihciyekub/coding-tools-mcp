@@ -17,12 +17,13 @@ no dynamic `tools/list_changed`, and no required `open_workspace` call.
 `apply_patch` is the only direct file-write tool. `safe`, `trusted`, `dangerous`,
 and `host` are command permission policies and never alter `tools/list`.
 
-The default catalog contains 49 tools:
+The default catalog contains 51 tools:
 
 - runtime/context: `server_info`, `check_exec_environment`
 - workspace inspection: `read_file`, `list_dir`, `list_files`, `search_text`
 - mutation: `apply_patch`
-- processes: `exec_command`, `write_stdin`, `read_output`, `kill_command`
+- processes: `exec_command`, `get_command`, `list_commands`, `write_stdin`,
+  `read_output`, `kill_command`
 - Git: `git_status`, `git_diff`, `git_log`, `git_show`, `git_blame`
 - policy/image: `request_permissions`, `view_image`
 - browser: `browser_status`, `browser_tabs`, `browser_active_tab`,
@@ -71,7 +72,9 @@ retained-command stores, per-command and runtime output budgets, TTL cleanup,
 and explicit `next_action` objects for polling or truncated output. Command
 handles are `command_id` values, owned by the workspace rather than by a
 client: any authenticated client of the workspace can continue, read, or kill
-a command with one, and no transport event ends it.
+a command with one, and no transport event ends it. `exec_command.operation_id`
+provides optional retry deduplication, while `get_command` and `list_commands`
+provide read-only reconnect recovery without consuming output cursors.
 
 ## Security boundary
 

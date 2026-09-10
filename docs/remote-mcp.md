@@ -62,8 +62,9 @@ Registration rules:
 - Supported token authentication methods are `none`, `client_secret_post`, and
   `client_secret_basic`. A client must use the method it registered.
 - Client secrets are stored as digests. Public clients rely on mandatory PKCE.
-- Registrations and authorization codes are process-local. A restart requires
-  dynamic clients to register again.
+- Dynamic client registrations are persisted per workspace using an atomic,
+  user-only registry file. Authorization codes remain intentionally process-local
+  and single-use.
 
 Authorization codes are single-use and expire after five minutes. Access tokens
 default to 24 hours and are bound to the registered client and exact MCP
@@ -78,7 +79,8 @@ CODING_TOOLS_MCP_OAUTH_PASSWORD=<authorize-page-password>
 # Optional stable public origin, without /mcp:
 CODING_TOOLS_MCP_SERVER_URL=https://mcp.example.com
 
-# Optional stable HS256 key; hex-encoded bytes:
+# Optional explicit stable HS256 key; hex-encoded bytes. When omitted, the
+# server creates and securely persists a per-workspace signing key:
 CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET=<hex-key>
 
 # Optional token lifetime in seconds; default 86400:
@@ -93,6 +95,14 @@ The server ignores `Forwarded` and `X-Forwarded-*` by default. Set
 `CODING_TOOLS_MCP_TRUST_PROXY_HEADERS=1` only behind a proxy you control. You can
 also set exact browser origins with the comma-separated
 `CODING_TOOLS_MCP_ALLOWED_ORIGINS` variable.
+
+By default the durable DCR registry lives below the user's state directory and
+is keyed by the canonical workspace path. Set
+`CODING_TOOLS_MCP_OAUTH_REGISTRY_FILE` only when deployment needs an explicit
+state-file location. The automatically managed token-signing secret is stored
+next to that registry with user-only permissions. Keeping the same workspace
+state and public resource URL allows already-issued access tokens and registered
+clients to survive a server restart.
 
 ### Optional pre-registered client
 

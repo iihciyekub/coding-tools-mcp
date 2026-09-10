@@ -47,6 +47,7 @@ from .oauth import (
     OAUTH_RESPONSE_TYPES_SUPPORTED,
     MAX_PENDING_CODES,
     OAUTH_TOKEN_TTL_SECONDS,
+    OAuthClientRegistry,
     OAuthConfig,
     create_access_token,
     valid_pkce_challenge,
@@ -66,6 +67,7 @@ from .processes import (
     COMMAND_BUFFER_BYTES,
     COMMAND_HEAD_BUFFER_DIVISOR,
     CommandRun,
+    process_group_alive,
     spawn_process,
     start_reader_threads,
     start_command_watchdog,
@@ -216,10 +218,15 @@ DESTRUCTIVE_RE = re.compile(
     re.I,
 )
 MAX_HTTP_REQUEST_BYTES = 1_048_576
+HTTP_BODY_READ_TIMEOUT_SECONDS = 15.0
+MAX_HTTP_CONCURRENT_REQUESTS = 32
 EXEC_PREVIEW_BYTES = 4096
 MAX_ACTIVE_COMMANDS = 16
 MAX_RETAINED_OUTPUT_COMMANDS = 32
-COMPLETED_COMMAND_TTL_SECONDS = 300
+# Long web/plugin sessions frequently reconnect after several minutes. Keep a
+# completed task recoverable for 30 minutes so command_id/operation_id recovery
+# does not turn a transient tunnel loss into a repeated side effect.
+COMPLETED_COMMAND_TTL_SECONDS = 30 * 60
 MAX_RUNTIME_OUTPUT_BYTES = 16 * 1024 * 1024
 _COMMAND_RECOVERY_HINT = (
     "This command_id has expired or never existed; a finished command keeps its"
@@ -653,6 +660,24 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         open_world=True,
         error_status="failed",
     ),
+    "get_command": ToolSpec(
+        title="Get command",
+        description=(
+            "Read command status without consuming output cursors. Resolve by command_id or operation_id; "
+            "returned output_refs can be paged with read_output."
+        ),
+        read_only=True,
+        idempotent=True,
+    ),
+    "list_commands": ToolSpec(
+        title="List commands",
+        description=(
+            "List recent server-managed commands and operation_ids for reconnect/recovery. "
+            "This is read-only and does not consume command output."
+        ),
+        read_only=True,
+        idempotent=True,
+    ),
     "write_stdin": ToolSpec(
         title="Write stdin",
         description=(
@@ -1001,6 +1026,62 @@ def truncate_bytes(data: bytes, limit: int) -> tuple[str, bool]:
     return data.decode("utf-8", errors="replace"), truncated
 
 
+def _utf8_codepoint_width(first_byte: int) -> int:
+    if first_byte < 0x80:
+        return 1
+    if 0xC2 <= first_byte <= 0xDF:
+        return 2
+    if 0xE0 <= first_byte <= 0xEF:
+        return 3
+    if 0xF0 <= first_byte <= 0xF4:
+        return 4
+    return 1
+
+
+def utf8_safe_byte_slice(
+    data: bytes,
+    start: int,
+    limit: int,
+    *,
+    trim_incomplete_end: bool = False,
+) -> tuple[int, bytes]:
+    """Slice bytes without splitting a valid UTF-8 code point.
+
+    Offsets remain byte-based. If the requested start lands inside a code
+    point (for example because a rolling buffer evicted its leading bytes),
+    the start is advanced to the next code-point boundary.
+    """
+
+    start = max(0, min(start, len(data)))
+    while start < len(data) and data[start] & 0xC0 == 0x80:
+        start += 1
+    if start >= len(data):
+        return start, b""
+
+    end = min(len(data), start + max(1, limit))
+    if end < len(data):
+        while end > start and data[end] & 0xC0 == 0x80:
+            end -= 1
+    elif trim_incomplete_end and end > start:
+        lead = end - 1
+        while lead > start and data[lead] & 0xC0 == 0x80:
+            lead -= 1
+        width = _utf8_codepoint_width(data[lead])
+        if width > 1 and end - lead < width:
+            end = lead
+
+    if end == start:
+        width = _utf8_codepoint_width(data[start])
+        if width > limit and len(data) - start >= width:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "limit is too small to return the next UTF-8 character without splitting it.",
+                category="validation",
+                details={"minimum_limit": width},
+            )
+    return start, data[start:end]
+
+
 def truncate_line_chars(line: str, max_chars: int = GREP_MAX_LINE_CHARS) -> tuple[str, bool]:
     if len(line) <= max_chars:
         return line, False
@@ -1308,6 +1389,13 @@ class ResolvedPath:
     existed: bool
 
 
+@dataclass
+class OperationRecord:
+    digest: str
+    command_id: str | None
+    accepted_at: float
+
+
 class Workspace:
     def __init__(self, root: Path) -> None:
         self.root = root.expanduser().resolve(strict=True)
@@ -1444,6 +1532,7 @@ class WorkspaceCommandManager:
         )
         self.commands: dict[str, CommandRun] = {}
         self.output_commands: dict[str, CommandRun] = {}
+        self.operations: dict[str, OperationRecord] = {}
         self.lock = threading.Lock()
         self.starting_commands = 0
         self.closed = False
@@ -1478,12 +1567,20 @@ class WorkspaceCommandManager:
             if self.closed:
                 return
             self.closed = True
-            commands = list(self.commands.values())
+            commands = list(
+                {
+                    id(command): command
+                    for command in [*self.commands.values(), *self.output_commands.values()]
+                }.values()
+            )
             self.commands.clear()
             self.output_commands.clear()
+            self.operations.clear()
         for command in commands:
             command.refresh_status()
-            if command.process.poll() is None:
+            if command.process.poll() is None or (
+                command.owns_process_group and process_group_alive(command.process)
+            ):
                 terminate_process_group(command.process, signal.SIGTERM)
             command.drain_readers()
         shutil.rmtree(self.runtime_dir, ignore_errors=True)
@@ -2325,7 +2422,7 @@ class Runtime:
             raise ToolFailure("INVALID_ARGUMENT", f"Invalid regex: {exc}", category="validation") from exc
         needle = query if case_sensitive else query.lower()
 
-        roots = [resolved.path] if resolved.path.is_file() else walk_files(resolved.path)
+        roots: Iterator[Path] = iter([resolved.path]) if resolved.path.is_file() else walk_files(resolved.path)
         for batch in path_batches(roots, 256):
             # Filter by glob first so git check-ignore runs once per batch of
             # candidates instead of once per walked file.
@@ -2616,6 +2713,69 @@ class Runtime:
                 None if change.baseline.data is None else change.baseline.data.decode("utf-8", errors="replace")
             )
 
+    def _exec_operation_digest(
+        self,
+        *,
+        cmd: str,
+        workdir: str,
+        timeout_ms: int,
+        tty: bool,
+        stdin_text: str,
+        env: Any,
+    ) -> str:
+        raw_env = env if isinstance(env, dict) else {}
+        execution = {
+            "cmd": cmd,
+            "workdir": workdir,
+            "timeout_ms": timeout_ms,
+            "tty": tty,
+            "stdin": stdin_text,
+            "env": {str(key): str(value) for key, value in sorted(raw_env.items(), key=lambda item: str(item[0]))},
+        }
+        return hashlib.sha256(json_response_payload(execution)).hexdigest()
+
+    def _command_status_payload(self, command: CommandRun) -> dict[str, Any]:
+        command.refresh_status()
+        if command.process.poll() is not None:
+            self._complete_command(command)
+        output_refs = {
+            "stdout": f"command:{command.command_id}:stdout",
+            "stderr": f"command:{command.command_id}:stderr",
+        }
+        payload: dict[str, Any] = {
+            "ok": True,
+            "command_id": command.command_id,
+            "operation_id": command.operation_id,
+            "status": command.status_name(),
+            "exit_code": command.exit_code,
+            "signal": command.signal_name,
+            "timed_out": command.timed_out,
+            "started_at": command.started_at,
+            "completed_at": command.completed_at,
+            "stdout_total_bytes": command.stdout_total_bytes,
+            "stderr_total_bytes": command.stderr_total_bytes,
+            "stdout_dropped_bytes": command.stdout_dropped_bytes,
+            "stderr_dropped_bytes": command.stderr_dropped_bytes,
+            "output_refs": output_refs,
+        }
+        if command.completed_at is not None:
+            payload["expires_at"] = command.completed_at + COMPLETED_COMMAND_TTL_SECONDS
+        if command.status_name() == "running":
+            payload["next_action"] = {
+                "tool": "get_command",
+                "arguments": {"command_id": command.command_id},
+            }
+        elif command.stdout_total_bytes or command.stderr_total_bytes:
+            stream = "stdout" if command.stdout_total_bytes else "stderr"
+            payload["next_action"] = read_output_action(output_refs[stream])
+        return payload
+
+    def _operation_replay_payload(self, command: CommandRun) -> dict[str, Any]:
+        payload = self._command_status_payload(command)
+        payload["deduplicated"] = True
+        payload["message"] = "Existing execution returned for this operation_id; no new process was started."
+        return payload
+
     def exec_command(self, args: dict[str, Any]) -> dict[str, Any]:
         self._prune_commands()
         cmd = str(args.get("cmd", ""))
@@ -2634,6 +2794,19 @@ class Runtime:
         tty = bool(args.get("tty", False))
         stdin_text = str(args.get("stdin", ""))
         env = self._command_env(args.get("env", {}))
+        operation_id = str(args.get("operation_id") or "").strip() or None
+        operation_digest = (
+            self._exec_operation_digest(
+                cmd=cmd,
+                workdir=workdir.display,
+                timeout_ms=timeout_ms,
+                tty=tty,
+                stdin_text=stdin_text,
+                env=args.get("env", {}),
+            )
+            if operation_id is not None
+            else None
+        )
         start = time.time()
         deadline = start + (timeout_ms / 1000.0)
         landlock_fd: int | None = None
@@ -2641,6 +2814,9 @@ class Runtime:
         popen_cmd: Any = cmd
         popen_shell = True
         popen_extra = process_group_popen_kwargs()
+        owns_process_group = bool(
+            popen_extra.get("start_new_session") or popen_extra.get("creationflags")
+        )
         if self.landlock_enabled():
             try:
                 landlock_fd = open_landlock_ruleset(
@@ -2655,12 +2831,56 @@ class Runtime:
                 if exc.code != "SANDBOX_UNAVAILABLE":
                     raise
                 landlock_warning = landlock_unavailable_warning(exc)
+        existing_operation_command: CommandRun | None = None
+        operation_reserved = False
         with self.commands_lock:
             if self._closed or self.command_manager.closed:
                 if landlock_fd is not None:
                     os.close(landlock_fd)
                 raise ToolFailure("COMMAND_CLOSED", "Workspace command manager is closed.", category="runtime")
-            if len(self.commands) + self.starting_commands >= MAX_ACTIVE_COMMANDS:
+            if operation_id is not None and operation_digest is not None:
+                existing_record = self.command_manager.operations.get(operation_id)
+                if existing_record is not None:
+                    if existing_record.digest != operation_digest:
+                        if landlock_fd is not None:
+                            os.close(landlock_fd)
+                        raise ToolFailure(
+                            "OPERATION_CONFLICT",
+                            "operation_id was already used with different execution parameters.",
+                            category="validation",
+                            details={"operation_id": operation_id},
+                        )
+                    if existing_record.command_id is None:
+                        if landlock_fd is not None:
+                            os.close(landlock_fd)
+                        raise ToolFailure(
+                            "OPERATION_PENDING",
+                            "The same operation_id is already being accepted; retry this operation_id shortly instead of starting a new command.",
+                            category="runtime",
+                            retryable=True,
+                            details={
+                                "operation_id": operation_id,
+                                "retry_hint": "Retry exec_command with the same operation_id and identical execution parameters, or use list_commands to discover the command after it is registered.",
+                            },
+                        )
+                    existing_operation_command = (
+                        self.commands.get(existing_record.command_id)
+                        or self.output_commands.get(existing_record.command_id)
+                    )
+                    if existing_operation_command is None:
+                        self.command_manager.operations.pop(operation_id, None)
+                if existing_operation_command is None:
+                    self.command_manager.operations[operation_id] = OperationRecord(
+                        digest=operation_digest,
+                        command_id=None,
+                        accepted_at=start,
+                    )
+                    operation_reserved = True
+            if existing_operation_command is not None:
+                pass
+            elif len(self.commands) + self.starting_commands >= MAX_ACTIVE_COMMANDS:
+                if operation_reserved and operation_id is not None:
+                    self.command_manager.operations.pop(operation_id, None)
                 if landlock_fd is not None:
                     os.close(landlock_fd)
                 raise ToolFailure(
@@ -2670,7 +2890,12 @@ class Runtime:
                     retryable=True,
                     details={"max_active_commands": MAX_ACTIVE_COMMANDS},
                 )
-            self.starting_commands += 1
+            else:
+                self.starting_commands += 1
+        if existing_operation_command is not None:
+            if landlock_fd is not None:
+                os.close(landlock_fd)
+            return self._operation_replay_payload(existing_operation_command)
         process: subprocess.Popen[bytes] | None = None
         command: CommandRun | None = None
         registered = False
@@ -2686,15 +2911,23 @@ class Runtime:
             )
             command = self._make_command(
                 process,
+                operation_id=operation_id,
                 timeout_at=deadline,
                 warnings=[landlock_warning] if landlock_warning else None,
                 pty_master_fd=pty_master_fd,
+                owns_process_group=owns_process_group,
             )
             with self.commands_lock:
                 self.starting_commands -= 1
                 slot_released = True
                 if not self._closed and not self.command_manager.closed:
                     self.commands[command.command_id] = command
+                    if operation_id is not None and operation_digest is not None:
+                        self.command_manager.operations[operation_id] = OperationRecord(
+                            digest=operation_digest,
+                            command_id=command.command_id,
+                            accepted_at=start,
+                        )
                     registered = True
             if not registered:
                 raise ToolFailure("COMMAND_CLOSED", "Runtime closed while the command was starting.", category="runtime")
@@ -2702,6 +2935,10 @@ class Runtime:
             with self.commands_lock:
                 if not registered and not slot_released:
                     self.starting_commands -= 1
+                if operation_reserved and not registered and operation_id is not None:
+                    record = self.command_manager.operations.get(operation_id)
+                    if record is not None and record.command_id is None:
+                        self.command_manager.operations.pop(operation_id, None)
             if process is not None and process.poll() is None:
                 terminate_process_group(process, signal.SIGTERM)
             raise
@@ -2747,8 +2984,8 @@ class Runtime:
                 return finish()
             with command.lock:
                 tty_has_initial_output = bool(
-                    len(command.stdout) > command.stdout_cursor
-                    or len(command.stderr) > command.stderr_cursor
+                    command.stdout_total_bytes > command.stdout_cursor
+                    or command.stderr_total_bytes > command.stderr_cursor
                 )
             if now - start >= initial_wait or (tty and tty_has_initial_output):
                 return finish()
@@ -2995,16 +3232,20 @@ class Runtime:
         self,
         process: subprocess.Popen[bytes],
         *,
+        operation_id: str | None = None,
         timeout_at: float | None = None,
         warnings: list[str] | None = None,
         pty_master_fd: int | None = None,
+        owns_process_group: bool = False,
     ) -> CommandRun:
         return CommandRun(
             command_id=secrets.token_urlsafe(18),
             process=process,
+            operation_id=operation_id,
             timeout_at=timeout_at,
             warnings=warnings or [],
             pty_master_fd=pty_master_fd,
+            owns_process_group=owns_process_group,
             on_evict=self.command_manager.record_output_eviction,
         )
 
@@ -3054,6 +3295,22 @@ class Runtime:
             for command_id in expired:
                 self.output_commands.pop(command_id, None)
             self._evict_retained_locked()
+            retained_ids = set(self.commands) | set(self.output_commands)
+            pending_cutoff = time.time() - 60
+            stale_operations = [
+                operation_id
+                for operation_id, record in self.command_manager.operations.items()
+                if (
+                    record.command_id is not None
+                    and record.command_id not in retained_ids
+                )
+                or (
+                    record.command_id is None
+                    and record.accepted_at < pending_cutoff
+                )
+            ]
+            for operation_id in stale_operations:
+                self.command_manager.operations.pop(operation_id, None)
 
     def _get_output_command(self, command_id: str) -> CommandRun:
         self._prune_commands()
@@ -3067,6 +3324,118 @@ class Runtime:
                 details={"retry_hint": _COMMAND_RECOVERY_HINT},
             )
         return command
+
+    def get_command(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._prune_commands()
+        command_id = str(args.get("command_id") or "").strip()
+        operation_id = str(args.get("operation_id") or "").strip()
+        if bool(command_id) == bool(operation_id):
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "Provide exactly one of command_id or operation_id.",
+                category="validation",
+            )
+        if operation_id:
+            with self.commands_lock:
+                record = self.command_manager.operations.get(operation_id)
+                if record is None:
+                    raise ToolFailure(
+                        "OPERATION_NOT_FOUND",
+                        "operation_id is not known or has expired.",
+                        category="not_found",
+                        details={"operation_id": operation_id},
+                    )
+                resolved_command_id = record.command_id
+                accepted_at = record.accepted_at
+            if resolved_command_id is None:
+                return {
+                    "ok": True,
+                    "operation_id": operation_id,
+                    "command_id": None,
+                    "status": "accepting",
+                    "accepted_at": accepted_at,
+                    "next_action": {
+                        "tool": "get_command",
+                        "arguments": {"operation_id": operation_id},
+                    },
+                }
+            command_id = resolved_command_id
+        return self._command_status_payload(self._get_output_command(command_id))
+
+    def list_commands(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._prune_commands()
+        max_results = int(args.get("max_results", 100))
+        requested_operation_id = str(args.get("operation_id") or "").strip()
+        with self.commands_lock:
+            command_by_id = {**self.output_commands, **self.commands}
+            operations = dict(self.command_manager.operations)
+        items: list[dict[str, Any]] = []
+        for command in sorted(
+            command_by_id.values(),
+            key=lambda item: item.started_at,
+            reverse=True,
+        ):
+            if requested_operation_id and command.operation_id != requested_operation_id:
+                continue
+            command.refresh_status()
+            items.append(
+                {
+                    "command_id": command.command_id,
+                    "operation_id": command.operation_id,
+                    "status": command.status_name(),
+                    "exit_code": command.exit_code,
+                    "timed_out": command.timed_out,
+                    "started_at": command.started_at,
+                    "completed_at": command.completed_at,
+                    "stdout_total_bytes": command.stdout_total_bytes,
+                    "stderr_total_bytes": command.stderr_total_bytes,
+                }
+            )
+            if len(items) >= max_results:
+                break
+        if len(items) < max_results:
+            pending = [
+                (operation_id, record)
+                for operation_id, record in operations.items()
+                if record.command_id is None
+                and (not requested_operation_id or requested_operation_id == operation_id)
+            ]
+            for operation_id, record in sorted(
+                pending,
+                key=lambda item: item[1].accepted_at,
+                reverse=True,
+            ):
+                items.append(
+                    {
+                        "command_id": None,
+                        "operation_id": operation_id,
+                        "status": "accepting",
+                        "exit_code": None,
+                        "timed_out": False,
+                        "started_at": record.accepted_at,
+                        "completed_at": None,
+                        "stdout_total_bytes": 0,
+                        "stderr_total_bytes": 0,
+                    }
+                )
+                if len(items) >= max_results:
+                    break
+        total_candidates = sum(
+            1
+            for command in command_by_id.values()
+            if not requested_operation_id or command.operation_id == requested_operation_id
+        ) + sum(
+            1
+            for operation_id, record in operations.items()
+            if record.command_id is None
+            and (not requested_operation_id or requested_operation_id == operation_id)
+        )
+        return {
+            "ok": True,
+            "commands": items,
+            "count": len(items),
+            "truncated": total_candidates > len(items),
+        }
 
     def _format_command_output(self, command: CommandRun, payload: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
         terminal = payload.get("status") != "running"
@@ -3214,17 +3583,27 @@ class Runtime:
         # The retained set is the frozen head [0, head_len) plus the rolling
         # tail [tail_start_offset, total). Serve from whichever segment holds
         # the requested offset; offsets inside the evicted gap clamp forward
-        # to the tail. Chunks never span the gap so offsets stay stable.
+        # to the tail. Chunks never span the gap so offsets stay stable. Byte
+        # offsets remain authoritative, but returned text never splits a valid
+        # UTF-8 code point.
         if requested_offset >= tail_start_offset:
-            offset = requested_offset
-            buffer_offset = offset - tail_start_offset
-            chunk = tail[buffer_offset : buffer_offset + limit]
+            buffer_offset = requested_offset - tail_start_offset
+            aligned_offset, chunk = utf8_safe_byte_slice(tail, buffer_offset, limit)
+            offset = tail_start_offset + aligned_offset
         elif requested_offset < head_len:
-            offset = requested_offset
-            chunk = head[offset : min(head_len, offset + limit)]
+            aligned_offset, chunk = utf8_safe_byte_slice(
+                head,
+                requested_offset,
+                limit,
+                trim_incomplete_end=head_len < total_stream_bytes,
+            )
+            offset = aligned_offset
+            if not chunk and tail_start_offset > head_len:
+                aligned_offset, chunk = utf8_safe_byte_slice(tail, 0, limit)
+                offset = tail_start_offset + aligned_offset
         else:
-            offset = tail_start_offset
-            chunk = tail[:limit]
+            aligned_offset, chunk = utf8_safe_byte_slice(tail, 0, limit)
+            offset = tail_start_offset + aligned_offset
         next_offset = offset + len(chunk) if offset + len(chunk) < total_stream_bytes else None
         omitted_bytes = offset - requested_offset
         warnings: list[str] = []
@@ -3282,7 +3661,10 @@ class Runtime:
         while time.time() < wait_until and command.process.poll() is None:
             time.sleep(0.02)
             with command.lock:
-                has_new_output = len(command.stdout) > command.stdout_cursor or len(command.stderr) > command.stderr_cursor
+                has_new_output = (
+                    command.stdout_total_bytes > command.stdout_cursor
+                    or command.stderr_total_bytes > command.stderr_cursor
+                )
                 if has_new_output and not chars:
                     break
                 if has_new_output and chars:
@@ -5012,6 +5394,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         "exec_command": object_schema(
             {
                 "cmd": {**string, "minLength": 1},
+                "operation_id": {**string, "minLength": 1, "maxLength": 200},
                 "workdir": {**string, "default": "."},
                 "cwd": {**string},
                 "timeout_ms": {**integer, "minimum": 1, "maximum": 600000, "default": 30000},
@@ -5024,6 +5407,18 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "env": {"type": "object", "additionalProperties": {"type": "string"}, "default": {}},
             },
             ["cmd"],
+        ),
+        "get_command": object_schema(
+            {
+                "command_id": {**string, "minLength": 1},
+                "operation_id": {**string, "minLength": 1, "maxLength": 200},
+            }
+        ),
+        "list_commands": object_schema(
+            {
+                "operation_id": {**string, "minLength": 1, "maxLength": 200},
+                "max_results": {**integer, "minimum": 1, "maximum": 1000, "default": 100},
+            }
         ),
         "write_stdin": object_schema(
             {
@@ -5157,6 +5552,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             {
                 "endpoint": string,
                 "tab_index": {**integer, "minimum": 0},
+                "tab_id": {**string, "minLength": 1},
                 "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
                 "max_chars": {**integer, "minimum": 1, "maximum": 200000, "default": 50000},
                 "max_elements": {**integer, "minimum": 1, "maximum": 500, "default": 150},
@@ -5166,6 +5562,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             {
                 "endpoint": string,
                 "tab_index": {**integer, "minimum": 0},
+                "tab_id": {**string, "minLength": 1},
                 "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
                 "full_page": {**boolean, "default": False},
             }
@@ -5175,6 +5572,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "script": {**string, "minLength": 1},
                 "endpoint": string,
                 "tab_index": {**integer, "minimum": 0},
+                "tab_id": {**string, "minLength": 1},
                 "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
             },
             ["script"],
@@ -5184,6 +5582,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "selector": {**string, "minLength": 1},
                 "endpoint": string,
                 "tab_index": {**integer, "minimum": 0},
+                "tab_id": {**string, "minLength": 1},
                 "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
             },
             ["selector"],
@@ -5194,6 +5593,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "text": string,
                 "endpoint": string,
                 "tab_index": {**integer, "minimum": 0},
+                "tab_id": {**string, "minLength": 1},
                 "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
                 "clear": {**boolean, "default": True},
                 "delay_ms": {**integer, "minimum": 0, "maximum": 1000, "default": 0},
@@ -5204,6 +5604,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             {
                 "endpoint": string,
                 "tab_index": {**integer, "minimum": 0},
+                "tab_id": {**string, "minLength": 1},
                 "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
                 "wait_ms": {**integer, "minimum": 0, "maximum": 10000, "default": 250},
                 "max_entries": {**integer, "minimum": 1, "maximum": 2000, "default": 200},
@@ -5214,6 +5615,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             {
                 "endpoint": string,
                 "tab_index": {**integer, "minimum": 0},
+                "tab_id": {**string, "minLength": 1},
                 "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
                 "wait_ms": {**integer, "minimum": 0, "maximum": 10000, "default": 250},
                 "max_entries": {**integer, "minimum": 1, "maximum": 5000, "default": 300},
@@ -5226,6 +5628,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "selector": {**string, "minLength": 1},
                 "endpoint": string,
                 "tab_index": {**integer, "minimum": 0},
+                "tab_id": {**string, "minLength": 1},
                 "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
                 "max_html_chars": {**integer, "minimum": 1, "maximum": 200000, "default": 20000},
             },
@@ -5459,7 +5862,8 @@ def rpc_response_status(era: str, response: dict[str, Any]) -> int:
     error = response.get("error")
     if not isinstance(error, dict):
         return 200
-    return MODERN_ERROR_STATUSES.get(error.get("code"), 200)
+    code = error.get("code")
+    return MODERN_ERROR_STATUSES.get(code, 200) if isinstance(code, int) else 200
 
 
 class MCPHandler(http.server.BaseHTTPRequestHandler):
@@ -5468,6 +5872,53 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
     @property
     def runtime(self) -> Runtime:
         return cast(Runtime, self.server.runtime)  # type: ignore[attr-defined]
+
+    def _read_bounded_body(self, length: int) -> bytes | None:
+        """Read exactly ``length`` bytes under one absolute body deadline."""
+
+        deadline = time.monotonic() + HTTP_BODY_READ_TIMEOUT_SECONDS
+        chunks: list[bytes] = []
+        remaining = length
+        connection = self.connection
+        try:
+            previous_timeout = connection.gettimeout()
+        except Exception:  # noqa: BLE001
+            previous_timeout = None
+        try:
+            while remaining:
+                time_left = deadline - time.monotonic()
+                if time_left <= 0:
+                    raise TimeoutError
+                try:
+                    connection.settimeout(time_left)
+                except Exception:  # noqa: BLE001
+                    pass
+                chunk = self.rfile.read(min(remaining, 64 * 1024))
+                if not chunk:
+                    self.close_connection = True
+                    self.send_rpc_error(
+                        -32600,
+                        "Request body ended before Content-Length bytes were received",
+                        status=400,
+                    )
+                    return None
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            return b"".join(chunks)
+        except (TimeoutError, OSError):
+            self.close_connection = True
+            self.send_rpc_error(
+                -32600,
+                "Request body read timed out",
+                status=408,
+                data={"timeout_seconds": HTTP_BODY_READ_TIMEOUT_SECONDS},
+            )
+            return None
+        finally:
+            try:
+                connection.settimeout(previous_timeout)
+            except Exception:  # noqa: BLE001
+                pass
 
     def log_message(self, format: str, *args: Any) -> None:
         print(format % args, file=sys.stderr)
@@ -5616,7 +6067,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 data={"max_bytes": MAX_HTTP_REQUEST_BYTES},
             )
             return
-        body = self.rfile.read(length)
+        body = self._read_bounded_body(length)
+        if body is None:
+            return
         try:
             request = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
@@ -5873,7 +6326,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if not (0 <= length <= OAUTH_MAX_BODY_BYTES):
             self.send_json({"error": "Request body too large"}, status=413)
             return None
-        return self.rfile.read(length)
+        return self._read_bounded_body(length)
 
     def handle_oauth_authorize_get(self) -> None:
         cfg = self.runtime.oauth_config
@@ -6131,6 +6584,39 @@ class RuntimeHTTPServer(http.server.ThreadingHTTPServer):
     ) -> None:
         super().__init__(address, handler)
         self.runtime = runtime
+        self._request_slots = threading.BoundedSemaphore(MAX_HTTP_CONCURRENT_REQUESTS)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self._request_slots.acquire(blocking=False):
+            body = json_response_payload(
+                jsonrpc_error(None, -32603, "Server busy; retry after active requests complete")
+            )
+            response = (
+                "HTTP/1.1 503 Service Unavailable\r\n"
+                "Content-Type: application/json\r\n"
+                f"Content-Length: {len(body)}\r\n"
+                "Cache-Control: no-store\r\n"
+                "Retry-After: 1\r\n"
+                "Connection: close\r\n"
+                "\r\n"
+            ).encode("ascii") + body
+            try:
+                request.sendall(response)
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._request_slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._request_slots.release()
 
     def server_close(self) -> None:
         self.runtime.close()
@@ -6183,6 +6669,64 @@ def build_runtime(
 AUTH_MODE_CHOICES = ("bearer", "noauth", "oauth")
 
 
+def oauth_registry_storage_path(workspace: Path) -> Path:
+    configured = (os.environ.get(f"{ENV_PREFIX}_OAUTH_REGISTRY_FILE") or "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    state_home = (os.environ.get("XDG_STATE_HOME") or "").strip()
+    if state_home:
+        root = Path(state_home).expanduser() / "coding-tools-mcp"
+    else:
+        root = Path.home() / ".coding-tools-mcp"
+    workspace_key = hashlib.sha256(
+        str(workspace.expanduser().resolve(strict=False)).encode("utf-8")
+    ).hexdigest()[:24]
+    return root / "oauth-clients" / f"{workspace_key}.json"
+
+
+def oauth_token_secret_storage_path(workspace: Path) -> Path:
+    registry_path = oauth_registry_storage_path(workspace)
+    return registry_path.with_name(f"{registry_path.stem}.token-secret")
+
+
+def load_or_create_oauth_token_secret(workspace: Path) -> bytes:
+    path = oauth_token_secret_storage_path(workspace)
+
+    def load() -> bytes:
+        raw = path.read_text(encoding="ascii").strip()
+        try:
+            value = bytes.fromhex(raw)
+        except ValueError as exc:
+            raise ValueError(f"persisted OAuth token secret is not valid hex: {path}") from exc
+        if len(value) < 32:
+            raise ValueError(f"persisted OAuth token secret must contain at least 32 bytes: {path}")
+        return value
+
+    if path.exists():
+        return load()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.parent.chmod(0o700)
+    except OSError:
+        pass
+    value = secrets.token_bytes(32)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    try:
+        fd = os.open(path, flags, 0o600)
+    except FileExistsError:
+        return load()
+    try:
+        os.write(fd, value.hex().encode("ascii"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    return value
+
+
 def run_http(args: argparse.Namespace) -> int:
     auth_mode = (os.environ.get(f"{ENV_PREFIX}_AUTH_MODE") or "").strip().lower()
     if auth_mode and auth_mode not in AUTH_MODE_CHOICES:
@@ -6227,7 +6771,11 @@ def run_http(args: argparse.Namespace) -> int:
                 )
                 return 2
         else:
-            token_secret = secrets.token_bytes(32)
+            try:
+                token_secret = load_or_create_oauth_token_secret(Path(args.workspace))
+            except (OSError, ValueError) as exc:
+                print(f"ERROR: could not load or persist OAuth token signing key: {exc}", file=sys.stderr)
+                return 2
         try:
             token_ttl = int(os.environ.get(f"{ENV_PREFIX}_OAUTH_TOKEN_TTL") or OAUTH_TOKEN_TTL_SECONDS)
         except ValueError:
@@ -6236,11 +6784,15 @@ def run_http(args: argparse.Namespace) -> int:
         if not 60 <= token_ttl <= 604_800:
             print(f"ERROR: {ENV_PREFIX}_OAUTH_TOKEN_TTL must be between 60 and 604800 seconds.", file=sys.stderr)
             return 2
+        registry = OAuthClientRegistry(oauth_registry_storage_path(Path(args.workspace)))
+        if registry.load_warning:
+            print(f"WARNING: {registry.load_warning}", file=sys.stderr)
         oauth_config = OAuthConfig(
             password=password,
             server_url=server_url,
             token_secret=token_secret,
             token_ttl=token_ttl,
+            registry=registry,
         )
         if client_id:
             raw_redirects = os.environ.get(f"{ENV_PREFIX}_OAUTH_REDIRECT_URIS") or "http://127.0.0.1/callback"
@@ -6347,6 +6899,16 @@ def build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
+        "--install-chrome-bridge",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--chrome-bridge-no-open",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--auth-token",
         default=None,
         help=f"require Authorization: Bearer <token> on /mcp; defaults to {ENV_PREFIX}_AUTH_TOKEN",
@@ -6441,6 +7003,14 @@ def main(argv: list[str] | None = None) -> int:
         from .chrome_native_host import main as chrome_native_host_main
 
         return chrome_native_host_main()
+    if args.install_chrome_bridge:
+        try:
+            result = chrome_bridge.install({"open_extensions_page": not args.chrome_bridge_no_open})
+        except ToolFailure as exc:
+            print(f"ERROR: {exc.message}", file=sys.stderr)
+            return 2
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
     install_sigterm_handler()
     return run_stdio(args) if args.stdio else run_http(args)
 

@@ -16,6 +16,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 from unittest.mock import patch
 
+from coding_tools_mcp import browser as browser_tools
 from coding_tools_mcp import server as server_module
 from coding_tools_mcp import processes as processes_module
 from coding_tools_mcp import telemetry as telemetry_module
@@ -164,6 +165,113 @@ class RuntimeHelperTests(unittest.TestCase):
 
         self.assertEqual(graceful.calls, [("send_signal", 999), ("wait", 1)])
         self.assertEqual(forced.calls, ["kill", ("wait", 1)])
+
+    def test_browser_evaluate_uses_cdp_operation_deadline(self) -> None:
+        captured: dict[str, Any] = {}
+
+        class FakeSession:
+            def send(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+                captured["method"] = method
+                captured["params"] = params
+                return {"result": {"type": "number", "value": 2}}
+
+            def detach(self) -> None:
+                captured["detached"] = True
+
+        class FakeContext:
+            pages: list[Any] = []
+
+            def new_cdp_session(self, page: Any) -> FakeSession:
+                return FakeSession()
+
+        class FakePage:
+            def __init__(self, context: FakeContext) -> None:
+                self.context = context
+                self.url = "about:blank"
+
+            def is_closed(self) -> bool:
+                return False
+
+            def title(self) -> str:
+                return "Blank"
+
+            def evaluate(self, script: str) -> str:
+                self.assert_visibility_script(script)
+                return "visible"
+
+            @staticmethod
+            def assert_visibility_script(script: str) -> None:
+                if script != "document.visibilityState":
+                    raise AssertionError(script)
+
+        context = FakeContext()
+        page = FakePage(context)
+        context.pages = [page]
+
+        class FakeBrowser:
+            contexts = [context]
+
+        @contextmanager
+        def fake_connection(args: dict[str, Any]) -> Iterator[FakeBrowser]:
+            yield FakeBrowser()
+
+        with patch.object(browser_tools, "_browser_connection", fake_connection):
+            result = browser_tools.evaluate(
+                {"script": "1+1", "tab_index": 0, "timeout_ms": 1234}
+            )
+
+        self.assertEqual(result["result"], 2)
+        self.assertEqual(captured["method"], "Runtime.evaluate")
+        self.assertEqual(captured["params"]["timeout"], 1234)
+        self.assertTrue(captured["params"]["awaitPromise"])
+        self.assertTrue(captured["detached"])
+
+    def test_browser_evaluate_maps_cdp_execution_timeout(self) -> None:
+        class TimeoutSession:
+            def send(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+                raise RuntimeError("Protocol error (Runtime.evaluate): Execution was terminated")
+
+            def detach(self) -> None:
+                pass
+
+        class FakeContext:
+            pages: list[Any] = []
+
+            def new_cdp_session(self, page: Any) -> TimeoutSession:
+                return TimeoutSession()
+
+        class FakePage:
+            def __init__(self, context: FakeContext) -> None:
+                self.context = context
+                self.url = "about:blank"
+
+            def is_closed(self) -> bool:
+                return False
+
+            def title(self) -> str:
+                return "Blank"
+
+            def evaluate(self, script: str) -> str:
+                return "visible"
+
+        context = FakeContext()
+        page = FakePage(context)
+        context.pages = [page]
+
+        class FakeBrowser:
+            contexts = [context]
+
+        @contextmanager
+        def fake_connection(args: dict[str, Any]) -> Iterator[FakeBrowser]:
+            yield FakeBrowser()
+
+        with patch.object(browser_tools, "_browser_connection", fake_connection):
+            with self.assertRaises(ToolFailure) as raised:
+                browser_tools.evaluate(
+                    {"script": "while(true){}", "tab_index": 0, "timeout_ms": 50}
+                )
+        self.assertEqual(raised.exception.code, "BROWSER_TIMEOUT")
+        self.assertTrue(raised.exception.retryable)
 
     def test_atomic_patch_commit_rolls_back_all_files_after_mid_commit_failure(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1315,6 +1423,43 @@ Maven home: /usr/share/maven
             self.assertEqual(page.get("stream"), "stdout")
             self.assertIsNone(page.get("next_offset"))
 
+    def test_exec_operation_id_deduplicates_and_supports_read_only_recovery(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            runtime = Runtime(workspace, permission_mode="trusted")
+            args = {
+                "cmd": "printf x >> side-effect.txt",
+                "operation_id": "write-side-effect-once",
+                "timeout_ms": 5000,
+                "yield_time_ms": 5000,
+            }
+            first = runtime.exec_command(args)
+            second = runtime.exec_command(args)
+
+            self.assertEqual((workspace / "side-effect.txt").read_text(encoding="utf-8"), "x")
+            self.assertEqual(second.get("command_id"), first.get("command_id"))
+            self.assertTrue(second.get("deduplicated"), second)
+
+            recovered = runtime.get_command({"operation_id": "write-side-effect-once"})
+            self.assertEqual(recovered.get("command_id"), first.get("command_id"))
+            self.assertEqual(recovered.get("operation_id"), "write-side-effect-once")
+            self.assertEqual(recovered.get("status"), "exited")
+            self.assertIn("output_refs", recovered)
+
+            listed = runtime.list_commands({"operation_id": "write-side-effect-once"})
+            self.assertEqual(listed.get("count"), 1, listed)
+            self.assertEqual(listed["commands"][0]["command_id"], first.get("command_id"))
+
+            with self.assertRaises(ToolFailure) as conflict:
+                runtime.exec_command(
+                    {
+                        **args,
+                        "cmd": "printf y >> side-effect.txt",
+                    }
+                )
+            self.assertEqual(conflict.exception.code, "OPERATION_CONFLICT")
+            self.assertEqual((workspace / "side-effect.txt").read_text(encoding="utf-8"), "x")
+
     @unittest.skipIf(os.name == "nt", "this build explicitly reports ConPTY as unsupported")
     def test_exec_command_tty_uses_a_real_pseudo_terminal(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1436,6 +1581,97 @@ Maven home: /usr/share/maven
             self.assertEqual(second.get("content"), "err2\n")
             self.assertNotIn("out2", second.get("content", ""))
             runtime.kill_command({"command_id": result["command_id"], "wait_ms": 1000})
+
+    def test_read_output_keeps_utf8_codepoints_intact_across_pages(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp), permission_mode="trusted")
+            with subprocess.Popen([sys.executable, "-c", ""], stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+                command = server_module.CommandRun(command_id="utf8-output", process=process, buffer_limit=64)
+                command.append_stdout("中文🙂".encode("utf-8"))
+                runtime._remember_output_command(command)
+
+                offset = 0
+                pages: list[str] = []
+                offsets: list[int] = []
+                while offset is not None:
+                    page = runtime.read_output(
+                        {"output_ref": "command:utf8-output:stdout", "offset": offset, "limit": 4}
+                    )
+                    pages.append(str(page["content"]))
+                    offsets.append(int(page["offset"]))
+                    offset = page["next_offset"]
+
+                self.assertEqual("".join(pages), "中文🙂")
+                self.assertEqual(offsets, [0, 3, 6])
+                self.assertNotIn("\ufffd", "".join(pages))
+
+                non_boundary = runtime.read_output(
+                    {"output_ref": "command:utf8-output:stdout", "offset": 1, "limit": 4}
+                )
+                self.assertEqual(non_boundary["offset"], 3)
+                self.assertEqual(non_boundary["content"], "文")
+                self.assertEqual(non_boundary["omitted_bytes"], 2)
+
+                with self.assertRaises(ToolFailure) as too_small:
+                    runtime.read_output(
+                        {"output_ref": "command:utf8-output:stdout", "offset": 0, "limit": 2}
+                    )
+                self.assertEqual(too_small.exception.code, "INVALID_ARGUMENT")
+
+    def test_write_stdin_detects_new_output_after_rolling_buffer_drop(self) -> None:
+        class RunningProcess:
+            def poll(self) -> None:
+                return None
+
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp), permission_mode="trusted")
+            command = server_module.CommandRun(
+                command_id="rolling-poll",
+                process=RunningProcess(),  # type: ignore[arg-type]
+                buffer_limit=64,
+            )
+            command.append_stdout(b"x" * 100)
+            command.stdout_cursor = command.stdout_total_bytes
+            command.append_stdout(b"NEW")
+            runtime.commands[command.command_id] = command
+            started = time.monotonic()
+            result = runtime.write_stdin(
+                {"command_id": command.command_id, "chars": "", "yield_time_ms": 250}
+            )
+            elapsed = time.monotonic() - started
+            runtime.commands.pop(command.command_id, None)
+
+        self.assertLess(elapsed, 0.15, result)
+        self.assertEqual(result.get("stdout"), "NEW")
+
+    @unittest.skipIf(os.name == "nt", "POSIX process groups are required for descendant cleanup")
+    def test_exec_reaps_background_descendants_after_shell_exit(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp), permission_mode="trusted")
+            result = runtime.exec_command(
+                {
+                    "cmd": "sleep 10 & child=$!; printf '%s\\n' \"$child\"",
+                    "timeout_ms": 5000,
+                    "yield_time_ms": 5000,
+                }
+            )
+            self.assertEqual(result.get("status"), "exited", result)
+            self.assertEqual(result.get("exit_code"), 0, result)
+            child_pid = int(str(result.get("stdout", "")).strip())
+            deadline = time.time() + 2
+            child_alive = True
+            while time.time() < deadline:
+                try:
+                    os.kill(child_pid, 0)
+                except ProcessLookupError:
+                    child_alive = False
+                    break
+                time.sleep(0.02)
+            self.assertFalse(child_alive, result)
+            self.assertTrue(
+                any("background descendants" in warning for warning in result.get("warnings", [])),
+                result,
+            )
 
     def test_read_output_uses_absolute_stream_offsets_after_buffer_drop(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -2030,6 +2266,11 @@ class FakeReadonlyAnnotationTests(unittest.TestCase):
                 ]
                 args = parser.parse_args(argv)
                 self.assertEqual(server_module.run_http(args), 2)
+
+    def test_install_chrome_bridge_flag_is_hidden_and_parseable(self) -> None:
+        parser = server_module.build_parser()
+        args = parser.parse_args(["--install-chrome-bridge"])
+        self.assertTrue(args.install_chrome_bridge)
 
 
 def file_path(name: str):

@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import shlex
 import socket
 import subprocess
 import sys
+import time
 import uuid
 from importlib import resources
 from pathlib import Path
@@ -39,7 +41,8 @@ def _extension_install_dir() -> Path:
 
 def _bundled_host_candidate() -> Path | None:
     candidates: list[Path] = []
-    executable = Path(sys.executable).resolve()
+    # Resolving a venv's Python symlink would lose its adjacent entry points.
+    executable = Path(sys.executable).absolute()
     candidates.append(executable.with_name("coding-tools-mcp-chrome-host"))
     candidates.append(executable.parent.parent / "coding-tools-mcp-chrome-host")
     candidates.append(
@@ -65,7 +68,20 @@ def _bundled_host_candidate() -> Path | None:
 def install(args: dict[str, Any]) -> dict[str, Any]:
     if sys.platform != "darwin":
         raise _unsupported()
-    host = Path(str(args.get("host_path") or _bundled_host_candidate() or "")).expanduser()
+    candidate = args.get("host_path") or _bundled_host_candidate()
+    if not candidate:
+        # Module-only installations also work without a frozen native host.
+        # Pin the interpreter and import root; Chrome does not inherit our PATH.
+        host = bridge_dir() / "coding-tools-mcp-chrome-host"
+        host.parent.mkdir(parents=True, exist_ok=True)
+        code = (
+            f"import sys; sys.path.insert(0, {str(Path(__file__).resolve().parent.parent)!r}); "
+            "from coding_tools_mcp.chrome_native_host import main; raise SystemExit(main())"
+        )
+        host.write_text("#!/bin/sh\nexec " + shlex.join([sys.executable, "-I", "-c", code]) + "\n", encoding="utf-8")
+        host.chmod(0o700)
+    else:
+        host = Path(str(candidate)).expanduser()
     if not host.is_file():
         raise ToolFailure(
             "NOT_FOUND",
@@ -119,14 +135,19 @@ def _request(action: str, params: dict[str, Any] | None = None, *, timeout_ms: i
             details={"socket": str(path), "extension_id": EXTENSION_ID},
         )
     request_id = uuid.uuid4().hex
-    payload = {"id": request_id, "action": action, "params": params or {}}
+    payload = {"id": request_id, "action": action, "params": {**(params or {}), "timeoutMs": timeout_ms}}
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     client.settimeout(timeout_ms / 1000)
+    deadline = time.monotonic() + timeout_ms / 1000
     try:
         client.connect(str(path))
         client.sendall((json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
         chunks = bytearray()
         while b"\n" not in chunks:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise socket.timeout("Chrome request deadline exceeded")
+            client.settimeout(remaining)
             part = client.recv(65536)
             if not part:
                 break
@@ -201,7 +222,7 @@ def tabs(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def execute(args: dict[str, Any]) -> dict[str, Any]:
-    params = {"tabId": int(args["tab_id"]), "script": str(args["script"])}
+    params = {"tabId": int(args["tab_id"]), "script": str(args["script"]), "timeoutMs": int(args.get("timeout_ms", DEFAULT_TIMEOUT_MS))}
     response = _request("execute", params, timeout_ms=int(args.get("timeout_ms", DEFAULT_TIMEOUT_MS)))
     return {"ok": True, "tab_id": params["tabId"], "result": response.get("result")}
 

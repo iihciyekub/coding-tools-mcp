@@ -1,9 +1,16 @@
 mod models;
+mod resource_installer;
 mod runtime;
 mod storage;
 
 use models::{LogBundle, RuntimeStatus, WorkspaceProfile};
-use runtime::{read_logs, RuntimeManager};
+use resource_installer::managed_version;
+use runtime::{
+    open_app_permission as open_app_permission_runtime,
+    prepare_chrome_bridge as prepare_chrome_bridge_runtime,
+    prepare_runtime as prepare_runtime_environment, read_logs, start_workspace, DependencyStatus,
+    RuntimeManager,
+};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::process::Command;
@@ -30,6 +37,7 @@ struct DesktopState {
 struct DesktopSnapshot {
     profiles: Vec<WorkspaceProfile>,
     statuses: HashMap<String, RuntimeStatus>,
+    dependencies: DependencyStatus,
 }
 
 #[tauri::command]
@@ -47,7 +55,12 @@ fn desktop_snapshot(state: tauri::State<'_, DesktopState>) -> Result<DesktopSnap
         .iter()
         .map(|profile| (profile.id.clone(), runtime.status(profile)))
         .collect();
-    Ok(DesktopSnapshot { profiles, statuses })
+    let dependencies = runtime.dependency_status();
+    Ok(DesktopSnapshot {
+        profiles,
+        statuses,
+        dependencies,
+    })
 }
 
 #[tauri::command]
@@ -73,8 +86,7 @@ fn save_profile(
         .lock()
         .map_err(|_| "Runtime manager is unavailable.")?
         .status(&profile)
-        .pid
-        .is_some()
+        .is_active()
     {
         return Err("Stop the workspace before changing its configuration.".into());
     }
@@ -98,8 +110,7 @@ fn delete_profile(profile_id: String, state: tauri::State<'_, DesktopState>) -> 
         .lock()
         .map_err(|_| "Runtime manager is unavailable.")?
         .status(&profile)
-        .pid
-        .is_some()
+        .is_active()
     {
         return Err("Stop the workspace before deleting it.".into());
     }
@@ -112,9 +123,11 @@ fn delete_profile(profile_id: String, state: tauri::State<'_, DesktopState>) -> 
 
 #[tauri::command]
 async fn start_profile(
+    app: AppHandle,
     profile_id: String,
     state: tauri::State<'_, DesktopState>,
 ) -> Result<RuntimeStatus, String> {
+    schedule_tray_refresh(app, Duration::from_secs(1));
     let store = Arc::clone(&state.store);
     let runtime = Arc::clone(&state.runtime);
     tauri::async_runtime::spawn_blocking(move || {
@@ -124,10 +137,7 @@ async fn start_profile(
             let log_dir = store.log_dir(&profile_id)?;
             (profile, log_dir)
         };
-        runtime
-            .lock()
-            .map_err(|_| "Runtime manager is unavailable.")?
-            .start(&profile, &log_dir)
+        start_workspace(&runtime, &profile, &log_dir)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -200,6 +210,83 @@ fn open_resource(target: String) -> Result<(), String> {
         _ => return Err("Unknown external resource.".into()),
     };
     launch_external_url(url)
+}
+
+#[tauri::command]
+async fn install_resource(app: AppHandle, target: String) -> Result<String, String> {
+    if !matches!(target.as_str(), "uv" | "cloudflared") {
+        return Err("Only uv and cloudflared are managed by the desktop installer.".into());
+    }
+    let data_dir = app.path().app_local_data_dir().map_err(|e| e.to_string())?;
+    let target_for_result = target.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let path = resource_installer::install(&target, &data_dir, &cancelled)?;
+        let version = managed_version(&target).unwrap_or("managed");
+        Ok::<String, String>(format!(
+            "Installed {target_for_result} {version} at {}",
+            path.display()
+        ))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn repair_dependencies(app: AppHandle) -> Result<String, String> {
+    let data_dir = app.path().app_local_data_dir().map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        resource_installer::install("uv", &data_dir, &cancelled)?;
+        resource_installer::install("cloudflared", &data_dir, &cancelled)?;
+        Ok::<String, String>("Managed dependencies repaired.".into())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn prepare_runtime(
+    repair: bool,
+    state: tauri::State<'_, DesktopState>,
+) -> Result<String, String> {
+    let runtime = Arc::clone(&state.runtime);
+    tauri::async_runtime::spawn_blocking(move || prepare_runtime_environment(&runtime, repair))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn open_permission_settings(
+    permission: String,
+    state: tauri::State<'_, DesktopState>,
+) -> Result<String, String> {
+    let runtime = Arc::clone(&state.runtime);
+    tauri::async_runtime::spawn_blocking(move || open_app_permission_runtime(&runtime, &permission))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn prepare_chrome_bridge(state: tauri::State<'_, DesktopState>) -> Result<String, String> {
+    let store = Arc::clone(&state.store);
+    let runtime = Arc::clone(&state.runtime);
+    tauri::async_runtime::spawn_blocking(move || {
+        let (profile, log_dir) = {
+            let store = store
+                .lock()
+                .map_err(|_| "Profile store is unavailable.".to_string())?;
+            let profile =
+                store.profiles().into_iter().next().ok_or_else(|| {
+                    "Add a workspace before preparing the Chrome bridge.".to_string()
+                })?;
+            let log_dir = store.log_dir(&profile.id)?;
+            (profile, log_dir)
+        };
+        prepare_chrome_bridge_runtime(&runtime, &profile, &log_dir)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[cfg(target_os = "macos")]
@@ -375,7 +462,9 @@ fn menu_error(error: impl ToString) -> String {
 }
 
 fn status_text(status: &RuntimeStatus) -> &'static str {
-    if status.pid.is_none() {
+    if status.state == "starting" {
+        "Preparing runtime"
+    } else if status.pid.is_none() {
         "Stopped"
     } else if status.state == "running" {
         "Running"
@@ -412,15 +501,17 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
         .lock()
         .map_err(|_| "Profile store is unavailable.".to_string())?
         .profiles();
-    let statuses = {
+    let (statuses, dependencies) = {
         let mut runtime = state
             .runtime
             .lock()
             .map_err(|_| "Runtime manager is unavailable.".to_string())?;
-        profiles
+        let statuses = profiles
             .iter()
             .map(|profile| (profile.id.clone(), runtime.status(profile)))
-            .collect::<HashMap<_, _>>()
+            .collect::<HashMap<_, _>>();
+        let dependencies = runtime.dependency_status();
+        (statuses, dependencies)
     };
 
     let menu = Menu::new(app).map_err(menu_error)?;
@@ -454,7 +545,7 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
             .get(&profile.id)
             .cloned()
             .unwrap_or_else(|| RuntimeStatus::stopped(profile.runtime.local_port));
-        let running = status.pid.is_some();
+        let running = status.is_active();
         let workspace = Submenu::with_id_and_icon(
             app,
             format!("workspace:{}", profile.id),
@@ -576,13 +667,195 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
     menu.append(&refresh).map_err(menu_error)?;
 
     let resources = Submenu::with_id(app, "resources", "Resources", true).map_err(menu_error)?;
-    let uv = MenuItem::with_id(app, "resource:uv", "Install uv…", true, None::<&str>)
-        .map_err(menu_error)?;
+    for (id, label) in [
+        (
+            "resource-status:runtime",
+            format!(
+                "MCP Runtime · {}{}",
+                if dependencies.runtime_ready {
+                    "Ready"
+                } else {
+                    "Not prepared"
+                },
+                dependencies
+                    .runtime_version
+                    .as_deref()
+                    .map(|version| format!(" · {version}"))
+                    .unwrap_or_default()
+            ),
+        ),
+        (
+            "resource-status:playwright",
+            format!(
+                "Playwright · {}{}",
+                if dependencies.playwright_ready {
+                    "Ready"
+                } else {
+                    "Not prepared"
+                },
+                dependencies
+                    .playwright_version
+                    .as_deref()
+                    .map(|version| format!(" · {version}"))
+                    .unwrap_or_default()
+            ),
+        ),
+        (
+            "resource-status:uv",
+            format!(
+                "uv · {}",
+                if dependencies.uv {
+                    "Ready"
+                } else {
+                    "Not found"
+                }
+            ),
+        ),
+        (
+            "resource-status:cloudflared",
+            format!(
+                "cloudflared · {}",
+                if dependencies.cloudflared {
+                    "Ready"
+                } else {
+                    "Not found"
+                }
+            ),
+        ),
+        (
+            "resource-status:app-helper",
+            format!(
+                "App Helper · {}",
+                if dependencies.app_helper {
+                    "Ready"
+                } else {
+                    "Not found"
+                }
+            ),
+        ),
+        (
+            "resource-status:chrome",
+            format!(
+                "Chrome · {}",
+                if dependencies.chrome_installed {
+                    "Installed"
+                } else {
+                    "Not found"
+                }
+            ),
+        ),
+        (
+            "resource-status:cdp",
+            format!(
+                "Chrome CDP · {}",
+                if dependencies.chrome_cdp_ready {
+                    "Connected"
+                } else {
+                    "Not connected"
+                }
+            ),
+        ),
+        (
+            "resource-status:bridge",
+            format!(
+                "Chrome Bridge · {}",
+                if dependencies.chrome_bridge_connected {
+                    "Connected"
+                } else if dependencies.chrome_manifest {
+                    "Installed"
+                } else {
+                    "Not installed"
+                }
+            ),
+        ),
+        (
+            "resource-status:accessibility",
+            format!(
+                "Accessibility · {}",
+                match dependencies.accessibility_trusted {
+                    Some(true) => "Allowed",
+                    Some(false) => "Permission required",
+                    None => "Unavailable",
+                }
+            ),
+        ),
+        (
+            "resource-status:screen-recording",
+            format!(
+                "Screen Recording · {}",
+                match dependencies.screen_recording_trusted {
+                    Some(true) => "Allowed",
+                    Some(false) => "Permission required",
+                    None => "Unavailable",
+                }
+            ),
+        ),
+    ] {
+        let item = MenuItem::with_id(app, id, label, false, None::<&str>).map_err(menu_error)?;
+        resources.append(&item).map_err(menu_error)?;
+    }
+    let separator = PredefinedMenuItem::separator(app).map_err(menu_error)?;
+    resources.append(&separator).map_err(menu_error)?;
+    let prepare_runtime = MenuItem::with_id(
+        app,
+        "resource:prepare-runtime",
+        "Prepare runtime…",
+        true,
+        None::<&str>,
+    )
+    .map_err(menu_error)?;
+    resources.append(&prepare_runtime).map_err(menu_error)?;
+    let repair_runtime = MenuItem::with_id(
+        app,
+        "resource:repair-runtime",
+        "Repair runtime…",
+        true,
+        None::<&str>,
+    )
+    .map_err(menu_error)?;
+    resources.append(&repair_runtime).map_err(menu_error)?;
+    let chrome_bridge = MenuItem::with_id(
+        app,
+        "resource:chrome-bridge",
+        "Prepare Chrome bridge…",
+        true,
+        None::<&str>,
+    )
+    .map_err(menu_error)?;
+    resources.append(&chrome_bridge).map_err(menu_error)?;
+    let accessibility = MenuItem::with_id(
+        app,
+        "resource:accessibility",
+        "Accessibility settings…",
+        true,
+        None::<&str>,
+    )
+    .map_err(menu_error)?;
+    resources.append(&accessibility).map_err(menu_error)?;
+    let screen_recording = MenuItem::with_id(
+        app,
+        "resource:screen-recording",
+        "Screen Recording settings…",
+        true,
+        None::<&str>,
+    )
+    .map_err(menu_error)?;
+    resources.append(&screen_recording).map_err(menu_error)?;
+    let separator = PredefinedMenuItem::separator(app).map_err(menu_error)?;
+    resources.append(&separator).map_err(menu_error)?;
+    let uv = MenuItem::with_id(
+        app,
+        "resource:uv",
+        "Install / Repair uv…",
+        true,
+        None::<&str>,
+    )
+    .map_err(menu_error)?;
     resources.append(&uv).map_err(menu_error)?;
     let cloudflared = MenuItem::with_id(
         app,
         "resource:cloudflared",
-        "Install cloudflared…",
+        "Install / Repair cloudflared…",
         true,
         None::<&str>,
     )
@@ -675,6 +948,7 @@ fn add_workspace_from_menu(app: &AppHandle) {
 }
 
 fn start_workspace_from_menu(app: AppHandle, profile_id: String) {
+    schedule_tray_refresh(app.clone(), Duration::from_secs(1));
     tauri::async_runtime::spawn_blocking(move || {
         let result = (|| {
             let state = app.state::<DesktopState>();
@@ -691,15 +965,13 @@ fn start_workspace_from_menu(app: AppHandle, profile_id: String) {
                 let log_dir = store.log_dir(&profile.id)?;
                 (profile, log_dir)
             };
-            state
-                .runtime
-                .lock()
-                .map_err(|_| "Runtime manager is unavailable.".to_string())?
-                .start(&profile, &log_dir)?;
+            start_workspace(&state.runtime, &profile, &log_dir)?;
             Ok::<(), String>(())
         })();
         if let Err(error) = result {
-            show_error(&app, error);
+            if error != "Workspace startup was cancelled." {
+                show_error(&app, error);
+            }
         }
         refresh_tray_menu_on_main(app.clone());
         schedule_tray_refresh(app.clone(), Duration::from_secs(2));
@@ -751,8 +1023,7 @@ fn set_permission_mode_from_menu(
         .lock()
         .map_err(|_| "Runtime manager is unavailable.".to_string())?
         .status(&profile)
-        .pid
-        .is_some()
+        .is_active()
     {
         return Err("Stop the workspace before changing its permission mode.".into());
     }
@@ -839,8 +1110,7 @@ fn remove_workspace_from_menu(app: &AppHandle, profile_id: String) {
                     .lock()
                     .map_err(|_| "Runtime manager is unavailable.".to_string())?
                     .status(&profile)
-                    .pid
-                    .is_some();
+                    .is_active();
                 if running {
                     return Err("Stop the workspace before removing it.".into());
                 }
@@ -866,14 +1136,84 @@ fn handle_tray_menu_event(app: &AppHandle, id: &str) {
         if let Err(error) = refresh_tray_menu(app) {
             show_error(app, error);
         }
-    } else if id == "resource:uv" {
-        if let Err(error) = open_resource("uv".into()) {
-            show_error(app, error);
+    } else if id == "resource:prepare-runtime" || id == "resource:repair-runtime" {
+        let repair = id == "resource:repair-runtime";
+        let runtime = Arc::clone(&app.state::<DesktopState>().runtime);
+        let callback_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let result = tauri::async_runtime::spawn_blocking(move || {
+                prepare_runtime_environment(&runtime, repair)
+            })
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|result| result);
+            if let Err(error) = result {
+                show_error(&callback_app, error);
+            }
+            refresh_tray_menu_on_main(callback_app);
+        });
+    } else if id == "resource:chrome-bridge" {
+        let state = app.state::<DesktopState>();
+        let runtime = Arc::clone(&state.runtime);
+        let profile_and_log = state
+            .store
+            .lock()
+            .map_err(|_| "Profile store is unavailable.".to_string())
+            .and_then(|store| {
+                let profile = store.profiles().into_iter().next().ok_or_else(|| {
+                    "Add a workspace before preparing the Chrome bridge.".to_string()
+                })?;
+                let log_dir = store.log_dir(&profile.id)?;
+                Ok((profile, log_dir))
+            });
+        match profile_and_log {
+            Ok((profile, log_dir)) => {
+                let callback_app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let result = tauri::async_runtime::spawn_blocking(move || {
+                        prepare_chrome_bridge_runtime(&runtime, &profile, &log_dir)
+                    })
+                    .await
+                    .map_err(|error| error.to_string())
+                    .and_then(|result| result);
+                    if let Err(error) = result {
+                        show_error(&callback_app, error);
+                    }
+                    refresh_tray_menu_on_main(callback_app);
+                });
+            }
+            Err(error) => show_error(app, error),
         }
-    } else if id == "resource:cloudflared" {
-        if let Err(error) = open_resource("cloudflared".into()) {
-            show_error(app, error);
+    } else if id == "resource:accessibility" || id == "resource:screen-recording" {
+        let permission = if id == "resource:accessibility" {
+            "accessibility"
+        } else {
+            "screen_recording"
         }
+        .to_string();
+        let runtime = Arc::clone(&app.state::<DesktopState>().runtime);
+        let callback_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let result = tauri::async_runtime::spawn_blocking(move || {
+                open_app_permission_runtime(&runtime, &permission)
+            })
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|result| result);
+            if let Err(error) = result {
+                show_error(&callback_app, error);
+            }
+            refresh_tray_menu_on_main(callback_app);
+        });
+    } else if id == "resource:uv" || id == "resource:cloudflared" {
+        let target = id.trim_start_matches("resource:").to_string();
+        let callback_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = install_resource(callback_app.clone(), target).await {
+                show_error(&callback_app, error);
+            }
+            refresh_tray_menu_on_main(callback_app);
+        });
     } else if id == "resource:github" {
         if let Err(error) = open_resource("github".into()) {
             show_error(app, error);
@@ -918,6 +1258,16 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(state)
         .setup(|app| {
+            let resources = if cfg!(debug_assertions) {
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources")
+            } else {
+                app.path().resource_dir()?
+            };
+            app.state::<DesktopState>()
+                .runtime
+                .lock()
+                .map_err(|_| std::io::Error::other("Runtime manager is unavailable"))?
+                .configure_environment(resources, app.path().app_local_data_dir()?);
             #[cfg(target_os = "macos")]
             {
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -946,6 +1296,11 @@ pub fn run() {
             profile_status,
             profile_logs,
             open_resource,
+            install_resource,
+            repair_dependencies,
+            prepare_runtime,
+            prepare_chrome_bridge,
+            open_permission_settings,
             quit_app
         ])
         .build(tauri::generate_context!())

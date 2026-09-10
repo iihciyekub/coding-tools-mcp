@@ -1,10 +1,10 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Coding Tools MCP",
-  "version": "0.3.14",
+  "version": "0.3.18",
   "identifier": "com.codingtoolsmcp.desktop",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "npm run build:runtime && npm run dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "npm run build:bundle",
     "frontendDist": "../dist"
@@ -22,9 +22,10 @@
     "shortDescription": "Manage Coding Tools MCP workspaces",
     "longDescription": "Start workspace-confined MCP runtimes and authenticated Cloudflare tunnels.",
     "copyright": "Copyright © Coding Tools MCP Contributors",
-    "resources": [
-      "resources/**/*"
-    ],
+    "resources": {
+      "resources/runtime/": "runtime/",
+      "resources/helpers/": "helpers/"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

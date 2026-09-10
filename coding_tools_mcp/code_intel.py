@@ -123,9 +123,9 @@ def _iter_code_files(workspace: Path, target: Path, max_files: int) -> Iterator[
             yield target
         return
     for current, dirs, files in os.walk(target, followlinks=False):
-        dirs[:] = [name for name in dirs if name not in EXCLUDED_DIRS]
+        dirs[:] = sorted(name for name in dirs if name not in EXCLUDED_DIRS)
         current_path = Path(current)
-        for name in files:
+        for name in sorted(files):
             candidate = current_path / name
             if candidate.suffix.lower() not in SUPPORTED_SUFFIXES or not _safe_file(workspace, candidate):
                 continue
@@ -133,6 +133,13 @@ def _iter_code_files(workspace: Path, target: Path, max_files: int) -> Iterator[
             count += 1
             if count >= max_files:
                 return
+
+
+def _scan_code_files(workspace: Path, target: Path, max_files: int) -> tuple[list[Path], bool]:
+    """Return a deterministic bounded scan plus whether more code files exist."""
+
+    candidates = list(_iter_code_files(workspace, target, max_files + 1))
+    return candidates[:max_files], len(candidates) > max_files
 
 
 def _display_path(workspace: Path, path: Path) -> str:
@@ -244,7 +251,8 @@ def symbols(workspace: Path, target: Path, args: dict[str, Any]) -> dict[str, An
     requested_kind = str(args.get("kind") or "").casefold()
     items: list[dict[str, Any]] = []
     scanned_files = 0
-    for path in _iter_code_files(workspace, target, max_files):
+    paths, scan_truncated = _scan_code_files(workspace, target, max_files)
+    for path in paths:
         scanned_files += 1
         for item in _file_symbols(workspace, path):
             if query and query not in str(item["qualified_name"]).casefold():
@@ -259,14 +267,20 @@ def symbols(workspace: Path, target: Path, args: dict[str, Any]) -> dict[str, An
                     "count": len(items),
                     "scanned_files": scanned_files,
                     "truncated": True,
+                    "truncated_by": "max_results",
+                    "scan_complete": False,
                 }
-    return {
+    result = {
         "ok": True,
         "symbols": items,
         "count": len(items),
         "scanned_files": scanned_files,
-        "truncated": False,
+        "truncated": scan_truncated,
+        "scan_complete": not scan_truncated,
     }
+    if scan_truncated:
+        result["truncated_by"] = "max_files"
+    return result
 
 
 def definition(workspace: Path, target: Path, args: dict[str, Any]) -> dict[str, Any]:
@@ -275,7 +289,8 @@ def definition(workspace: Path, target: Path, args: dict[str, Any]) -> dict[str,
     max_files = int(args.get("max_files", 2000))
     items: list[dict[str, Any]] = []
     scanned_files = 0
-    for path in _iter_code_files(workspace, target, max_files):
+    paths, scan_truncated = _scan_code_files(workspace, target, max_files)
+    for path in paths:
         scanned_files += 1
         for item in _file_symbols(workspace, path):
             if item["name"] != name and item["qualified_name"] != name:
@@ -289,15 +304,21 @@ def definition(workspace: Path, target: Path, args: dict[str, Any]) -> dict[str,
                     "count": len(items),
                     "scanned_files": scanned_files,
                     "truncated": True,
+                    "truncated_by": "max_results",
+                    "scan_complete": False,
                 }
-    return {
+    result = {
         "ok": True,
         "symbol": name,
         "definitions": items,
         "count": len(items),
         "scanned_files": scanned_files,
-        "truncated": False,
+        "truncated": scan_truncated,
+        "scan_complete": not scan_truncated,
     }
+    if scan_truncated:
+        result["truncated_by"] = "max_files"
+    return result
 
 
 def references(workspace: Path, target: Path, args: dict[str, Any]) -> dict[str, Any]:
@@ -309,7 +330,8 @@ def references(workspace: Path, target: Path, args: dict[str, Any]) -> dict[str,
     pattern = re.compile(rf"(?<![\w$]){re.escape(name)}(?![\w$])", flags)
     items: list[dict[str, Any]] = []
     scanned_files = 0
-    for path in _iter_code_files(workspace, target, max_files):
+    paths, scan_truncated = _scan_code_files(workspace, target, max_files)
+    for path in paths:
         scanned_files += 1
         lines = _read_lines(path)
         if lines is None:
@@ -333,12 +355,18 @@ def references(workspace: Path, target: Path, args: dict[str, Any]) -> dict[str,
                         "count": len(items),
                         "scanned_files": scanned_files,
                         "truncated": True,
+                        "truncated_by": "max_results",
+                        "scan_complete": False,
                     }
-    return {
+    result = {
         "ok": True,
         "symbol": name,
         "references": items,
         "count": len(items),
         "scanned_files": scanned_files,
-        "truncated": False,
+        "truncated": scan_truncated,
+        "scan_complete": not scan_truncated,
     }
+    if scan_truncated:
+        result["truncated_by"] = "max_files"
+    return result

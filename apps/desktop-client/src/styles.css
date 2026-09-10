@@ -462,12 +462,34 @@ button:disabled { cursor: default; opacity: .38; }
   z-index: 10;
   right: 8px;
   bottom: 32px;
-  width: 190px;
+  width: 286px;
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
   padding: 5px;
   border: 1px solid var(--panel-line);
   border-radius: 9px;
   background: var(--panel-surface);
   box-shadow: 0 12px 30px rgba(0, 0, 0, .2);
+}
+
+.dependency-summary {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 3px 8px;
+  padding: 6px 8px 7px;
+  margin-bottom: 3px;
+  border-bottom: 1px solid var(--panel-line);
+}
+.dependency-summary > span {
+  grid-column: 1 / -1;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--panel-text);
+}
+.dependency-summary small {
+  font-size: 9px;
+  color: var(--panel-muted);
+  white-space: nowrap;
 }
 
 .more-menu button {

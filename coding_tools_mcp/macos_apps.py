@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import ctypes
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -11,6 +12,53 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .errors import ToolFailure
+
+
+def _helper_call(action: str, args: dict[str, Any]) -> dict[str, Any] | None:
+    helper = os.environ.get("CODING_TOOLS_MCP_APP_HELPER", "").strip()
+    if not helper:
+        return None
+    path = Path(helper).expanduser()
+    if not path.is_file():
+        return None
+    try:
+        completed = subprocess.run(
+            [str(path)],
+            input=json.dumps({"action": action, "args": args}, ensure_ascii=False),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ToolFailure(
+            "APP_HELPER_ERROR",
+            f"macOS app helper failed: {exc}",
+            category="runtime",
+            retryable=True,
+        ) from exc
+    try:
+        payload = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise ToolFailure(
+            "APP_HELPER_ERROR",
+            completed.stderr.strip() or "macOS app helper returned invalid JSON.",
+            category="runtime",
+            retryable=True,
+        ) from exc
+    if isinstance(payload, dict) and payload.get("ok") is False:
+        raw_error = payload.get("error")
+        error: dict[str, Any] = raw_error if isinstance(raw_error, dict) else {}
+        raise ToolFailure(
+            str(error.get("code") or "APP_HELPER_ERROR"),
+            str(error.get("message") or completed.stderr.strip() or "macOS app helper failed."),
+            category=str(error.get("category") or "runtime"),
+            retryable=bool(error.get("retryable")),
+            details=error.get("details") if isinstance(error.get("details"), dict) else {},
+        )
+    if not isinstance(payload, dict):
+        raise ToolFailure("APP_HELPER_ERROR", "macOS app helper returned an invalid result.", category="runtime")
+    return payload
 
 
 K_CFSTRING_ENCODING_UTF8 = 0x08000100
@@ -402,6 +450,8 @@ def _app_root(app_ref: str) -> tuple[AXBridge, dict[str, Any], ctypes.c_void_p]:
 
 
 def accessibility(args: dict[str, Any]) -> dict[str, Any]:
+    if (helper := _helper_call("accessibility", args)) is not None:
+        return helper
     if sys.platform != "darwin":
         raise _unsupported()
     trusted = _ax().trusted()
@@ -418,6 +468,8 @@ def accessibility(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def list_apps(args: dict[str, Any]) -> dict[str, Any]:
+    if (helper := _helper_call("list_apps", args)) is not None:
+        return helper
     apps = _running_apps()
     if not bool(args.get("include_background", False)):
         apps = [app for app in apps if not app.get("background_only")]
@@ -435,6 +487,8 @@ def list_apps(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def launch(args: dict[str, Any]) -> dict[str, Any]:
+    if (helper := _helper_call("launch", args)) is not None:
+        return helper
     if sys.platform != "darwin":
         raise _unsupported()
     ref = str(args["app"])
@@ -448,6 +502,8 @@ def launch(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def activate(args: dict[str, Any]) -> dict[str, Any]:
+    if (helper := _helper_call("activate", args)) is not None:
+        return helper
     result = launch({"app": args["app"], "new_instance": False})
     time.sleep(min(int(args.get("wait_ms", 150)), 2000) / 1000)
     app = _resolve_app(str(args["app"]))
@@ -455,6 +511,8 @@ def activate(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def windows(args: dict[str, Any]) -> dict[str, Any]:
+    if (helper := _helper_call("windows", args)) is not None:
+        return helper
     bridge, app, root = _app_root(str(args["app"]))
     try:
         items = []
@@ -473,6 +531,8 @@ def windows(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def snapshot(args: dict[str, Any]) -> dict[str, Any]:
+    if (helper := _helper_call("snapshot", args)) is not None:
+        return helper
     bridge, app, root = _app_root(str(args["app"]))
     max_depth = int(args.get("max_depth", 6))
     max_elements = int(args.get("max_elements", 500))
@@ -500,6 +560,8 @@ def snapshot(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def click(args: dict[str, Any]) -> dict[str, Any]:
+    if (helper := _helper_call("click", args)) is not None:
+        return helper
     if not (args.get("role") or args.get("title") or args.get("identifier")):
         raise ToolFailure(
             "INVALID_ARGUMENT",
@@ -538,6 +600,8 @@ def click(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def type_text(args: dict[str, Any]) -> dict[str, Any]:
+    if (helper := _helper_call("type_text", args)) is not None:
+        return helper
     bridge, app, root = _app_root(str(args["app"]))
     text = str(args["text"])
     element: ctypes.c_void_p | None = None
@@ -659,6 +723,8 @@ def _modifier_flags(modifiers: list[str]) -> int:
 
 
 def press(args: dict[str, Any]) -> dict[str, Any]:
+    if (helper := _helper_call("press", args)) is not None:
+        return helper
     bridge = _require_accessibility()
     app = activate({"app": args["app"], "wait_ms": args.get("wait_ms", 100)})["resolved"]
     key = str(args["key"]).casefold()
@@ -670,6 +736,8 @@ def press(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def menu(args: dict[str, Any]) -> dict[str, Any]:
+    if (helper := _helper_call("menu", args)) is not None:
+        return helper
     bridge, app, root = _app_root(str(args["app"]))
     path = [str(item) for item in args["path"]]
     if not path:
@@ -698,6 +766,8 @@ def menu(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def screenshot(args: dict[str, Any]) -> dict[str, Any]:
+    if (helper := _helper_call("screenshot", args)) is not None:
+        return helper
     bridge, app, root = _app_root(str(args["app"]))
     window_index = int(args.get("window_index", 0))
     windows_list: list[ctypes.c_void_p] = []

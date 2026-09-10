@@ -249,6 +249,10 @@ pub struct RuntimeStatus {
 }
 
 impl RuntimeStatus {
+    pub fn is_active(&self) -> bool {
+        self.pid.is_some() || self.state == "starting"
+    }
+
     pub fn stopped(port: u16) -> Self {
         Self {
             state: "stopped".into(),

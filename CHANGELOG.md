@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.3.7 - 2026-09-09
+
+- Desktop 0.3.18 can bootstrap pinned, SHA-256-verified `uv` 0.11.28 and `cloudflared` 2026.8.3 into its private application-data directory. Workspace startup automatically fills either missing prerequisite on macOS; the Resources menu also provides explicit install/repair actions without modifying Homebrew or system Python.
+- Added a ~126 KiB native macOS App Helper compiled with the system Swift toolchain and bundled as a signable app resource. `app_*` tools automatically route Accessibility, CGEvent input, menu control and window capture through this stable helper when launched by the desktop client, so macOS privacy permission is no longer tied to a versioned external Python runtime.
+- The helper supports application listing/launch/activation, windows, bounded UI snapshots, clicks, text input, key presses, menus and screenshots. Accessibility permission prompting identifies the helper directly; the existing Python implementation remains a development/fallback path.
+- Runtime downloads remain cancellable during workspace preparation. Official asset versions and checksums are pinned in source and covered by a real-download integration test.
+- The desktop panel and native menu-bar Resources menu now report MCP Runtime/core version, Playwright/version, uv, cloudflared, App Helper, Chrome/CDP, Chrome Native Messaging installation/connection, Accessibility and Screen Recording readiness. Runtime preparation/repair is separate from `uv` + `cloudflared` repair, and the Chrome bridge can still be prepared from the private runtime while opening Chrome's extension page for the one remaining `Load unpacked` step.
+- Desktop 0.3.18 DMGs now use a standard macOS drag-install Finder layout with a 112 px Coding Tools MCP icon and an `/Applications` shortcut instead of the previous bare single-app image.
+
+## 0.3.5 - 2026-09-09
+
+- Desktop 0.3.16 ships only the runtime source wheel and hashed production dependency manifest. It reuses matching system installations or prepares a persistent private environment with uv or Python venv/pip; Python, Node, Playwright and native libraries are no longer embedded in the app.
+- First-use dependency preparation has a separate five-minute deadline, process cleanup, logs, an interprocess installation lock, and an offline reuse path.
+- Chrome Native Messaging supports external Python environments and module-only installations. Expired or disconnected requests no longer terminate the bridge; extension execution has deadlines and per-tab serialization.
+- Fixed same-name browser snapshot selectors, password-value redaction, accessible labels, control-state metadata, element truncation, network text rendering, and inspect match counts. Chrome attachments preserve existing browser defaults.
+
+## 0.3.4 - 2026-09-08
+
+- Desktop 0.3.15 bundles the 0.3.4 runtime and is the macOS Developer ID/notarized release for this stability update.
+- Fixed browser JavaScript deadlines so unresolved Promises and blocking scripts terminate with `BROWSER_TIMEOUT` instead of pinning the request thread.
+- Reclaimed background process-group descendants when a managed shell exits, and on runtime close.
+- Fixed rolling-output polling to compare absolute stream cursors, and made `read_output` UTF-8 boundary safe.
+- Made bounded code indexing deterministic and explicitly report `max_files` truncation instead of implying a complete scan.
+- Persisted OAuth dynamic client registrations and generated token signing keys per workspace so clients and access tokens survive runtime restarts.
+- Added workspace-scoped `operation_id` deduplication plus read-only `get_command` and `list_commands` recovery tools; completed command recovery now lasts 30 minutes.
+- Added dedicated model-facing text renderers for code, browser, Chrome-extension, macOS-app, and command-recovery results.
+- Added stable Chrome CDP `tab_id` metadata/selection, bounded HTTP request-body deadlines, and a 32-request HTTP concurrency cap.
+
 ## 0.3.3 - 2026-09-08
 
 - Added Playwright/CDP browser control, browser console/network/element

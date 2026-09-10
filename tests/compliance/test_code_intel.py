@@ -72,6 +72,31 @@ class CodeIntelTests(unittest.TestCase):
             with self.assertRaises(ToolFailure):
                 runtime.code_symbols({"path": "../"})
 
+    def test_max_files_reports_incomplete_scan(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "a.py").write_text("def alpha():\n    return 1\n", encoding="utf-8")
+            (workspace / "z.py").write_text("def target_symbol():\n    return alpha()\n", encoding="utf-8")
+
+            definition = code_intel.definition(
+                workspace,
+                workspace,
+                {"symbol": "target_symbol", "max_files": 1},
+            )
+            self.assertEqual(definition["definitions"], [])
+            self.assertTrue(definition["truncated"])
+            self.assertEqual(definition["truncated_by"], "max_files")
+            self.assertFalse(definition["scan_complete"])
+
+            references = code_intel.references(
+                workspace,
+                workspace,
+                {"symbol": "target_symbol", "max_files": 1},
+            )
+            self.assertTrue(references["truncated"])
+            self.assertEqual(references["truncated_by"], "max_files")
+            self.assertFalse(references["scan_complete"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -5,7 +5,7 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
 import { detectLanguage, translator } from "./i18n";
-import type { PermissionMode, RuntimeStatus, WorkspaceProfile } from "./types";
+import type { DependencyStatus, PermissionMode, RuntimeStatus, WorkspaceProfile } from "./types";
 import { publicEndpoint } from "./utils";
 
 const PANEL_WIDTH = 358;
@@ -39,6 +39,21 @@ function App() {
   const t = useMemo(() => translator(detectLanguage()), []);
   const [profiles, setProfiles] = useState<WorkspaceProfile[]>([]);
   const [statuses, setStatuses] = useState<Record<string, RuntimeStatus>>({});
+  const [dependencies, setDependencies] = useState<DependencyStatus>({
+    uv: false,
+    cloudflared: false,
+    app_helper: false,
+    runtime_ready: false,
+    runtime_version: null,
+    playwright_ready: false,
+    playwright_version: null,
+    chrome_installed: false,
+    chrome_cdp_ready: false,
+    chrome_manifest: false,
+    chrome_bridge_connected: false,
+    accessibility_trusted: null,
+    screen_recording_trusted: null,
+  });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -62,6 +77,7 @@ function App() {
       const snapshot = await api.snapshot();
       setProfiles(snapshot.profiles);
       setStatuses(snapshot.statuses);
+      setDependencies(snapshot.dependencies);
       setSelectedId((current) => {
         if (keepSelection && current && snapshot.profiles.some((profile) => profile.id === current)) {
           return current;
@@ -151,6 +167,61 @@ function App() {
     }
   };
 
+  const installResource = async (target: "uv" | "cloudflared") => {
+    setMoreOpen(false);
+    setError("");
+    try {
+      await api.installResource(target);
+      await refresh();
+    } catch (reason) {
+      setError(String(reason));
+    }
+  };
+
+  const repairDependencies = async () => {
+    setMoreOpen(false);
+    setError("");
+    try {
+      await api.repairDependencies();
+      await refresh();
+    } catch (reason) {
+      setError(String(reason));
+    }
+  };
+
+  const prepareRuntime = async (repair = false) => {
+    setMoreOpen(false);
+    setError("");
+    try {
+      await api.prepareRuntime(repair);
+      await refresh();
+    } catch (reason) {
+      setError(String(reason));
+    }
+  };
+
+  const openPermissionSettings = async (permission: "accessibility" | "screen_recording") => {
+    setMoreOpen(false);
+    setError("");
+    try {
+      await api.openPermissionSettings(permission);
+      await refresh();
+    } catch (reason) {
+      setError(String(reason));
+    }
+  };
+
+  const prepareChromeBridge = async () => {
+    setMoreOpen(false);
+    setError("");
+    try {
+      await api.prepareChromeBridge();
+      await refresh();
+    } catch (reason) {
+      setError(String(reason));
+    }
+  };
+
   const addWorkspace = async () => {
     const appWindow = getCurrentWindow();
     setError("");
@@ -184,7 +255,7 @@ function App() {
     setError("");
     try {
       let next: RuntimeStatus;
-      if (status.pid) {
+      if (status.pid || status.state === "starting") {
         next = await api.stopProfile(profile.id);
       } else {
         const saved = await api.saveProfile(quickTunnelProfile(profile));
@@ -197,7 +268,7 @@ function App() {
       }
       setStatuses((current) => ({ ...current, [profile.id]: next }));
     } catch (reason) {
-      setError(String(reason));
+      if (String(reason) !== "Workspace startup was cancelled.") setError(String(reason));
     } finally {
       setBusyId(null);
     }
@@ -205,7 +276,7 @@ function App() {
 
   const deleteWorkspace = async (profile: WorkspaceProfile) => {
     const status = statuses[profile.id] ?? stoppedStatus(profile.runtime.local_port);
-    if (status.pid) return;
+    if (status.pid || status.state === "starting") return;
     if (confirmDeleteId !== profile.id) {
       setConfirmDeleteId(profile.id);
       return;
@@ -232,7 +303,7 @@ function App() {
 
   const setPermissionMode = async (profile: WorkspaceProfile, permissionMode: PermissionMode) => {
     const status = statuses[profile.id] ?? stoppedStatus(profile.runtime.local_port);
-    if (status.pid) return;
+    if (status.pid || status.state === "starting") return;
     setBusyId(profile.id);
     setError("");
     try {
@@ -249,7 +320,9 @@ function App() {
     }
   };
 
-  const statusLabel = selectedStatus?.pid
+  const statusLabel = selectedStatus?.state === "starting"
+    ? t("Preparing runtime dependencies…")
+    : selectedStatus?.pid
     ? selectedStatus.state === "error" ? t("Connection error") : t("Cloudflare quick tunnel is running")
     : selected ? t("Workspace stopped") : t("Add a workspace to begin.");
 
@@ -338,7 +411,7 @@ function App() {
                 />
               </>
             ) : (
-              <p className="idle-copy">{t("Starting automatically creates a Cloudflare quick tunnel. No domain or token is needed.")}</p>
+              <p className="idle-copy">{t("Starting automatically creates a Cloudflare quick tunnel. No domain or token is needed.")} {t("First launch may download missing runtime dependencies. Later launches reuse them.")}</p>
             )}
             <label className={`permission-mode-control ${selected.runtime.permission_mode === "host" ? "host-enabled" : ""}`}>
               <span className="permission-mode-copy">
@@ -348,7 +421,7 @@ function App() {
               <select
                 className="permission-select"
                 value={selected.runtime.permission_mode}
-                disabled={Boolean(selectedStatus?.pid) || busyId === selected.id}
+                disabled={Boolean(selectedStatus?.pid) || selectedStatus?.state === "starting" || busyId === selected.id}
                 onChange={(event) => void setPermissionMode(selected, event.target.value as PermissionMode)}
               >
                 <option value="safe">{t("Safe")}</option>
@@ -378,7 +451,7 @@ function App() {
         <div className="workspace-list">
           {profiles.map((profile) => {
             const status = statuses[profile.id] ?? stoppedStatus(profile.runtime.local_port);
-            const running = Boolean(status.pid);
+            const running = Boolean(status.pid) || status.state === "starting";
             const busy = busyId === profile.id;
             const confirmingDelete = confirmDeleteId === profile.id;
             return (
@@ -396,7 +469,7 @@ function App() {
                   <button
                     className={`run-action ${running ? "running" : ""}`}
                     type="button"
-                    disabled={busy}
+                    disabled={busy && status.state !== "starting"}
                     onClick={(event) => {
                       event.stopPropagation();
                       setSelectedId(profile.id);
@@ -404,7 +477,7 @@ function App() {
                     }}
                   >
                     <PowerIcon />
-                    <span>{busy ? t("Working…") : t(running ? "Stop" : "Start")}</span>
+                    <span>{status.state === "starting" ? t("Cancel startup") : busy ? t("Working…") : t(running ? "Stop" : "Start")}</span>
                   </button>
                   <button
                     className={`delete-action ${confirmingDelete ? "confirming" : ""}`}
@@ -434,8 +507,27 @@ function App() {
         <button className="more-action" type="button" aria-label={t("More")} aria-expanded={moreOpen} onClick={() => setMoreOpen((current) => !current)}><MoreIcon /></button>
         {moreOpen && (
           <div className="more-menu">
-            <button type="button" onClick={() => void openResource("uv")}><DownloadIcon /><span>{t("Install uv")}</span></button>
-            <button type="button" onClick={() => void openResource("cloudflared")}><DownloadIcon /><span>{t("Install cloudflared")}</span></button>
+            <div className="dependency-summary">
+              <span>{t("Dependencies")}</span>
+              <small>{dependencies.runtime_ready ? "✓" : "○"} {t("MCP Runtime")}{dependencies.runtime_version ? ` ${dependencies.runtime_version}` : ""}</small>
+              <small>{dependencies.playwright_ready ? "✓" : "○"} Playwright{dependencies.playwright_version ? ` ${dependencies.playwright_version}` : ""}</small>
+              <small>{dependencies.uv ? "✓" : "○"} uv</small>
+              <small>{dependencies.cloudflared ? "✓" : "○"} cloudflared</small>
+              <small>{dependencies.app_helper ? "✓" : "○"} {t("App Helper")}</small>
+              <small>{dependencies.chrome_installed ? "✓" : "○"} Chrome</small>
+              <small>{dependencies.chrome_cdp_ready ? "✓" : "○"} Chrome CDP</small>
+              <small>{dependencies.chrome_bridge_connected ? "✓" : dependencies.chrome_manifest ? "◐" : "○"} {t("Chrome bridge")}{dependencies.chrome_bridge_connected ? ` · ${t("Connected")}` : dependencies.chrome_manifest ? ` · ${t("Installed")}` : ""}</small>
+              <small>{dependencies.accessibility_trusted ? "✓" : "○"} {t("Accessibility")}</small>
+              <small>{dependencies.screen_recording_trusted ? "✓" : "○"} {t("Screen Recording")}</small>
+            </div>
+            <button type="button" onClick={() => void prepareRuntime(false)}><DownloadIcon /><span>{t("Prepare runtime")}</span></button>
+            <button type="button" onClick={() => void prepareRuntime(true)}><DownloadIcon /><span>{t("Repair runtime")}</span></button>
+            <button type="button" onClick={() => void prepareChromeBridge()}><DownloadIcon /><span>{t("Prepare Chrome bridge")}</span></button>
+            <button type="button" onClick={() => void openPermissionSettings("accessibility")}><DownloadIcon /><span>{t("Accessibility settings")}</span></button>
+            <button type="button" onClick={() => void openPermissionSettings("screen_recording")}><DownloadIcon /><span>{t("Screen Recording settings")}</span></button>
+            <button type="button" onClick={() => void repairDependencies()}><DownloadIcon /><span>{t("Repair uv & cloudflared")}</span></button>
+            <button type="button" onClick={() => void installResource("uv")}><DownloadIcon /><span>{t("Install uv")}</span></button>
+            <button type="button" onClick={() => void installResource("cloudflared")}><DownloadIcon /><span>{t("Install cloudflared")}</span></button>
             <button type="button" onClick={() => void openResource("github")}><GithubIcon /><span>{t("GitHub source")}</span></button>
             <div className="menu-separator" />
             <button className="quit-action" type="button" onClick={() => void api.quit()}><PowerIcon /><span>{t("Quit Coding Tools MCP")}</span></button>

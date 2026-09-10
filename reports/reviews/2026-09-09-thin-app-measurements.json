@@ -1,0 +1,14 @@
+{
+  "desktop_version": "0.3.17",
+  "core_version": "0.3.6",
+  "app_bytes": 14414852,
+  "dmg_bytes": 4723496,
+  "source_payload_bytes": 148448,
+  "app_helper_bytes": 147232,
+  "previous_app_bytes": 185043512,
+  "previous_dmg_bytes": 69122976,
+  "signing": "Developer ID Application: Yongjian Li (2NLAH5MYH8); app and DMG notarized and stapled",
+  "app_notary_submission_id": "19500a59-3348-4057-85d0-c921a561d304",
+  "dmg_notary_submission_id": "59100348-e013-48ed-9c83-99a19606949f",
+  "environment_key": "0.3.6-389ada5fbb2d7a878244"
+}

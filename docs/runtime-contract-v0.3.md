@@ -115,7 +115,7 @@ instructions:
     "io.modelcontextprotocol/serverInfo": {
       "name": "coding-tools-mcp",
       "title": "Coding Tools MCP",
-      "version": "0.3.3"
+      "version": "0.3.6"
     }
   }
 }
@@ -293,7 +293,7 @@ Retry: This command_id has expired or never existed; …
 Known tool error codes include:
 
 ```json
-["ABSOLUTE_PATH_DENIED", "ACCESSIBILITY_PERMISSION_REQUIRED", "APP_CONTROL_ERROR", "BINARY_FILE", "BROWSER_ERROR", "CHROME_EXTENSION_ERROR", "CHROME_EXTENSION_UNAVAILABLE", "COMMAND_CLOSED", "COMMAND_LIMIT_REACHED", "COMMAND_NOT_FOUND", "ELICITATION_UNSUPPORTED", "GIT_ERROR", "INTERNAL_ERROR", "INVALID_ARGUMENT", "IS_DIRECTORY", "NOT_A_DIRECTORY", "NOT_FOUND", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_UNAVAILABLE", "SCREEN_RECORDING_PERMISSION_REQUIRED", "SYMLINK_ESCAPE", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING", "UNSUPPORTED_PLATFORM"]
+["ABSOLUTE_PATH_DENIED", "ACCESSIBILITY_PERMISSION_REQUIRED", "APP_CONTROL_ERROR", "APP_HELPER_ERROR", "BINARY_FILE", "BROWSER_ERROR", "BROWSER_TIMEOUT", "CHROME_EXTENSION_ERROR", "CHROME_EXTENSION_UNAVAILABLE", "COMMAND_CLOSED", "COMMAND_LIMIT_REACHED", "COMMAND_NOT_FOUND", "ELICITATION_UNSUPPORTED", "GIT_ERROR", "INTERNAL_ERROR", "INVALID_ARGUMENT", "IS_DIRECTORY", "NOT_A_DIRECTORY", "NOT_FOUND", "OPERATION_CONFLICT", "OPERATION_NOT_FOUND", "OPERATION_PENDING", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_UNAVAILABLE", "SCREEN_RECORDING_PERMISSION_REQUIRED", "SYMLINK_ESCAPE", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING", "UNSUPPORTED_PLATFORM"]
 ```
 
 Error categories are `validation`, `security`, `permission`, `runtime`,
@@ -306,8 +306,9 @@ unexpected server failure `-32603`. The two codes the modern era adds are
 
 ## Command lifecycle
 
-`exec_command`, `write_stdin`, `read_output`, and `kill_command` are always in
-the catalog. `exec_command` and `write_stdin` default to a 10-second yield. A
+`exec_command`, `get_command`, `list_commands`, `write_stdin`, `read_output`,
+and `kill_command` are always in the catalog. `exec_command` and `write_stdin`
+default to a 10-second yield. A
 short command normally finishes in one call. A running command returns:
 
 ```json
@@ -321,11 +322,22 @@ short command normally finishes in one call. A running command returns:
 }
 ```
 
-Call `write_stdin` with empty `chars` to poll. `read_output` is needed only when
-output is truncated or a caller explicitly requested compact retained output.
-Its offsets are absolute and independent for stdout and stderr. A single
-truncated stream is selected by `next_action`; when both streams are truncated,
-`next_actions` contains one executable `read_output` call for each stream.
+For read-only polling, call `get_command` by `command_id` or `operation_id`;
+`write_stdin` remains the interactive path when input must actually be sent.
+`list_commands` enumerates recent workspace-managed commands after a reconnect.
+`read_output` pages retained content without advancing a global cursor. Its
+offsets are absolute and independent for stdout and stderr, and pages never
+split a valid UTF-8 code point. A single truncated stream is selected by
+`next_action`; when both streams are truncated, `next_actions` contains one
+executable `read_output` call for each stream.
+
+`exec_command.operation_id` is optional and workspace-scoped. Repeating the
+same id with identical execution parameters returns the existing command and
+does not spawn another process. Reusing it for different execution parameters
+returns `OPERATION_CONFLICT`. Completed command state and operation mappings
+are retained for up to 30 minutes (subject to bounded retained-command and
+output budgets), so a response lost in a tunnel can normally be recovered
+without repeating side effects.
 
 A command belongs to the workspace, not to the client or the request that
 started it. Any authenticated client of the same workspace can continue, read,
@@ -349,15 +361,16 @@ Authentication admits a client to the workspace; it does not partition it.
 Every admitted client of one workspace shares that workspace's commands,
 retained output, and patch state.
 
-Dynamic registrations and authorization codes are process-local; restarting
-the server requires clients to register again. Configure a stable
-`CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET` and public server URL only when tokens must
-survive tunnel churn. Forwarded headers are ignored unless
+Dynamic client registrations are persisted per workspace, and when
+`CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET` is omitted the generated HS256 signing
+key is persisted alongside that registry with user-only file permissions.
+Existing access tokens therefore survive runtime restarts. Authorization codes
+remain short-lived and process-local. Forwarded headers are ignored unless
 `CODING_TOOLS_MCP_TRUST_PROXY_HEADERS=1` is explicitly set.
 
 ## Stable tool inventory
 
-The default catalog has 49 tools, including `view_image`. Setting
+The default catalog has 51 tools, including `view_image`. Setting
 `CODING_TOOLS_MCP_ENABLE_VIEW_IMAGE=0` is the sole installation capability gate
 and removes only that optional binary-content tool. It is not a tool profile.
 
@@ -442,7 +455,7 @@ Supports `*** Add File`, `*** Update File`, `*** Delete File`, and
 
 ### exec_command
 
-Inputs: `"cmd"`, `"workdir"`, `"cwd"`, `"timeout_ms"`, `"yield_time_ms"`, `"max_output_bytes"`, `"verbosity"`, `"preview_bytes"`, `"stdin"`, `"tty"`, `"env"`.
+Inputs: `"cmd"`, `"operation_id"`, `"workdir"`, `"cwd"`, `"timeout_ms"`, `"yield_time_ms"`, `"max_output_bytes"`, `"verbosity"`, `"preview_bytes"`, `"stdin"`, `"tty"`, `"env"`.
 
 Annotations: `{"title":"Execute command","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
 
@@ -450,8 +463,33 @@ Statuses are `exited`, `running`, `timeout`, `terminated`, or `failed`.
 Launch/policy failures use the error envelope with `status: "failed"`; signal
 exits use `terminated`. Ordinary non-zero exit codes still use `exited`.
 `"workdir"` is workspace-relative and defaults to the workspace root.
+`"operation_id"` is optional. Within one workspace it makes retries of an
+identical execution idempotent for the retained-command lifetime: a duplicate
+returns the existing `command_id`; different execution parameters under the
+same id return `OPERATION_CONFLICT`.
 
 Example: `{"cmd":"pytest -q","workdir":".","yield_time_ms":30000}`.
+
+### get_command
+
+Inputs: `"command_id"`, `"operation_id"`.
+
+Annotations: `{"title":"Get command","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+Provide exactly one identifier. The result reports status, exit/signal/timeout,
+absolute stdout/stderr byte totals, retained `output_refs`, and expiry metadata
+without advancing any output cursor. An operation still between acceptance and
+process registration reports `status: "accepting"` and is safe to poll again.
+
+### list_commands
+
+Inputs: `"operation_id"`, `"max_results"`.
+
+Annotations: `{"title":"List commands","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+Lists recent active/retained commands plus any accepting operation record,
+newest first. `"operation_id"` optionally filters the list after a lost HTTP
+response or reconnect.
 
 ### write_stdin
 
@@ -489,6 +527,10 @@ recent bytes (rolling tail) are kept; the range between them may be evicted
 once the per-stream buffer overflows. Responses report `head_retained_bytes`,
 `evicted_gap_bytes`, and `omitted_bytes`; reads inside the evicted range clamp
 forward to the tail. Offsets remain absolute and stable.
+Returned chunks are aligned to UTF-8 code-point boundaries. If a requested
+offset lands inside a retained multibyte character it advances to the next
+valid boundary; a `limit` too small to return even the next complete character
+returns `INVALID_ARGUMENT` instead of replacement-character corruption.
 
 Example: `{"output_ref":"command:abc:stdout","offset":0,"limit":4096}`.
 
@@ -557,8 +599,9 @@ Inputs: `"endpoint"`, `"timeout_ms"`.
 
 Annotations: `{"title":"Browser tabs","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
 
-Lists inspectable Chrome tabs with stable per-call indexes, titles, URLs, and
-document visibility state.
+Lists inspectable Chrome tabs with per-call indexes plus CDP `tab_id` values,
+titles, URLs, and document visibility state. `tab_id` is stable across ordinary
+tab-list reorderings and is preferred for multi-step browser workflows.
 
 ### browser_active_tab
 
@@ -571,17 +614,20 @@ fallback to the last inspectable tab when Chrome cannot expose foreground state.
 
 ### browser_snapshot
 
-Inputs: `"endpoint"`, `"tab_index"`, `"timeout_ms"`, `"max_chars"`, `"max_elements"`.
+Inputs: `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`, `"max_chars"`, `"max_elements"`.
 
 Annotations: `{"title":"Browser snapshot","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
 
 Returns bounded `document.body.innerText` plus a simplified list of visible
-links, buttons, form controls, button/link roles, and editable elements with
-selectors suitable for subsequent browser calls.
+links, buttons, form controls, ARIA roles, focusable and editable elements with
+unique CSS selectors suitable for subsequent browser calls. Control labels and
+disabled/checked state are included; password values are redacted.
+`element_count` and `elements_truncated` describe the element limit separately
+from `text_truncated`.
 
 ### browser_screenshot
 
-Inputs: `"endpoint"`, `"tab_index"`, `"timeout_ms"`, `"full_page"`.
+Inputs: `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`, `"full_page"`.
 
 Annotations: `{"title":"Browser screenshot","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
 
@@ -590,17 +636,19 @@ content block; structured content keeps metadata only.
 
 ### browser_evaluate
 
-Inputs: `"script"`, `"endpoint"`, `"tab_index"`, `"timeout_ms"`.
+Inputs: `"script"`, `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`.
 
 Annotations: `{"title":"Browser evaluate","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
 
 Evaluates arbitrary JavaScript in the selected page. It is intentionally marked
 mutating because JavaScript can change page state even when a particular script
-only reads it.
+only reads it. `timeout_ms` is an execution deadline enforced through CDP, so
+an unresolved Promise or blocked JavaScript execution cannot occupy the tool
+request indefinitely.
 
 ### browser_click
 
-Inputs: `"selector"`, `"endpoint"`, `"tab_index"`, `"timeout_ms"`.
+Inputs: `"selector"`, `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`.
 
 Annotations: `{"title":"Browser click","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
 
@@ -608,7 +656,7 @@ Clicks the first element matching the supplied Playwright selector.
 
 ### browser_type
 
-Inputs: `"selector"`, `"text"`, `"endpoint"`, `"tab_index"`, `"timeout_ms"`, `"clear"`, `"delay_ms"`.
+Inputs: `"selector"`, `"text"`, `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`, `"clear"`, `"delay_ms"`.
 
 Annotations: `{"title":"Browser type","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
 
@@ -618,7 +666,7 @@ characters.
 
 ### browser_console
 
-Inputs: `"endpoint"`, `"tab_index"`, `"timeout_ms"`, `"wait_ms"`, `"max_entries"`, `"reload"`.
+Inputs: `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`, `"wait_ms"`, `"max_entries"`, `"reload"`.
 
 Annotations: `{"title":"Browser console","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
 
@@ -628,7 +676,7 @@ output can be observed; for that reason the tool is truthfully marked mutating.
 
 ### browser_network
 
-Inputs: `"endpoint"`, `"tab_index"`, `"timeout_ms"`, `"wait_ms"`, `"max_entries"`, `"reload"`, `"include_resources"`.
+Inputs: `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`, `"wait_ms"`, `"max_entries"`, `"reload"`, `"include_resources"`.
 
 Annotations: `{"title":"Browser network","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
 
@@ -638,7 +686,7 @@ page to sample page-load traffic, so the tool is marked mutating.
 
 ### browser_inspect
 
-Inputs: `"selector"`, `"endpoint"`, `"tab_index"`, `"timeout_ms"`, `"max_html_chars"`.
+Inputs: `"selector"`, `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`, `"max_html_chars"`.
 
 Annotations: `{"title":"Browser inspect","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
 
@@ -656,6 +704,9 @@ Lists language-aware definitions under a workspace file or directory. Python
 uses the standard-library AST; common JavaScript/TypeScript, Rust, Swift, Go,
 Java/Kotlin, and C/C++ declarations use lightweight language patterns. Results
 include symbol name, kind, workspace-relative path, line, column, and preview.
+If `max_files` stops directory scanning before all supported source files are
+visited, results report `truncated: true`, `truncated_by: "max_files"`, and
+`scan_complete: false`; callers must not interpret a missing symbol as absent.
 
 ### code_definition
 
@@ -686,8 +737,9 @@ Annotations: `{"title":"Install Chrome extension bridge","readOnlyHint":false,"d
 
 On macOS, copies the bundled Manifest V3 bridge extension into the current
 user's application-support directory and writes Chrome's per-user Native
-Messaging host manifest. `host_path` may override discovery of the bundled
-`coding-tools-mcp-chrome-host` executable. `open_extensions_page=true` opens
+Messaging host manifest. `host_path` may override discovery of the installed
+`coding-tools-mcp-chrome-host` executable. Module-only Python installations
+receive a small launcher pinned to their current interpreter/import root. `open_extensions_page=true` opens
 `chrome://extensions` to make the one-time approval step immediate. Chrome
 still requires one explicit **Load unpacked** approval from that page.
 

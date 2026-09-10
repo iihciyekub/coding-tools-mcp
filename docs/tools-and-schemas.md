@@ -6,7 +6,7 @@ properties, annotations, and error codes with the contract.
 
 ## Fixed inventory
 
-The default catalog contains exactly 49 tools:
+The default catalog contains exactly 51 tools:
 
 - `server_info`: server, workspace, automatic project context, policy, runtime,
   auth, protocol, and fixed-catalog metadata.
@@ -17,7 +17,9 @@ The default catalog contains exactly 49 tools:
   controls.
 - `search_text`: literal or regex search; ripgrep stops after the result cap.
 - `apply_patch`: stage and atomically commit add/update/delete/move envelopes.
-- `exec_command`: run a bounded command and wait up to 10 seconds by default.
+- `exec_command`: run a bounded command and optionally deduplicate retries with `operation_id`.
+- `get_command`: read one command's status by `command_id` or `operation_id` without consuming output.
+- `list_commands`: list recent active/retained commands for reconnect recovery.
 - `write_stdin`: poll or interact with a running command.
 - `kill_command`: terminate one runtime-owned command.
 - `read_output`: page retained stdout or stderr using absolute byte offsets.
@@ -61,7 +63,7 @@ The default catalog contains exactly 49 tools:
 - `app_screenshot`: capture an app window as one MCP PNG image block.
 
 `view_image` may be disabled when an installation cannot accept binary image
-content. That capability gate is not a tool profile. The other 48 tools are
+content. That capability gate is not a tool profile. The other 50 tools are
 always advertised, and `listChanged` is `false`.
 
 ## Chrome extension bridge
@@ -73,10 +75,11 @@ Developer mode and choose **Load unpacked** once; official Chrome builds no
 longer accept command-line unpacked-extension loading. By default the install
 tool opens `chrome://extensions` after staging the files. The bridge has a stable
 extension id and uses a local user-only Unix socket between the Native Messaging
-host and MCP runtimes. macOS release builds bundle one self-contained PyInstaller
-`onedir` MCP runtime plus a tiny Native Messaging launcher that `exec`s that
-same signed runtime in `--chrome-native-host` mode. This avoids a second Python
-bundle and avoids temporary extracted libraries under Hardened Runtime.
+host and MCP runtimes. Desktop releases use an external Python environment;
+the native host runs through its installed console entry point or a small launcher
+pinned to that interpreter. Run `chrome_extension_install` again after switching
+Python environments. See the [desktop runtime setup](../apps/desktop-client/README.md)
+for dependency downloads, reuse, and macOS permission implications.
 
 `chrome_extension_send` can message another extension only when that target
 extension explicitly permits external messaging. Chrome's extension isolation
@@ -84,14 +87,18 @@ is not bypassed.
 
 ## macOS application control
 
-The `app_*` tools use macOS Accessibility/CGEvent APIs. UI inspection and input
-require Accessibility permission for Coding Tools MCP; `app_screenshot` may
-also require Screen Recording permission. Unsupported platforms return a
-structured `UNSUPPORTED_PLATFORM` failure instead of emulating GUI control.
+The `app_*` tools use macOS Accessibility/CGEvent APIs. Desktop 0.3.18 routes
+these calls through a bundled native App Helper so Accessibility permission is
+associated with a stable signed executable rather than the external Python
+runtime. UI inspection and input require Accessibility permission for that
+helper; `app_screenshot` may also require Screen Recording permission. Source/CLI
+launches without a configured helper retain the direct Python implementation as
+a compatibility fallback. Unsupported platforms return a structured
+`UNSUPPORTED_PLATFORM` failure instead of emulating GUI control.
 
 ## Local Chrome connection
 
-The browser tools use Python Playwright only and attach to an already-running
+The browser tools require Python Playwright 1.60+ and attach to an already-running
 Chromium CDP endpoint. The default is `http://127.0.0.1:9222`; set
 `CODING_TOOLS_MCP_BROWSER_CDP_URL` or pass `endpoint` to override it. Remote
 hosts are rejected: the endpoint must be loopback (`127.0.0.1`, `localhost`, or
@@ -125,10 +132,11 @@ Every successful tool call has:
 ```
 
 `content` is not a JSON mirror. `structuredContent` is the complete machine
-interface and retains existing fields where possible. Model-facing text is
-bounded at 16 KiB; if it is shortened, the full structured value is still
-present. Errors use the same envelope with readable recovery guidance and
-`isError: true`.
+interface and retains existing fields where possible. Normal model-facing text
+is governed by each tool's own result limits, with a final 2,162,688-byte
+defense-in-depth ceiling for pathological count-bounded entries. If that safety
+ceiling is reached, the full structured value is still present. Errors use the
+same envelope with readable recovery guidance and `isError: true`.
 
 `view_image` is the exception to text-only content: its base64 appears exactly
 once in one `image` block. `structuredContent` contains path, media type, byte

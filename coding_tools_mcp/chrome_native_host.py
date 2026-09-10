@@ -6,6 +6,7 @@ import socket
 import struct
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -45,6 +46,8 @@ def _read_native_message(stream: BinaryIO) -> dict[str, Any] | None:
 
 def _write_native_message(stream: BinaryIO, payload: dict[str, Any], lock: threading.Lock) -> None:
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if len(body) > 1024 * 1024:
+        raise ValueError("Message to Chrome exceeds 1 MiB")
     packet = struct.pack("<I", len(body)) + body
     with lock:
         stream.write(packet)
@@ -53,7 +56,7 @@ def _write_native_message(stream: BinaryIO, payload: dict[str, Any], lock: threa
 
 class NativeBridge:
     def __init__(self) -> None:
-        self._pending: dict[str, socket.socket] = {}
+        self._pending: dict[str, tuple[socket.socket, float]] = {}
         self._pending_lock = threading.Lock()
         self._stdout_lock = threading.Lock()
         self._server: socket.socket | None = None
@@ -63,9 +66,12 @@ class NativeBridge:
         _write_native_message(sys.stdout.buffer, payload, self._stdout_lock)
 
     def _handle_client(self, conn: socket.socket) -> None:
+        request_id = ""
+        transferred = False
         try:
-            file = conn.makefile("r", encoding="utf-8", newline="\n")
-            line = file.readline(4 * 1024 * 1024)
+            conn.settimeout(5)
+            with conn.makefile("r", encoding="utf-8", newline="\n") as file:
+                line = file.readline(1024 * 1024)
             if not line:
                 return
             request = json.loads(line)
@@ -74,8 +80,12 @@ class NativeBridge:
                 conn.sendall(b'{"ok":false,"error":"missing request id"}\n')
                 return
             with self._pending_lock:
-                self._pending[request_id] = conn
+                if len(self._pending) >= 128:
+                    raise ValueError("Chrome bridge is busy")
+                timeout_ms = max(1, min(120000, int(request.get("params", {}).get("timeoutMs", 5000))))
+                self._pending[request_id] = (conn, time.monotonic() + timeout_ms / 1000)
             self._send_to_extension(request)
+            transferred = True
         except Exception as exc:  # noqa: BLE001
             try:
                 conn.sendall(
@@ -83,6 +93,19 @@ class NativeBridge:
                 )
             except OSError:
                 pass
+        finally:
+            if not transferred:
+                with self._pending_lock:
+                    self._pending.pop(request_id, None)
+                conn.close()
+
+    def _expire_pending(self) -> None:
+        now = time.monotonic()
+        with self._pending_lock:
+            expired = [key for key, (_, deadline) in self._pending.items() if deadline <= now]
+            connections = [self._pending.pop(key)[0] for key in expired]
+        for conn in connections:
+            conn.close()
 
     def _serve_clients(self) -> None:
         path = socket_path()
@@ -98,6 +121,7 @@ class NativeBridge:
         server.listen(16)
         server.settimeout(0.5)
         while not self._stopped.is_set():
+            self._expire_pending()
             try:
                 conn, _ = server.accept()
             except TimeoutError:
@@ -112,11 +136,15 @@ class NativeBridge:
         if not request_id:
             return
         with self._pending_lock:
-            conn = self._pending.pop(request_id, None)
-        if conn is None:
+            pending = self._pending.pop(request_id, None)
+        if pending is None:
             return
+        conn, _ = pending
         try:
             conn.sendall((json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
+        except OSError:
+            # A timed-out MCP caller must not terminate every Chrome session.
+            pass
         finally:
             try:
                 conn.close()
@@ -136,6 +164,11 @@ class NativeBridge:
             return 0
         finally:
             self._stopped.set()
+            with self._pending_lock:
+                pending = list(self._pending.values())
+                self._pending.clear()
+            for conn, _ in pending:
+                conn.close()
             if self._server is not None:
                 try:
                     self._server.close()

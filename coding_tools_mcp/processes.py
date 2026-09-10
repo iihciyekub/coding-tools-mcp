@@ -19,6 +19,27 @@ COMMAND_BUFFER_BYTES = 524_288
 # agent runtimes.
 COMMAND_HEAD_BUFFER_DIVISOR = 8
 HARD_KILL_SIGNAL = getattr(signal, "SIGKILL", signal.SIGTERM)
+_POPEN_TYPE = subprocess.Popen
+
+
+def process_group_alive(process: subprocess.Popen[bytes]) -> bool:
+    """Return whether the managed POSIX process group still has members."""
+
+    # Compliance tests and embedders may supply Popen-like stand-ins. Never
+    # interpret an arbitrary fake pid as a process group that this runtime owns.
+    if not isinstance(process, _POPEN_TYPE):
+        return False
+    if not hasattr(os, "killpg"):
+        return process.poll() is None
+    try:
+        os.killpg(process.pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return process.poll() is None
+    return True
 
 
 def terminate_process_group(
@@ -52,13 +73,18 @@ def terminate_process_group(
         return
     except Exception:
         process.terminate()
-    try:
-        process.wait(timeout=1)
-    except subprocess.TimeoutExpired:
+    deadline = time.monotonic() + 1.0
+    while process_group_alive(process) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    if process_group_alive(process) and signum != HARD_KILL_SIGNAL:
         try:
             os.killpg(process.pid, HARD_KILL_SIGNAL)
         except Exception:
             process.kill()
+    try:
+        process.wait(timeout=0.2)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def spawn_process(
@@ -124,6 +150,7 @@ def spawn_process(
 class CommandRun:
     command_id: str
     process: subprocess.Popen[bytes]
+    operation_id: str | None = None
     timeout_at: float | None = None
     warnings: list[str] = field(default_factory=list)
     stdout: bytearray = field(default_factory=bytearray)
@@ -148,6 +175,7 @@ class CommandRun:
     signal_name: str | None = None
     timed_out: bool = False
     terminating: bool = False
+    owns_process_group: bool = False
     pty_master_fd: int | None = None
     on_evict: Any = None
     _stdin_closed: bool = False
@@ -243,16 +271,10 @@ class CommandRun:
             self.stderr_cursor = self.stderr_total_bytes
         stdout_truncation = truncate_output_bytes_tail(stdout_bytes, max_output_bytes)
         stderr_truncation = truncate_output_bytes_tail(stderr_bytes, max_output_bytes)
-        if self.timed_out:
-            status = "timeout"
-        elif self.terminating and self.process.poll() is None:
-            status = "running"
-        elif self.signal_name is not None:
-            status = "terminated"
-        else:
-            status = "running" if self.process.poll() is None else "exited"
+        status = self.status_name()
         payload: dict[str, Any] = {
             "command_id": self.command_id,
+            "operation_id": self.operation_id,
             "status": status,
             "exit_code": self.exit_code,
             "signal": self.signal_name,
@@ -292,6 +314,15 @@ class CommandRun:
             payload["warnings"] = warnings
         return payload
 
+    def status_name(self) -> str:
+        if self.timed_out:
+            return "timeout"
+        if self.terminating and self.process.poll() is None:
+            return "running"
+        if self.signal_name is not None:
+            return "terminated"
+        return "running" if self.process.poll() is None else "exited"
+
     def refresh_status(self) -> None:
         if self.timeout_at is not None and not self.timed_out and self.process.poll() is None and time.time() >= self.timeout_at:
             self.timed_out = True
@@ -300,6 +331,13 @@ class CommandRun:
         code = self.process.poll()
         if code is None:
             return
+        # A shell leader may exit successfully while background children keep
+        # running in the process group and keep pipes/resources alive. Managed
+        # commands do not have a detached-service contract, so descendants are
+        # reclaimed when the leader exits instead of escaping the runtime.
+        if self.owns_process_group and process_group_alive(self.process):
+            terminate_process_group(self.process, signal.SIGTERM)
+            self.warnings.append("background descendants were terminated after the command leader exited")
         self.drain_readers()
         self.exit_code = code
         self.terminating = False

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import urllib.parse
 from contextlib import contextmanager
@@ -57,7 +58,7 @@ def _browser_connection(args: dict[str, Any]) -> Iterator[Any]:
     playwright = sync_playwright().start()
     try:
         try:
-            browser = playwright.chromium.connect_over_cdp(endpoint, timeout=_timeout(args))
+            browser = playwright.chromium.connect_over_cdp(endpoint, timeout=_timeout(args), no_defaults=True)
         except Exception as exc:  # noqa: BLE001
             raise ToolFailure(
                 "BROWSER_ERROR",
@@ -80,6 +81,25 @@ def _pages(browser: Any) -> list[Any]:
     return [page for context in browser.contexts for page in context.pages if not page.is_closed()]
 
 
+def _target_id(page: Any) -> str | None:
+    try:
+        session = page.context.new_cdp_session(page)
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        response = session.send("Target.getTargetInfo")
+        target_info = response.get("targetInfo") if isinstance(response, dict) else None
+        target_id = target_info.get("targetId") if isinstance(target_info, dict) else None
+        return str(target_id) if target_id else None
+    except Exception:  # noqa: BLE001
+        return None
+    finally:
+        try:
+            session.detach()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _tab_payload(page: Any, index: int) -> dict[str, Any]:
     try:
         title = page.title()
@@ -89,13 +109,40 @@ def _tab_payload(page: Any, index: int) -> dict[str, Any]:
         visibility = page.evaluate("document.visibilityState")
     except Exception:  # noqa: BLE001
         visibility = "unknown"
-    return {"index": index, "title": title, "url": page.url, "visibility": visibility}
+    return {
+        "index": index,
+        "tab_id": _target_id(page),
+        "title": title,
+        "url": page.url,
+        "visibility": visibility,
+    }
 
 
-def _select_page(browser: Any, tab_index: int | None = None) -> tuple[Any, int]:
+def _select_page(
+    browser: Any,
+    tab_index: int | None = None,
+    tab_id: str | None = None,
+) -> tuple[Any, int]:
     pages = _pages(browser)
     if not pages:
         raise ToolFailure("NOT_FOUND", "Chrome has no inspectable pages.", category="not_found")
+    if tab_id:
+        for index, page in enumerate(pages):
+            if _target_id(page) != tab_id:
+                continue
+            if tab_index is not None and tab_index != index:
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    "tab_id and tab_index refer to different Chrome tabs.",
+                    category="validation",
+                )
+            return page, index
+        raise ToolFailure(
+            "NOT_FOUND",
+            f"Chrome tab_id {tab_id!r} is no longer inspectable.",
+            category="not_found",
+            retryable=True,
+        )
     if tab_index is not None:
         if tab_index < 0 or tab_index >= len(pages):
             raise ToolFailure(
@@ -144,7 +191,7 @@ def snapshot(args: dict[str, Any]) -> dict[str, Any]:
     max_chars = int(args.get("max_chars", 50000))
     max_elements = int(args.get("max_elements", 150))
     with _browser_connection(args) as browser:
-        page, index = _select_page(browser, args.get("tab_index"))
+        page, index = _select_page(browser, args.get("tab_index"), args.get("tab_id"))
         data = page.evaluate(
             """({maxElements}) => {
               const visible = (el) => {
@@ -153,14 +200,14 @@ def snapshot(args: dict[str, Any]) -> dict[str, Any]:
                 return s.visibility !== 'hidden' && s.display !== 'none' && r.width > 0 && r.height > 0;
               };
               const cssPath = (el) => {
-                if (el.id) return '#' + CSS.escape(el.id);
+                if (el.id && document.querySelectorAll('#' + CSS.escape(el.id)).length === 1) return '#' + CSS.escape(el.id);
                 const parts = [];
                 let node = el;
-                while (node && node.nodeType === 1 && node !== document.documentElement && parts.length < 6) {
+                while (node && node.nodeType === 1) {
                   let part = node.tagName.toLowerCase();
                   const name = node.getAttribute('name');
                   if (name) part += '[name="' + CSS.escape(name) + '"]';
-                  else if (node.parentElement) {
+                  if (node.parentElement) {
                     const siblings = Array.from(node.parentElement.children).filter(x => x.tagName === node.tagName);
                     if (siblings.length > 1) part += ':nth-of-type(' + (siblings.indexOf(node) + 1) + ')';
                   }
@@ -170,16 +217,27 @@ def snapshot(args: dict[str, Any]) -> dict[str, Any]:
                 return parts.join(' > ');
               };
               const nodes = Array.from(document.querySelectorAll(
-                'a,button,input,textarea,select,[role="button"],[role="link"],[contenteditable="true"]'
-              )).filter(visible).slice(0, maxElements);
+                'a,button,input,textarea,select,[role],[tabindex],[contenteditable="true"]'
+              )).filter(visible);
+              const label = (el) => {
+                const labelled = (el.getAttribute('aria-labelledby') || '').split(/\\s+/)
+                  .map(id => document.getElementById(id)?.textContent || '').join(' ').trim();
+                return el.getAttribute('aria-label') || labelled ||
+                  Array.from(el.labels || []).map(x => x.innerText).join(' ').trim() ||
+                  el.innerText || el.getAttribute('placeholder') || '';
+              };
               return {
                 text: document.body ? document.body.innerText : '',
-                elements: nodes.map((el, i) => ({
+                elements_truncated: nodes.length > maxElements,
+                element_count: nodes.length,
+                elements: nodes.slice(0, maxElements).map((el, i) => ({
                   index: i,
                   tag: el.tagName.toLowerCase(),
                   role: el.getAttribute('role'),
                   type: el.getAttribute('type'),
-                  text: (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('placeholder') || '').trim().slice(0, 300),
+                  text: (label(el) || (el.type === 'password' ? '' : el.value) || '').trim().slice(0, 300),
+                  disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true',
+                  checked: typeof el.checked === 'boolean' ? el.checked : el.getAttribute('aria-checked'),
                   selector: cssPath(el),
                 })),
               };
@@ -196,13 +254,15 @@ def snapshot(args: dict[str, Any]) -> dict[str, Any]:
             "text": text,
             "text_truncated": truncated,
             "elements": data.get("elements", []),
+            "elements_truncated": bool(data.get("elements_truncated")),
+            "element_count": data.get("element_count", len(data.get("elements", []))),
         }
 
 
 def screenshot(args: dict[str, Any]) -> dict[str, Any]:
     with _browser_connection(args) as browser:
-        page, index = _select_page(browser, args.get("tab_index"))
-        image = page.screenshot(type="png", full_page=bool(args.get("full_page", False)))
+        page, index = _select_page(browser, args.get("tab_index"), args.get("tab_id"))
+        image = page.screenshot(type="png", full_page=bool(args.get("full_page", False)), timeout=_timeout(args))
         return {
             "ok": True,
             "tab": _tab_payload(page, index),
@@ -214,17 +274,93 @@ def screenshot(args: dict[str, Any]) -> dict[str, Any]:
 
 def evaluate(args: dict[str, Any]) -> dict[str, Any]:
     with _browser_connection(args) as browser:
-        page, index = _select_page(browser, args.get("tab_index"))
+        page, index = _select_page(browser, args.get("tab_index"), args.get("tab_id"))
+        timeout_ms = _timeout(args)
+        timer_ms = max(1, timeout_ms - min(25, max(1, timeout_ms // 10)))
+        script = str(args["script"])
+        timeout_marker = "__CODING_TOOLS_MCP_BROWSER_TIMEOUT__"
+        expression = f"""
+            (async () => {{
+              const source = {json.dumps(script)};
+              const run = Promise.resolve().then(async () => {{
+                const value = (0, eval)(source);
+                return await (typeof value === 'function' ? value() : value);
+              }});
+              const deadline = new Promise((_, reject) => {{
+                setTimeout(() => reject(new Error({json.dumps(timeout_marker)})), {timer_ms});
+              }});
+              return await Promise.race([run, deadline]);
+            }})()
+        """
+        session = page.context.new_cdp_session(page)
         try:
-            result = page.evaluate(str(args["script"]))
+            response = session.send(
+                "Runtime.evaluate",
+                {
+                    "expression": expression,
+                    "awaitPromise": True,
+                    "returnByValue": True,
+                    "userGesture": True,
+                    # CDP's Runtime.evaluate timeout also terminates scripts
+                    # that block the page event loop, where setTimeout cannot
+                    # fire. This is the operation deadline, not only the CDP
+                    # connection timeout.
+                    "timeout": timeout_ms,
+                },
+            )
         except Exception as exc:  # noqa: BLE001
+            message = str(exc)
+            if "timed out" in message.lower() or "execution was terminated" in message.lower():
+                raise ToolFailure(
+                    "BROWSER_TIMEOUT",
+                    f"JavaScript evaluation exceeded {timeout_ms} ms.",
+                    category="runtime",
+                    retryable=True,
+                    details={"timeout_ms": timeout_ms},
+                ) from exc
             raise ToolFailure("BROWSER_ERROR", f"JavaScript evaluation failed: {exc}", category="runtime") from exc
+        finally:
+            try:
+                session.detach()
+            except Exception:  # noqa: BLE001
+                pass
+
+        exception = response.get("exceptionDetails")
+        if isinstance(exception, dict):
+            text = str(exception.get("text") or "JavaScript evaluation failed")
+            raw_exception = exception.get("exception")
+            description = (
+                str(raw_exception.get("description") or "")
+                if isinstance(raw_exception, dict)
+                else ""
+            )
+            if timeout_marker in description or timeout_marker in text:
+                raise ToolFailure(
+                    "BROWSER_TIMEOUT",
+                    f"JavaScript evaluation exceeded {timeout_ms} ms.",
+                    category="runtime",
+                    retryable=True,
+                    details={"timeout_ms": timeout_ms},
+                )
+            raise ToolFailure(
+                "BROWSER_ERROR",
+                f"JavaScript evaluation failed: {description or text}",
+                category="runtime",
+            )
+        remote = response.get("result")
+        remote_result: dict[str, Any] = remote if isinstance(remote, dict) else {}
+        if "value" in remote_result:
+            result = remote_result["value"]
+        elif remote_result.get("type") == "undefined":
+            result = None
+        else:
+            result = remote_result.get("unserializableValue") or remote_result.get("description")
         return {"ok": True, "tab": _tab_payload(page, index), "result": result}
 
 
 def click(args: dict[str, Any]) -> dict[str, Any]:
     with _browser_connection(args) as browser:
-        page, index = _select_page(browser, args.get("tab_index"))
+        page, index = _select_page(browser, args.get("tab_index"), args.get("tab_id"))
         selector = str(args["selector"])
         try:
             page.locator(selector).first.click(timeout=_timeout(args))
@@ -235,7 +371,7 @@ def click(args: dict[str, Any]) -> dict[str, Any]:
 
 def type_text(args: dict[str, Any]) -> dict[str, Any]:
     with _browser_connection(args) as browser:
-        page, index = _select_page(browser, args.get("tab_index"))
+        page, index = _select_page(browser, args.get("tab_index"), args.get("tab_id"))
         selector = str(args["selector"])
         text = str(args["text"])
         locator = page.locator(selector).first
@@ -256,7 +392,7 @@ def console(args: dict[str, Any]) -> dict[str, Any]:
     entries: list[dict[str, Any]] = []
 
     with _browser_connection(args) as browser:
-        page, index = _select_page(browser, args.get("tab_index"))
+        page, index = _select_page(browser, args.get("tab_index"), args.get("tab_id"))
 
         def on_console(message: Any) -> None:
             if len(entries) >= max_entries:
@@ -318,7 +454,7 @@ def network(args: dict[str, Any]) -> dict[str, Any]:
     events: list[dict[str, Any]] = []
 
     with _browser_connection(args) as browser:
-        page, index = _select_page(browser, args.get("tab_index"))
+        page, index = _select_page(browser, args.get("tab_index"), args.get("tab_id"))
 
         def on_response(response: Any) -> None:
             if len(events) >= max_entries:
@@ -395,8 +531,8 @@ def inspect(args: dict[str, Any]) -> dict[str, Any]:
     selector = str(args["selector"])
     max_html_chars = int(args.get("max_html_chars", 20000))
     with _browser_connection(args) as browser:
-        page, index = _select_page(browser, args.get("tab_index"))
-        locator = page.locator(selector).first
+        page, index = _select_page(browser, args.get("tab_index"), args.get("tab_id"))
+        locator = page.locator(selector)
         try:
             count = locator.count()
             if count == 0:
@@ -405,7 +541,7 @@ def inspect(args: dict[str, Any]) -> dict[str, Any]:
                     f"No element matched selector {selector!r}.",
                     category="not_found",
                 )
-            data = locator.evaluate(
+            data = locator.first.evaluate(
                 """(el) => {
                   const style = getComputedStyle(el);
                   const rect = el.getBoundingClientRect();

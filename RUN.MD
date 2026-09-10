@@ -29,16 +29,16 @@ codesign --verify --deep --strict --verbose=2 \
   "src-tauri/target/release/bundle/macos/Coding Tools MCP.app"
 ```
 
-再生成 DMG：
+再生成带标准拖拽安装界面的 DMG：
 
 ```bash
-hdiutil create \
-  -volname "Coding Tools MCP" \
-  -srcfolder "src-tauri/target/release/bundle/macos/Coding Tools MCP.app" \
-  -ov \
-  -format UDZO \
-  "Coding Tools MCP_0.3.9_aarch64.dmg"
+cd apps/desktop-client
+bash ./create-dmg.sh \
+  "src-tauri/target/release/bundle/macos/Coding Tools MCP.app" \
+  "src-tauri/target/release/bundle/dmg/Coding Tools MCP_0.3.18_aarch64.dmg"
 ```
+
+该脚本会生成标准 macOS Finder 安装窗口：左侧为较大的 Coding Tools MCP 图标，右侧为 Applications 快捷方式，用户可直接拖拽安装。
 
 给 DMG 签名：
 

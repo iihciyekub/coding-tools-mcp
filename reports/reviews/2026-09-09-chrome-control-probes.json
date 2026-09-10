@@ -1,0 +1,134 @@
+{
+  "chrome_version": "152.0.7977.83",
+  "elements": [
+    {
+      "index": 0,
+      "tag": "button",
+      "role": null,
+      "type": null,
+      "text": "First",
+      "selector": "body > button[name=\"action\"]"
+    },
+    {
+      "index": 1,
+      "tag": "button",
+      "role": null,
+      "type": null,
+      "text": "Second",
+      "selector": "body > button[name=\"action\"]"
+    },
+    {
+      "index": 2,
+      "tag": "input",
+      "role": null,
+      "type": "password",
+      "text": "synthetic-review-secret",
+      "selector": "#pw"
+    },
+    {
+      "index": 3,
+      "tag": "input",
+      "role": null,
+      "type": null,
+      "text": "",
+      "selector": "#customer"
+    }
+  ],
+  "clicked_from_second_selector": "first",
+  "element_limit_flags": {
+    "text_truncated": false
+  },
+  "inspect_matched": {
+    "ok": true,
+    "tab": {
+      "index": 0,
+      "tab_id": "BD8DA64BFCD978D3F06958026A2A9E33",
+      "title": "",
+      "url": "about:blank",
+      "visibility": "visible"
+    },
+    "selector": "button",
+    "matched": 1,
+    "html_truncated": false,
+    "element": {
+      "tag": "button",
+      "text": "First",
+      "attributes": {
+        "name": "action",
+        "onclick": "window.clicked='first'"
+      },
+      "outer_html": "<button name=\"action\" onclick=\"window.clicked='first'\">First</button>",
+      "rect": {
+        "x": 8,
+        "y": 8,
+        "width": 41.921875,
+        "height": 21
+      },
+      "visible": true,
+      "computed_style": {
+        "display": "inline-block",
+        "position": "static",
+        "visibility": "visible",
+        "opacity": "1",
+        "z_index": "auto",
+        "width": "41.9219px",
+        "height": "21px",
+        "margin": "0px",
+        "padding": "1px 6px",
+        "color": "rgb(0, 0, 0)",
+        "background_color": "rgb(239, 239, 239)",
+        "font": "13.3333px Arial",
+        "transform": "none",
+        "transition": "all",
+        "animation": "none",
+        "overflow": "visible",
+        "pointer_events": "auto"
+      },
+      "parents": [
+        {
+          "tag": "body",
+          "id": null,
+          "class": null
+        },
+        {
+          "tag": "html",
+          "id": null,
+          "class": null
+        }
+      ],
+      "animations": []
+    }
+  },
+  "fresh_snapshot_ms": [
+    151.46,
+    153.23,
+    151.0,
+    156.38,
+    180.32,
+    153.61,
+    151.85
+  ],
+  "reused_snapshot_ms": [
+    8.97,
+    3.47,
+    3.1,
+    3.05,
+    3.0,
+    5.32,
+    4.63
+  ],
+  "review_date": "2026-09-09",
+  "playwright_version": "1.62.0",
+  "method": "Temporary isolated headless Chrome profile; synthetic about:blank document; 7 snapshots with current connection lifecycle and 7 with in-process connection reuse; no source changes.",
+  "bridge_late_response_exception": "BrokenPipeError",
+  "network_text_probe": {
+    "event_count": 0,
+    "resource_count": 1,
+    "rendered_text": "Browser action completed.\nNo events captured."
+  },
+  "unit_tests": {
+    "browser_deadline": 2,
+    "schema_drift": 8,
+    "passed": 10
+  }
+}

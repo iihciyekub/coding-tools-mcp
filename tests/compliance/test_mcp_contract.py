@@ -7,6 +7,7 @@ import http.client
 import os
 import select
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -331,8 +332,11 @@ class MCPContractTests(ComplianceTestCase):
         )
         with self.assertRaises(urllib.error.HTTPError) as cm:
             urllib.request.urlopen(request, timeout=5)
-        self.assertEqual(cm.exception.code, 400)
-        body = json.loads(cm.exception.read().decode("utf-8"))
+        try:
+            self.assertEqual(cm.exception.code, 400)
+            body = json.loads(cm.exception.read().decode("utf-8"))
+        finally:
+            cm.exception.close()
         self.assertIsNone(body.get("id"))
         self.assertEqual(body.get("error", {}).get("code"), -32600)
         self.assertIn("Unsupported MCP protocol version", body.get("error", {}).get("message", ""))
@@ -739,7 +743,10 @@ class MCPContractTests(ComplianceTestCase):
             request = urllib.request.Request(base + "/mcp", method=method)
             with self.assertRaises(urllib.error.HTTPError) as raised:
                 urllib.request.urlopen(request, timeout=5)
-            self.assertEqual(raised.exception.code, 405)
+            try:
+                self.assertEqual(raised.exception.code, 405)
+            finally:
+                raised.exception.close()
 
     def test_bearer_auth_rejects_missing_or_wrong_token_and_accepts_valid_token(self) -> None:
         port = free_port()
@@ -760,6 +767,8 @@ class MCPContractTests(ComplianceTestCase):
             deadline = time.time() + 10
             while True:
                 try:
+                    with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                        pass
                     with urllib.request.urlopen(well_known, timeout=1) as response:
                         metadata = json.loads(response.read().decode("utf-8"))
                     break
@@ -862,6 +871,44 @@ class MCPContractTests(ComplianceTestCase):
             self.assertEqual(bad.get("error"), "invalid_grant")
         finally:
             self.stop_process(process)
+
+    def test_oauth_dynamic_client_and_access_token_survive_server_restart(self) -> None:
+        port = free_port()
+        base_url = f"http://127.0.0.1:{port}"
+        env = self.oauth_server_env(
+            CODING_TOOLS_MCP_OAUTH_PASSWORD="test-password",
+        )
+        process = self.start_oauth_server(port, env)
+        access_token = ""
+        try:
+            self.wait_for_json(f"{base_url}/.well-known/oauth-authorization-server")
+            client_id = self.oauth_register_client(base_url, "Restart Persistence Test")
+            verifier = "r" * 43
+            code = self.oauth_authorization_code(base_url, client_id, "test-password", verifier)
+            token_status, token_response = self.oauth_token_request(
+                base_url, client_id, code, verifier
+            )
+            self.assertEqual(token_status, 200)
+            access_token = str(token_response.get("access_token") or "")
+            self.assertTrue(access_token)
+            first_status, first_response = self.raw_post_to_auth_server(
+                f"{base_url}/mcp", token=access_token
+            )
+            self.assertEqual(first_status, 200)
+            self.assertEqual(first_response.get("result"), {})
+        finally:
+            self.stop_process(process)
+
+        restarted = self.start_oauth_server(port, env)
+        try:
+            self.wait_for_json(f"{base_url}/.well-known/oauth-authorization-server")
+            second_status, second_response = self.raw_post_to_auth_server(
+                f"{base_url}/mcp", token=access_token
+            )
+            self.assertEqual(second_status, 200, second_response)
+            self.assertEqual(second_response.get("result"), {})
+        finally:
+            self.stop_process(restarted)
 
     def test_oauth_confidential_client_authentication_method_is_bound(self) -> None:
         port = free_port()
@@ -1483,7 +1530,7 @@ class MCPContractTests(ComplianceTestCase):
 
             tools = result.get("tools")
             self.assertIsInstance(tools, list)
-            self.assertEqual(len(tools), 49)
+            self.assertEqual(len(tools), 51)
             self.assertTrue({tool.get("name") for tool in tools} >= set(REQUIRED_TOOLS))
             for tool in tools:
                 # The cache hints describe the catalog, not the entries in it;
@@ -1864,18 +1911,25 @@ class MCPContractTests(ComplianceTestCase):
 
     def raw_post_to(self, url: str, payload: Any, *, protocol_version: str = "2025-06-18") -> dict[str, Any]:
         data = json.dumps(payload).encode("utf-8")
-        request = urllib.request.Request(
-            url,
-            data=data,
-            headers={
-                "Accept": "application/json, text/event-stream",
-                "Content-Type": "application/json",
-                "MCP-Protocol-Version": protocol_version,
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(request, timeout=5) as response:
+        parsed = urllib.parse.urlparse(url)
+        self.assertEqual(parsed.scheme, "http")
+        self.assertIsNotNone(parsed.hostname)
+        connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=5)
+        try:
+            connection.request(
+                "POST",
+                parsed.path or "/mcp",
+                body=data,
+                headers={
+                    "Accept": "application/json, text/event-stream",
+                    "Content-Type": "application/json",
+                    "MCP-Protocol-Version": protocol_version,
+                },
+            )
+            response = connection.getresponse()
             return json.loads(response.read().decode("utf-8"))
+        finally:
+            connection.close()
 
     def raw_http_post(
         self,
@@ -1989,12 +2043,16 @@ class MCPContractTests(ComplianceTestCase):
             "CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET",
             "CODING_TOOLS_MCP_OAUTH_TOKEN_TTL",
             "CODING_TOOLS_MCP_OAUTH_REDIRECT_URIS",
+            "CODING_TOOLS_MCP_OAUTH_REGISTRY_FILE",
             "CODING_TOOLS_MCP_SERVER_URL",
             "CODING_TOOLS_MCP_AUTH_TOKEN",
             "CODING_TOOLS_MCP_OAUTH_MODE",
             "CODING_TOOLS_MCP_TRUST_PROXY_HEADERS",
         ):
             env.pop(name, None)
+        env["CODING_TOOLS_MCP_OAUTH_REGISTRY_FILE"] = str(
+            self.workspace.root / f".test-oauth-registry-{id(self)}.json"
+        )
         env.update(overrides)
         return env
 
@@ -2017,7 +2075,12 @@ class MCPContractTests(ComplianceTestCase):
         )
 
     def wait_for_json(self, url: str) -> dict[str, Any]:
+        parsed = urllib.parse.urlparse(url)
+
         def probe() -> dict[str, Any]:
+            if parsed.hostname and parsed.port:
+                with socket.create_connection((parsed.hostname, parsed.port), timeout=0.2):
+                    pass
             with urllib.request.urlopen(url, timeout=1) as response:
                 return json.loads(response.read().decode("utf-8"))
 

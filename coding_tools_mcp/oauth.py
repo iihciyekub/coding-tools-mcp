@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
+import os
 import re
 import secrets
+import tempfile
 import threading
 import time
 import urllib.parse
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import jwt
@@ -25,6 +29,7 @@ OAUTH_RESPONSE_TYPES_SUPPORTED = ("code",)
 MAX_REDIRECT_URIS = 10
 MAX_REGISTERED_CLIENTS = 1_024
 MAX_PENDING_CODES = 256
+OAUTH_REGISTRY_FORMAT_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -48,11 +53,117 @@ class OAuthClient:
 
 
 class OAuthClientRegistry:
-    """Thread-safe RFC 7591 client registry for one server process."""
+    """Thread-safe RFC 7591 client registry with optional durable storage."""
 
-    def __init__(self) -> None:
+    def __init__(self, storage_path: str | os.PathLike[str] | None = None) -> None:
         self._clients: dict[str, OAuthClient] = {}
         self._lock = threading.Lock()
+        self._storage_path = Path(storage_path).expanduser() if storage_path is not None else None
+        self._load_warning: str | None = None
+        self._load()
+
+    @property
+    def storage_path(self) -> Path | None:
+        return self._storage_path
+
+    @property
+    def load_warning(self) -> str | None:
+        return self._load_warning
+
+    def _load(self) -> None:
+        path = self._storage_path
+        if path is None or not path.exists():
+            return
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict) or payload.get("version") != OAUTH_REGISTRY_FORMAT_VERSION:
+                raise ValueError("unsupported registry format")
+            raw_clients = payload.get("clients")
+            if not isinstance(raw_clients, list):
+                raise ValueError("clients must be an array")
+            if len(raw_clients) > MAX_REGISTERED_CLIENTS:
+                raise ValueError("registry exceeds client limit")
+            loaded: dict[str, OAuthClient] = {}
+            for raw in raw_clients:
+                if not isinstance(raw, dict):
+                    raise ValueError("invalid client entry")
+                client_id = str(raw.get("client_id") or "")
+                if not client_id or len(client_id) > 512:
+                    raise ValueError("invalid client_id")
+                redirects = validate_redirect_uris(raw.get("redirect_uris"))
+                method = str(raw.get("token_endpoint_auth_method") or "")
+                if method not in {"none", "client_secret_post", "client_secret_basic"}:
+                    raise ValueError("invalid token_endpoint_auth_method")
+                digest_value = raw.get("secret_digest")
+                secret_digest = str(digest_value) if isinstance(digest_value, str) else None
+                if method != "none" and not re.fullmatch(r"[0-9a-f]{64}", secret_digest or ""):
+                    raise ValueError("invalid secret digest")
+                if method == "none":
+                    secret_digest = None
+                client_name = _optional_text(raw.get("client_name"), 200)
+                issued_at = int(raw.get("issued_at") or 0)
+                if issued_at <= 0:
+                    raise ValueError("invalid issued_at")
+                loaded[client_id] = OAuthClient(
+                    client_id=client_id,
+                    redirect_uris=redirects,
+                    token_endpoint_auth_method=method,
+                    client_name=client_name,
+                    secret_digest=secret_digest,
+                    issued_at=issued_at,
+                )
+            self._clients = loaded
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            # Keep the server available, but never silently accept malformed
+            # registration data. A new DCR can recover after the file is fixed.
+            self._clients = {}
+            self._load_warning = f"OAuth client registry could not be loaded from {path}: {exc}"
+
+    def _persist_locked(self) -> None:
+        path = self._storage_path
+        if path is None:
+            return
+        parent = path.parent
+        parent.mkdir(parents=True, exist_ok=True)
+        try:
+            parent.chmod(0o700)
+        except OSError:
+            pass
+        payload = {
+            "version": OAUTH_REGISTRY_FORMAT_VERSION,
+            "clients": [
+                {
+                    "client_id": client.client_id,
+                    "redirect_uris": list(client.redirect_uris),
+                    "token_endpoint_auth_method": client.token_endpoint_auth_method,
+                    "client_name": client.client_name,
+                    "secret_digest": client.secret_digest,
+                    "issued_at": client.issued_at,
+                }
+                for client in sorted(self._clients.values(), key=lambda item: item.client_id)
+            ],
+        }
+        fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(parent))
+        temp_path = Path(temp_name)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                fd = -1
+                json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, path)
+            try:
+                path.chmod(0o600)
+            except OSError:
+                pass
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
 
     def add_preregistered(
         self,
@@ -70,7 +181,16 @@ class OAuthClientRegistry:
             secret_digest=_secret_digest(client_secret) if client_secret is not None else None,
         )
         with self._lock:
+            previous = self._clients.get(client_id)
             self._clients[client_id] = client
+            try:
+                self._persist_locked()
+            except OSError as exc:
+                if previous is None:
+                    self._clients.pop(client_id, None)
+                else:
+                    self._clients[client_id] = previous
+                raise ValueError(f"could not persist OAuth client registry: {exc}") from exc
 
     def register(self, metadata: dict[str, Any]) -> dict[str, Any]:
         redirects = validate_redirect_uris(metadata.get("redirect_uris"))
@@ -108,6 +228,11 @@ class OAuthClientRegistry:
                 secret_digest=_secret_digest(client_secret) if client_secret is not None else None,
             )
             self._clients[client_id] = client
+            try:
+                self._persist_locked()
+            except OSError as exc:
+                self._clients.pop(client_id, None)
+                raise ValueError(f"could not persist OAuth client registry: {exc}") from exc
         response: dict[str, Any] = {
             "client_id": client.client_id,
             "client_id_issued_at": client.issued_at,

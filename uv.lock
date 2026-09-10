@@ -191,7 +191,7 @@ wheels = [
 
 [[package]]
 name = "coding-tools-mcp"
-version = "0.3.3"
+version = "0.3.7"
 source = { editable = "." }
 dependencies = [
     { name = "playwright" },
@@ -215,7 +215,7 @@ requires-dist = [
     { name = "mcp", marker = "extra == 'dev'", specifier = ">=2.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=2.1,<2.2" },
     { name = "pillow", marker = "extra == 'image'", specifier = ">=10.0" },
-    { name = "playwright", specifier = ">=1.55,<2" },
+    { name = "playwright", specifier = ">=1.60,<2" },
     { name = "pyjwt", specifier = ">=2.8" },
     { name = "pyyaml", marker = "extra == 'dev'", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15,<0.16" },

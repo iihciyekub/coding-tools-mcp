@@ -101,8 +101,12 @@ def http_rpc(
             body = response.read().decode("utf-8")
             return response.status, json.loads(body) if body else {}
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        return exc.code, json.loads(body) if body else {}
+        try:
+            body = exc.read().decode("utf-8", errors="replace")
+            status = exc.code
+        finally:
+            exc.close()
+        return status, json.loads(body) if body else {}
 
 
 def modern_field_paths(node: Any, path: str = "response") -> list[str]:

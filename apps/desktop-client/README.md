@@ -26,7 +26,7 @@ Requirements:
 
 - Node.js 24+
 - Rust 1.84+
-- `uv` for building the bundled Python runtime
+- `uv` for building the small Python source wheel and exporting locked dependencies
 - `cloudflared` for Cloudflare profiles
 
 ```bash
@@ -47,11 +47,79 @@ Build the native application bundle/installer:
 make desktop-build
 ```
 
-Release bundles include self-contained `coding-tools-mcp-runtime` and
-`coding-tools-mcp-chrome-host` executables under the app resources. At runtime
-the desktop client prefers that bundled MCP binary, then falls back to an
-explicit override, PATH installation, source checkout, or `uvx` only when the
-bundled resource is unavailable.
+Release bundles contain only this project's pure-Python wheel and a production
+requirements file exported from `uv.lock`, including dependency hashes. They do
+not contain Python, Playwright's Node driver, Chromium, or a frozen native host.
+Old generated PyInstaller resources are excluded by the explicit resource map.
+
+At startup, the client checks an explicit `CODING_TOOLS_MCP_DESKTOP_RUNTIME`
+override, a PATH `coding-tools-mcp` with the same core version, then a matching
+Python installation with the required imports. Otherwise it prepares an isolated
+environment in the app's local data directory under `runtimes/<version-digest>`.
+Each workspace uses the same prepared environment; system packages are not changed.
+
+On macOS, no prerequisite package manager is required. If neither a compatible
+Python nor `uv` is available, the app downloads the pinned `uv` release into its
+private application-data directory after verifying its SHA-256 digest. If a
+compatible Python 3.11+ with venv/pip already exists, the app can use it instead.
+Chrome itself must already be installed; no browser is downloaded.
+
+The first preparation may take several minutes and requires internet access for
+uncached dependencies. Dependency downloads use locked versions and hash checks.
+Preparation has a separate five-minute deadline and writes `setup.log` alongside
+the workspace logs. Failures can be retried; `.ready` is written only after a
+successful health check. An OS file lock prevents concurrent installers. Status
+queries remain responsive during preparation; **Cancel startup** stops the
+preparation process and prevents a delayed server launch. A
+prepared environment is reused without uv or network access; a removed base
+Python may require repair. The server's normal 20-second startup deadline begins
+after preparation. Old versioned environments are retained so existing Native
+Messaging registrations remain valid; they are not included in app updates.
+
+For Cloudflare Quick Tunnel profiles, a missing `cloudflared` is handled the same
+way on macOS: Desktop 0.3.18 downloads the pinned, SHA-256-verified release into
+the app-owned tools directory. The panel and native menu-bar **Resources** menu
+now separate the two concepts clearly: **Prepare runtime** installs/verifies the
+private Python + locked Python dependencies (including Playwright), **Repair
+runtime** rebuilds the current managed runtime when all workspaces are stopped,
+and **Repair uv & cloudflared** refreshes only those two managed command-line
+tools. Homebrew, `/usr/local`, and system Python are not modified. Other desktop
+platforms currently use an existing platform-installed Python/uv and cloudflared.
+
+Native Messaging uses the adjacent Python console entry point, or creates a small
+launcher pinned to the current interpreter/import root for module-only installs.
+After switching Python environments, run `chrome_extension_install` again to
+refresh Chrome's registration.
+
+Desktop 0.3.18 also exposes dependency readiness in both the panel and native
+menu-bar Resources menu: MCP Runtime/core version, Playwright/version, uv,
+cloudflared, App Helper, installed Chrome, Chrome CDP availability, Native
+Messaging manifest/bridge connection, Accessibility permission and Screen
+Recording permission. **Prepare Chrome bridge** installs the unpacked extension
+files and Native Messaging manifest using the prepared private runtime and opens
+`chrome://extensions`. Stable Chrome still requires the user to enable Developer
+mode and choose **Load unpacked** once; the app cannot bypass that browser policy.
+Dedicated Accessibility and Screen Recording entries open/request the matching
+macOS permission for the bundled App Helper.
+
+macOS application automation is routed through the bundled **Coding Tools MCP App
+Helper** when the runtime is launched by the desktop app. The helper is a small
+native executable signed with the release and keeps Accessibility/CGEvent
+permission attached to a stable code identity rather than a versioned Python
+environment. `app_accessibility(open_settings=true)` requests/opens Accessibility
+settings for the helper. Window screenshots can separately require Screen
+Recording permission.
+
+For a Developer ID release, set `CODING_TOOLS_MCP_SIGNING_IDENTITY` to the same
+Developer ID Application identity passed to Tauri. `build:runtime` signs the
+native App Helper with Hardened Runtime before Tauri seals it into the signed app
+bundle, keeping the helper's TCC identity stable across runtime updates.
+
+The explicit runtime override remains user-managed and bypasses version checks.
+A PATH installation of a different core version is skipped instead of silently
+running older code. Development uses the source wheel too: run `npm run
+build:runtime` after changing the Python core. Python CLI users can continue using
+the source checkout directly.
 
 On Apple Silicon, install native tools through `/opt/homebrew`; the runtime
 resolver deliberately prefers `/opt/homebrew/bin/cloudflared` over an older

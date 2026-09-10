@@ -241,11 +241,219 @@ def _render_kill(payload: dict[str, Any]) -> str:
     return f"Command {payload.get('command_id', '')}: {payload.get('status', 'completed')}{suffix}."
 
 
+def _render_command_status(payload: dict[str, Any]) -> str:
+    command_id = payload.get("command_id") or "pending"
+    operation_id = payload.get("operation_id")
+    parts = [f"Command {command_id}: {payload.get('status', 'unknown')}"]
+    if operation_id:
+        parts.append(f"operation_id={operation_id}")
+    if payload.get("exit_code") is not None:
+        parts.append(f"exit={payload['exit_code']}")
+    if payload.get("timed_out"):
+        parts.append("timed out")
+    stdout_bytes = payload.get("stdout_total_bytes")
+    stderr_bytes = payload.get("stderr_total_bytes")
+    if isinstance(stdout_bytes, int) or isinstance(stderr_bytes, int):
+        parts.append(f"stdout={int(stdout_bytes or 0)}B stderr={int(stderr_bytes or 0)}B")
+    text = " | ".join(parts)
+    if payload.get("deduplicated"):
+        text += "\nNo new process was started; this is the existing operation result."
+    next_call = _render_next_action(payload)
+    if next_call:
+        text += f"\nNext: {next_call}"
+    return text
+
+
+def _render_command_list(payload: dict[str, Any]) -> str:
+    commands = payload.get("commands")
+    if not isinstance(commands, list) or not commands:
+        return "No retained commands found."
+    lines: list[str] = []
+    for item in commands:
+        if not isinstance(item, dict):
+            continue
+        command_id = item.get("command_id") or "pending"
+        operation_id = item.get("operation_id")
+        suffix = f" operation_id={operation_id}" if operation_id else ""
+        exit_code = item.get("exit_code")
+        exit_text = f" exit={exit_code}" if exit_code is not None else ""
+        lines.append(f"{item.get('status', 'unknown')} {command_id}{suffix}{exit_text}")
+    if payload.get("truncated"):
+        lines.append("… command list truncated; raise max_results or filter by operation_id.")
+    return "\n".join(lines)
+
+
+def _render_code_results(payload: dict[str, Any]) -> str:
+    items: list[Any] = []
+    for key in ("symbols", "definitions", "references"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            items = value
+            break
+    if not items:
+        subject = payload.get("symbol")
+        text = f"No code results found{f' for {subject}' if subject else ''}."
+    else:
+        lines: list[str] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("qualified_name") or item.get("name")
+            location = f"{item.get('path', '')}:{item.get('line', '')}"
+            kind = item.get("kind")
+            label = f"{name} " if name else ""
+            if kind:
+                label += f"[{kind}] "
+            preview = str(item.get("preview") or "").strip()
+            lines.append(f"{label}{location}{f': {preview}' if preview else ''}")
+        text = "\n".join(lines) if lines else "No code results found."
+    if payload.get("truncated"):
+        reason = payload.get("truncated_by") or "configured limit"
+        text += f"\n… results incomplete: truncated by {reason}."
+        if reason == "max_files":
+            text += " Raise max_files or narrow path before concluding the symbol is absent."
+    return text
+
+
+def _tab_summary(tab: Any) -> str:
+    if not isinstance(tab, dict):
+        return ""
+    tab_id = tab.get("tab_id") or tab.get("target_id")
+    identity = f" id={tab_id}" if tab_id else ""
+    return (
+        f"tab[{tab.get('index', '?')}]{identity} "
+        f"{str(tab.get('title') or '').strip()} {str(tab.get('url') or '').strip()}"
+    ).strip()
+
+
+def _render_browser_status(payload: dict[str, Any]) -> str:
+    return (
+        f"Chrome connected: {bool(payload.get('connected'))}. "
+        f"Tabs: {payload.get('tabs', 0)}; contexts: {payload.get('contexts', 0)}; "
+        f"version: {payload.get('browser_version', 'unknown')}."
+    )
+
+
+def _render_browser_tabs(payload: dict[str, Any]) -> str:
+    tabs = payload.get("tabs")
+    if not isinstance(tabs, list) or not tabs:
+        return "No inspectable browser tabs found."
+    return "\n".join(_tab_summary(tab) for tab in tabs if isinstance(tab, dict))
+
+
+def _render_browser_tab(payload: dict[str, Any]) -> str:
+    return _tab_summary(payload.get("tab")) or "Browser action completed."
+
+
+def _render_browser_snapshot(payload: dict[str, Any]) -> str:
+    sections = [_render_browser_tab(payload)]
+    text = payload.get("text")
+    if isinstance(text, str) and text:
+        sections.append(text)
+    elements = payload.get("elements")
+    if isinstance(elements, list) and elements:
+        rendered: list[str] = []
+        for item in elements:
+            if not isinstance(item, dict):
+                continue
+            rendered.append(
+                f"[{item.get('index', '?')}] {item.get('tag') or item.get('role') or 'element'} "
+                f"{str(item.get('text') or '').strip()} selector={item.get('selector', '')}"
+            )
+        if rendered:
+            sections.append("Interactive elements:\n" + "\n".join(rendered))
+    if payload.get("text_truncated"):
+        sections.append("… page text truncated; raise max_chars if more context is required.")
+    if payload.get("elements_truncated"):
+        sections.append("… interactive elements truncated; raise max_elements for more controls.")
+    return "\n".join(section for section in sections if section)
+
+
+def _bounded_json(value: Any, limit: int = 8000) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    except (TypeError, ValueError):
+        text = repr(value)
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 20)] + "… [truncated]"
+
+
+def _render_browser_evaluate(payload: dict[str, Any]) -> str:
+    tab = _render_browser_tab(payload)
+    return f"{tab}\nJavaScript result: {_bounded_json(payload.get('result'))}"
+
+
+def _render_event_list(payload: dict[str, Any]) -> str:
+    if isinstance(payload.get("events"), list) and isinstance(payload.get("resources"), list):
+        prefix = _render_browser_tab(payload)
+        sections = [prefix] if prefix else []
+        for key in ("events", "resources"):
+            entries = payload[key]
+            sections.append(f"{key}: {len(entries)}")
+            sections.extend(_bounded_json(item, 1200) for item in entries[:200])
+            if len(entries) > 200:
+                sections.append(f"… {key} truncated.")
+        return "\n".join(sections)
+    items: list[Any] = []
+    chosen_key = ""
+    for key in ("entries", "messages", "requests", "events", "resources"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            items = value
+            chosen_key = key
+            break
+    prefix = _render_browser_tab(payload)
+    if not items:
+        return f"{prefix}\nNo {chosen_key or 'events'} captured." if prefix else "No events captured."
+    lines = [_bounded_json(item, 1200) for item in items[:200]]
+    if payload.get("truncated") or len(items) > 200:
+        lines.append("… event list truncated.")
+    return (prefix + "\n" if prefix else "") + "\n".join(lines)
+
+
+def _render_generic_items(payload: dict[str, Any]) -> str:
+    for key in ("apps", "applications", "windows", "extensions", "tabs", "elements", "items"):
+        items = payload.get(key)
+        if not isinstance(items, list):
+            continue
+        if not items:
+            return f"No {key} found."
+        lines: list[str] = []
+        for item in items[:200]:
+            if not isinstance(item, dict):
+                lines.append(str(item))
+                continue
+            identity = (
+                item.get("name")
+                or item.get("title")
+                or item.get("bundle_id")
+                or item.get("id")
+                or item.get("identifier")
+                or item.get("url")
+            )
+            details = []
+            for detail_key in ("pid", "bundle_id", "role", "id", "url", "enabled", "active"):
+                value = item.get(detail_key)
+                if value not in (None, "", identity):
+                    details.append(f"{detail_key}={value}")
+            lines.append(f"{identity or _bounded_json(item, 600)}{' | ' + ' '.join(details) if details else ''}")
+        if payload.get("truncated") or len(items) > 200:
+            lines.append("… results truncated.")
+        return "\n".join(lines)
+    for key in ("message", "result", "status", "path", "app", "extension_id"):
+        value = payload.get(key)
+        if value not in (None, ""):
+            return f"{key}: {_bounded_json(value)}"
+    return "Operation completed."
+
+
 def _render_git_status(payload: dict[str, Any]) -> str:
     if not payload.get("is_repo", True):
         return "Not a Git repository."
     branch = payload.get("branch") or "detached"
-    entries = payload.get("entries") if isinstance(payload.get("entries"), list) else []
+    raw_entries = payload.get("entries")
+    entries = raw_entries if isinstance(raw_entries, list) else []
     lines = [f"## {branch}"]
     for entry in entries:
         if not isinstance(entry, dict):
@@ -404,6 +612,8 @@ _RENDERERS = {
     "search_text": _render_search,
     "apply_patch": _render_patch,
     "exec_command": _render_exec,
+    "get_command": _render_command_status,
+    "list_commands": _render_command_list,
     "write_stdin": _render_exec,
     "kill_command": _render_kill,
     "read_output": _render_read_output,
@@ -414,4 +624,35 @@ _RENDERERS = {
     "git_blame": _render_git_blame,
     "request_permissions": lambda payload: f"Permission request: {payload.get('status', 'completed')}.",
     "view_image": _render_image,
+    "browser_status": _render_browser_status,
+    "browser_tabs": _render_browser_tabs,
+    "browser_active_tab": _render_browser_tab,
+    "browser_snapshot": _render_browser_snapshot,
+    "browser_screenshot": _render_browser_tab,
+    "browser_evaluate": _render_browser_evaluate,
+    "browser_click": _render_browser_tab,
+    "browser_type": _render_browser_tab,
+    "browser_console": _render_event_list,
+    "browser_network": _render_event_list,
+    "browser_inspect": _render_generic_items,
+    "code_symbols": _render_code_results,
+    "code_definition": _render_code_results,
+    "code_references": _render_code_results,
+    "chrome_extension_install": _render_generic_items,
+    "chrome_extension_status": _render_generic_items,
+    "chrome_extensions": _render_generic_items,
+    "chrome_extension_tabs": _render_generic_items,
+    "chrome_extension_execute": _render_generic_items,
+    "chrome_extension_send": _render_generic_items,
+    "app_accessibility": _render_generic_items,
+    "app_list": _render_generic_items,
+    "app_launch": _render_generic_items,
+    "app_activate": _render_generic_items,
+    "app_windows": _render_generic_items,
+    "app_snapshot": _render_generic_items,
+    "app_click": _render_generic_items,
+    "app_type": _render_generic_items,
+    "app_press": _render_generic_items,
+    "app_menu": _render_generic_items,
+    "app_screenshot": _render_generic_items,
 }

@@ -31,6 +31,8 @@ REQUIRED_TOOLS = (
     "search_text",
     "apply_patch",
     "exec_command",
+    "get_command",
+    "list_commands",
     "write_stdin",
     "kill_command",
     "read_output",
@@ -174,6 +176,13 @@ class MCPClient:
             if self.process.poll() is not None:
                 raise MCPTransportError(self._process_exit_message(cmd))
             try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                    pass
+            except OSError as exc:
+                last_error = exc
+                time.sleep(0.1)
+                continue
+            try:
                 self.initialize()
                 return self
             except Exception as exc:  # noqa: BLE001 - startup retry needs the last failure
@@ -297,11 +306,15 @@ class MCPClient:
                 content_type = response.headers.get("Content-Type", "")
                 text = body.decode("utf-8")
         except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
+            try:
+                body = exc.read().decode("utf-8", errors="replace")
+                status = exc.code
+            finally:
+                exc.close()
             try:
                 parsed = json.loads(body)
             except json.JSONDecodeError as parse_exc:
-                raise MCPTransportError(f"HTTP {exc.code} from MCP server: {body[:1000]!r}") from parse_exc
+                raise MCPTransportError(f"HTTP {status} from MCP server: {body[:1000]!r}") from parse_exc
             return parsed
         except OSError as exc:
             raise MCPTransportError(f"Could not POST to MCP server at {self.url}: {exc}") from exc

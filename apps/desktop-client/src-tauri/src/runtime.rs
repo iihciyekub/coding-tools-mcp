@@ -1,11 +1,16 @@
+mod environment;
+
 use crate::models::{LogBundle, RuntimeStatus, WorkspaceProfile, MCP_ENDPOINT_PATH};
+use crate::resource_installer;
 use regex::Regex;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -62,19 +67,174 @@ struct ManagedSession {
 
 pub struct RuntimeManager {
     sessions: HashMap<String, ManagedSession>,
+    preparing: HashMap<String, Arc<AtomicBool>>,
+    resource_dir: PathBuf,
+    data_dir: PathBuf,
+    runtime_ready_hint: bool,
+}
+
+#[derive(Clone, Serialize)]
+pub struct DependencyStatus {
+    pub uv: bool,
+    pub cloudflared: bool,
+    pub app_helper: bool,
+    pub runtime_ready: bool,
+    pub runtime_version: Option<String>,
+    pub playwright_ready: bool,
+    pub playwright_version: Option<String>,
+    pub chrome_installed: bool,
+    pub chrome_cdp_ready: bool,
+    pub chrome_manifest: bool,
+    pub chrome_bridge_connected: bool,
+    pub accessibility_trusted: Option<bool>,
+    pub screen_recording_trusted: Option<bool>,
+}
+
+fn app_helper_path(resource_dir: &Path) -> PathBuf {
+    resource_dir
+        .join("helpers")
+        .join("coding-tools-mcp-app-helper")
+}
+
+fn helper_request(
+    resource_dir: &Path,
+    action: &str,
+    open_settings: bool,
+) -> Option<serde_json::Value> {
+    let helper = app_helper_path(resource_dir);
+    if !helper.is_file() {
+        return None;
+    }
+    let mut child = Command::new(helper)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let request = serde_json::json!({
+        "action": action,
+        "args": { "open_settings": open_settings }
+    });
+    child
+        .stdin
+        .take()?
+        .write_all(request.to_string().as_bytes())
+        .ok()?;
+    let output = child.wait_with_output().ok()?;
+    serde_json::from_slice(&output.stdout).ok()
+}
+
+fn helper_permission_status(resource_dir: &Path) -> (Option<bool>, Option<bool>) {
+    let Some(value) = helper_request(resource_dir, "permissions", false) else {
+        return (None, None);
+    };
+    (
+        value.get("accessibility_trusted").and_then(|v| v.as_bool()),
+        value
+            .get("screen_recording_trusted")
+            .and_then(|v| v.as_bool()),
+    )
+}
+
+fn chrome_installed() -> bool {
+    if cfg!(target_os = "macos") {
+        [
+            "/Applications/Google Chrome.app",
+            "/Applications/Google Chrome Beta.app",
+            "/Applications/Google Chrome Canary.app",
+        ]
+        .iter()
+        .any(|path| Path::new(path).exists())
+            || std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .is_some_and(|home| home.join("Applications/Google Chrome.app").exists())
+    } else {
+        which::which("google-chrome")
+            .or_else(|_| which::which("chrome"))
+            .is_ok()
+    }
 }
 
 impl RuntimeManager {
     pub fn new() -> Self {
         Self {
             sessions: HashMap::new(),
+            preparing: HashMap::new(),
+            resource_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources"),
+            data_dir: PathBuf::new(),
+            runtime_ready_hint: false,
         }
     }
 
-    pub fn start(
+    pub fn configure_environment(&mut self, resources: PathBuf, data: PathBuf) {
+        self.resource_dir = resources;
+        self.data_dir = data;
+    }
+
+    pub fn dependency_status(&self) -> DependencyStatus {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let (managed_runtime_ready, runtime_version, playwright_version) =
+            environment::readiness(&self.resource_dir, &self.data_dir, &effective_path());
+        let runtime_ready =
+            managed_runtime_ready || self.runtime_ready_hint || !self.sessions.is_empty();
+        let app_helper = app_helper_path(&self.resource_dir).is_file();
+        let (accessibility_trusted, screen_recording_trusted) = if app_helper {
+            helper_permission_status(&self.resource_dir)
+        } else {
+            (None, None)
+        };
+        let chrome_manifest = if cfg!(target_os = "macos") {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|home| {
+                    home.join("Library")
+                        .join("Application Support")
+                        .join("Google")
+                        .join("Chrome")
+                        .join("NativeMessagingHosts")
+                        .join("com.codingtoolsmcp.chrome_bridge.json")
+                        .is_file()
+                })
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        let chrome_bridge_connected = if cfg!(target_os = "macos") {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .is_some_and(|home| {
+                    home.join("Library")
+                        .join("Application Support")
+                        .join("Coding Tools MCP")
+                        .join("chrome-native.sock")
+                        .exists()
+                })
+        } else {
+            false
+        };
+        DependencyStatus {
+            uv: resource_installer::is_managed_installed("uv", &self.data_dir)
+                || which::which_in("uv", Some(effective_path()), &cwd).is_ok(),
+            cloudflared: resolve_cloudflared(&self.data_dir).is_ok(),
+            app_helper,
+            runtime_ready,
+            runtime_version,
+            playwright_ready: runtime_ready,
+            playwright_version,
+            chrome_installed: chrome_installed(),
+            chrome_cdp_ready: port_is_listening(9222),
+            chrome_manifest,
+            chrome_bridge_connected,
+            accessibility_trusted,
+            screen_recording_trusted,
+        }
+    }
+
+    fn start(
         &mut self,
         profile: &WorkspaceProfile,
         log_dir: &Path,
+        resolved: (PathBuf, Vec<String>),
     ) -> Result<RuntimeStatus, String> {
         profile.validate()?;
         if self.sessions.contains_key(&profile.id) {
@@ -88,7 +248,7 @@ impl RuntimeManager {
             return Err(format!("Local port {} is already in use. Stop the existing process or choose another port.", profile.runtime.local_port));
         }
         fs::create_dir_all(log_dir).map_err(|error| error.to_string())?;
-        let mut runtime = spawn_runtime(profile, log_dir)?;
+        let mut runtime = spawn_runtime(profile, log_dir, resolved, &self.resource_dir)?;
         if let Err(error) = wait_for_port(profile.runtime.local_port, &mut runtime, START_TIMEOUT) {
             runtime.terminate();
             return Err(error);
@@ -97,13 +257,15 @@ impl RuntimeManager {
         let public_url = Arc::new(Mutex::new(profile.public_url()));
         let tunnel = match profile.tunnel.r#type.as_str() {
             "frp" => None,
-            "cloudflare" => match spawn_cloudflare(profile, log_dir, Arc::clone(&public_url)) {
-                Ok(child) => Some(child),
-                Err(error) => {
-                    runtime.terminate();
-                    return Err(error);
+            "cloudflare" => {
+                match spawn_cloudflare(profile, log_dir, Arc::clone(&public_url), &self.data_dir) {
+                    Ok(child) => Some(child),
+                    Err(error) => {
+                        runtime.terminate();
+                        return Err(error);
+                    }
                 }
-            },
+            }
             _ => {
                 runtime.terminate();
                 return Err(
@@ -123,6 +285,9 @@ impl RuntimeManager {
     }
 
     pub fn stop(&mut self, profile: &WorkspaceProfile) -> RuntimeStatus {
+        if let Some(cancelled) = self.preparing.remove(&profile.id) {
+            cancelled.store(true, Ordering::Relaxed);
+        }
         if let Some(mut session) = self.sessions.remove(&profile.id) {
             if let Some(tunnel) = session.tunnel.as_mut() {
                 tunnel.terminate();
@@ -133,6 +298,12 @@ impl RuntimeManager {
     }
 
     pub fn status(&mut self, profile: &WorkspaceProfile) -> RuntimeStatus {
+        if self.preparing.contains_key(&profile.id) {
+            let mut status = RuntimeStatus::stopped(profile.runtime.local_port);
+            status.state = "starting".into();
+            status.local_message = "Preparing runtime dependencies".into();
+            return status;
+        }
         let Some(session) = self.sessions.get_mut(&profile.id) else {
             return RuntimeStatus::stopped(profile.runtime.local_port);
         };
@@ -182,6 +353,9 @@ impl RuntimeManager {
     }
 
     pub fn stop_all(&mut self) {
+        for (_, cancelled) in self.preparing.drain() {
+            cancelled.store(true, Ordering::Relaxed);
+        }
         for (_, mut session) in self.sessions.drain() {
             if let Some(tunnel) = session.tunnel.as_mut() {
                 tunnel.terminate();
@@ -189,6 +363,171 @@ impl RuntimeManager {
             session.runtime.terminate();
         }
     }
+}
+
+pub fn start_workspace(
+    manager: &Arc<Mutex<RuntimeManager>>,
+    profile: &WorkspaceProfile,
+    log_dir: &Path,
+) -> Result<RuntimeStatus, String> {
+    profile.validate()?;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let (resources, data) = {
+        let mut state = manager
+            .lock()
+            .map_err(|_| "Runtime manager is unavailable")?;
+        let status = state.status(profile);
+        if status.state == "running" {
+            return Ok(status);
+        }
+        if state.preparing.contains_key(&profile.id) {
+            return Err("This workspace is already preparing its runtime.".into());
+        }
+        state
+            .preparing
+            .insert(profile.id.clone(), Arc::clone(&cancelled));
+        (state.resource_dir.clone(), state.data_dir.clone())
+    };
+    // Download/install without holding the UI/status mutex.
+    let resolved = environment::resolve(&resources, &data, log_dir, &effective_path(), &cancelled);
+    let tunnel_setup = if resolved.is_ok()
+        && profile.tunnel.r#type == "cloudflare"
+        && resolve_cloudflared(&data).is_err()
+    {
+        resource_installer::install("cloudflared", &data, &cancelled).map(|_| ())
+    } else {
+        Ok(())
+    };
+    let mut state = manager
+        .lock()
+        .map_err(|_| "Runtime manager is unavailable")?;
+    if cancelled.load(Ordering::Relaxed) {
+        return Err("Workspace startup was cancelled.".into());
+    }
+    state.preparing.remove(&profile.id);
+    let resolved = resolved?;
+    state.runtime_ready_hint = true;
+    tunnel_setup?;
+    if cfg!(target_os = "macos") {
+        if let Err(error) = install_chrome_bridge(&resolved, Path::new(&profile.path), false) {
+            let _ = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log_dir.join("setup.log"))
+                .and_then(|mut log| writeln!(log, "Chrome bridge setup warning: {error}"));
+        }
+    }
+    state.start(profile, log_dir, resolved)
+}
+
+fn install_chrome_bridge(
+    resolved: &(PathBuf, Vec<String>),
+    current_dir: &Path,
+    open_extensions_page: bool,
+) -> Result<String, String> {
+    let mut command = Command::new(&resolved.0);
+    command
+        .args(&resolved.1)
+        .arg("--install-chrome-bridge")
+        .current_dir(current_dir)
+        .env("PATH", effective_path())
+        .stdin(Stdio::null());
+    if !open_extensions_page {
+        command.arg("--chrome-bridge-no-open");
+    }
+    let output = command
+        .output()
+        .map_err(|error| format!("Could not prepare Chrome bridge: {error}"))?;
+    if !output.status.success() {
+        let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if message.is_empty() {
+            "Chrome bridge preparation failed.".into()
+        } else {
+            message
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+pub fn prepare_chrome_bridge(
+    manager: &Arc<Mutex<RuntimeManager>>,
+    profile: &WorkspaceProfile,
+    log_dir: &Path,
+) -> Result<String, String> {
+    let cancelled = AtomicBool::new(false);
+    let (resources, data) = {
+        let state = manager
+            .lock()
+            .map_err(|_| "Runtime manager is unavailable")?;
+        (state.resource_dir.clone(), state.data_dir.clone())
+    };
+    let resolved = environment::resolve(&resources, &data, log_dir, &effective_path(), &cancelled)?;
+    install_chrome_bridge(&resolved, Path::new(&profile.path), true)
+}
+
+pub fn prepare_runtime(
+    manager: &Arc<Mutex<RuntimeManager>>,
+    repair: bool,
+) -> Result<String, String> {
+    let cancelled = AtomicBool::new(false);
+    let (resources, data, active) = {
+        let state = manager
+            .lock()
+            .map_err(|_| "Runtime manager is unavailable")?;
+        (
+            state.resource_dir.clone(),
+            state.data_dir.clone(),
+            !state.sessions.is_empty() || !state.preparing.is_empty(),
+        )
+    };
+    if repair && active {
+        return Err("Stop all workspaces before repairing the managed runtime.".into());
+    }
+    if repair {
+        environment::reset_managed(&resources, &data)?;
+        manager
+            .lock()
+            .map_err(|_| "Runtime manager is unavailable")?
+            .runtime_ready_hint = false;
+    }
+    let log_dir = data.join("logs").join("runtime");
+    fs::create_dir_all(&log_dir).map_err(|e| e.to_string())?;
+    environment::resolve(&resources, &data, &log_dir, &effective_path(), &cancelled)?;
+    manager
+        .lock()
+        .map_err(|_| "Runtime manager is unavailable")?
+        .runtime_ready_hint = true;
+    let (_, version, playwright) = environment::readiness(&resources, &data, &effective_path());
+    Ok(format!(
+        "Runtime {} ready with Playwright {}.",
+        version.as_deref().unwrap_or("managed"),
+        playwright.as_deref().unwrap_or("installed")
+    ))
+}
+
+pub fn open_app_permission(
+    manager: &Arc<Mutex<RuntimeManager>>,
+    permission: &str,
+) -> Result<String, String> {
+    let resources = manager
+        .lock()
+        .map_err(|_| "Runtime manager is unavailable")?
+        .resource_dir
+        .clone();
+    let action = match permission {
+        "accessibility" => "accessibility",
+        "screen_recording" => "screen_recording",
+        _ => return Err("Unknown macOS permission target.".into()),
+    };
+    let response = helper_request(&resources, action, true)
+        .ok_or_else(|| "Coding Tools MCP App Helper is unavailable.".to_string())?;
+    if response.get("ok").and_then(|value| value.as_bool()) != Some(true) {
+        return Err("Could not open the requested macOS permission settings.".into());
+    }
+    Ok(format!(
+        "Opened {} permission settings.",
+        permission.replace('_', " ")
+    ))
 }
 
 pub fn read_logs(log_dir: &Path) -> Result<LogBundle, String> {
@@ -199,8 +538,13 @@ pub fn read_logs(log_dir: &Path) -> Result<LogBundle, String> {
     })
 }
 
-fn spawn_runtime(profile: &WorkspaceProfile, log_dir: &Path) -> Result<ManagedChild, String> {
-    let (program, prefix) = resolve_runtime()?;
+fn spawn_runtime(
+    profile: &WorkspaceProfile,
+    log_dir: &Path,
+    resolved: (PathBuf, Vec<String>),
+    resource_dir: &Path,
+) -> Result<ManagedChild, String> {
+    let (program, prefix) = resolved;
     let mut command = Command::new(program);
     command.args(prefix).args([
         "--workspace",
@@ -217,6 +561,12 @@ fn spawn_runtime(profile: &WorkspaceProfile, log_dir: &Path) -> Result<ManagedCh
     command
         .current_dir(&profile.path)
         .env("PATH", effective_path());
+    let app_helper = resource_dir
+        .join("helpers")
+        .join("coding-tools-mcp-app-helper");
+    if app_helper.is_file() {
+        command.env("CODING_TOOLS_MCP_APP_HELPER", app_helper);
+    }
     for name in [
         "CODING_TOOLS_MCP_AUTH_MODE",
         "CODING_TOOLS_MCP_AUTH_TOKEN",
@@ -262,8 +612,9 @@ fn spawn_cloudflare(
     profile: &WorkspaceProfile,
     log_dir: &Path,
     public_url: Arc<Mutex<String>>,
+    data_dir: &Path,
 ) -> Result<ManagedChild, String> {
-    let executable = resolve_cloudflared()?;
+    let executable = resolve_cloudflared(data_dir)?;
     let mut command = Command::new(executable);
     if profile.tunnel.cloudflare_mode == "named" {
         command.args([
@@ -394,76 +745,13 @@ fn wait_for_port(port: u16, child: &mut ManagedChild, timeout: Duration) -> Resu
     ))
 }
 
-fn resolve_runtime() -> Result<(PathBuf, Vec<String>), String> {
-    let path = effective_path();
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    if let Ok(explicit) = std::env::var("CODING_TOOLS_MCP_DESKTOP_RUNTIME") {
-        return Ok((PathBuf::from(explicit), vec![]));
-    }
-    if let Ok(executable) = std::env::current_exe() {
-        let suffix = if cfg!(windows) { ".exe" } else { "" };
-        let runtime_name = format!("coding-tools-mcp-runtime{suffix}");
-        let mut candidates = Vec::new();
-        if let Some(parent) = executable.parent() {
-            candidates.push(parent.join(&runtime_name));
-            candidates.push(parent.join(&runtime_name).join(&runtime_name));
-            candidates.push(parent.join("resources").join(&runtime_name));
-            candidates.push(
-                parent
-                    .join("resources")
-                    .join(&runtime_name)
-                    .join(&runtime_name),
-            );
-            if cfg!(target_os = "macos") {
-                if let Some(contents) = parent.parent() {
-                    candidates.push(contents.join("Resources").join(&runtime_name));
-                    candidates.push(
-                        contents
-                            .join("Resources")
-                            .join(&runtime_name)
-                            .join(&runtime_name),
-                    );
-                    candidates.push(
-                        contents
-                            .join("Resources")
-                            .join("resources")
-                            .join(&runtime_name),
-                    );
-                    candidates.push(
-                        contents
-                            .join("Resources")
-                            .join("resources")
-                            .join(&runtime_name)
-                            .join(&runtime_name),
-                    );
-                }
-            }
-        }
-        if let Some(program) = candidates.into_iter().find(|candidate| candidate.is_file()) {
-            return Ok((program, vec![]));
-        }
-    }
-    if let Ok(program) = which::which_in("coding-tools-mcp", Some(&path), &cwd) {
-        return Ok((program, vec![]));
-    }
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let python = if cfg!(windows) {
-        repo.join(".venv/Scripts/python.exe")
-    } else {
-        repo.join(".venv/bin/python")
-    };
-    if python.is_file() && repo.join("coding_tools_mcp").is_dir() {
-        return Ok((python, vec!["-m".into(), "coding_tools_mcp".into()]));
-    }
-    if let Ok(program) = which::which_in("uvx", Some(&path), &cwd) {
-        return Ok((program, vec!["coding-tools-mcp".into()]));
-    }
-    Err("Could not find the bundled Coding Tools MCP runtime, coding-tools-mcp, or uvx. Reinstall the desktop app or install uv.".into())
-}
-
-fn resolve_cloudflared() -> Result<PathBuf, String> {
+fn resolve_cloudflared(data_dir: &Path) -> Result<PathBuf, String> {
     if let Ok(explicit) = std::env::var("CODING_TOOLS_MCP_DESKTOP_CLOUDFLARED") {
         return Ok(PathBuf::from(explicit));
+    }
+    let managed = resource_installer::tools_bin(data_dir).join("cloudflared");
+    if managed.is_file() {
+        return Ok(managed);
     }
     let native_candidates = if cfg!(target_os = "macos") {
         vec![
@@ -479,9 +767,8 @@ fn resolve_cloudflared() -> Result<PathBuf, String> {
         }
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    which::which_in("cloudflared", Some(effective_path()), cwd).map_err(|_| {
-        "cloudflared was not found. Install Cloudflare Tunnel and restart the app.".into()
-    })
+    which::which_in("cloudflared", Some(effective_path()), cwd)
+        .map_err(|_| "cloudflared was not found.".into())
 }
 
 fn effective_path() -> String {
@@ -533,6 +820,23 @@ fn configure_process_group(command: &mut Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stopping_preparation_cancels_its_start_intent() {
+        let temporary = tempfile::tempdir().unwrap();
+        let profile =
+            WorkspaceProfile::new(temporary.path().to_string_lossy().into_owned(), 28766).unwrap();
+        let mut manager = RuntimeManager::new();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        manager
+            .preparing
+            .insert(profile.id.clone(), Arc::clone(&cancelled));
+        assert_eq!(manager.status(&profile).state, "starting");
+        assert!(manager.status(&profile).is_active());
+        manager.stop(&profile);
+        assert!(cancelled.load(Ordering::Relaxed));
+        assert_eq!(manager.status(&profile).state, "stopped");
+    }
 
     #[test]
     fn missing_logs_are_empty() {
