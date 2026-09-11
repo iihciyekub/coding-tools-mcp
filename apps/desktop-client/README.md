@@ -40,7 +40,9 @@ brew install --cask iihciyekub/tap/coding-tools-mcp
 
 Desktop releases use `desktop-v<version>` tags so they remain independent from
 the Python package's `v<version>` release series. The Homebrew Cask is maintained
-in `iihciyekub/homebrew-tap`.
+in `iihciyekub/homebrew-tap`. Maintainers changing release naming, signing,
+notarization, GitHub Release assets, or Homebrew publishing must follow the
+[desktop release maintenance contract](../../docs/desktop-release-maintenance.md).
 
 ## Development
 

@@ -31,6 +31,7 @@ The documentation keeps stable file paths for existing links, while this index p
 ## Engineering and evaluation
 
 - [CI and tests](ci-and-tests.md)
+- [Desktop release maintenance contract](desktop-release-maintenance.md)
 - [Competitive analysis](competitive-analysis.md)
 - [Dogfood](dogfood.md)
 - [SWE-bench](swe-bench.md)

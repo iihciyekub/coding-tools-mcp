@@ -22,3 +22,4 @@ This repository is a monorepo. Keep changes inside the narrowest owning subtree 
 3. Changes to `infra/cloudflare/sandbox-control/` and `.github/workflows/start-sandbox.yml` may form one interface contract. Update and validate them together.
 4. Prefer subtree-specific instructions when present.
 5. Run the narrowest relevant checks first, then broader checks when tooling is available.
+6. Changes to desktop release tags, DMG creation, signing/notarization, GitHub Release assets, or Homebrew publishing must follow `docs/desktop-release-maintenance.md`; treat that document as the authoritative desktop distribution contract.
