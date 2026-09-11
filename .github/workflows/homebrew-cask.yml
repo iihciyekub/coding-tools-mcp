@@ -1,0 +1,84 @@
+name: Update Homebrew Cask
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Desktop release tag, for example desktop-v0.3.20
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  update-cask:
+    if: startsWith(github.event.release.tag_name || inputs.tag, 'desktop-v')
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+    steps:
+      - name: Resolve desktop release
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#desktop-v}"
+          asset="Coding-Tools-MCP-${version}-arm64.dmg"
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${asset}"
+          curl --fail --location --retry 3 --output "/tmp/${asset}" "$url"
+          sha256="$(sha256sum "/tmp/${asset}" | awk '{print $1}')"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "sha256=${sha256}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure Homebrew tap deploy key
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$HOMEBREW_TAP_DEPLOY_KEY"
+          install -d -m 700 ~/.ssh
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+          eval "$(ssh-agent -s)"
+          printf '%s\n' "$HOMEBREW_TAP_DEPLOY_KEY" | tr -d '\r' | ssh-add -
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
+
+      - name: Update Cask
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          SHA256: ${{ steps.release.outputs.sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone git@github.com:iihciyekub/homebrew-tap.git tap
+          mkdir -p tap/Casks
+          cat > tap/Casks/coding-tools-mcp.rb <<EOF
+          cask "coding-tools-mcp" do
+            version "${VERSION}"
+            sha256 "${SHA256}"
+
+            url "https://github.com/iihciyekub/coding-tools-mcp/releases/download/desktop-v#{version}/Coding-Tools-MCP-#{version}-arm64.dmg",
+                verified: "github.com/iihciyekub/coding-tools-mcp/"
+            name "Coding Tools MCP"
+            desc "Manage Coding Tools MCP workspaces and local agent runtimes"
+            homepage "https://github.com/iihciyekub/coding-tools-mcp"
+
+            depends_on arch: :arm64
+            depends_on macos: :high_sierra
+
+            app "Coding Tools MCP.app"
+          end
+          EOF
+          cd tap
+          if git diff --quiet -- Casks/coding-tools-mcp.rb; then
+            echo "Cask is already current."
+            exit 0
+          fi
+          git config user.name "coding-tools-mcp-release"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/coding-tools-mcp.rb
+          git commit -m "Update Coding Tools MCP cask to ${VERSION}"
+          git push origin HEAD:main

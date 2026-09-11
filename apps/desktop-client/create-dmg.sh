@@ -1,8 +1,16 @@
 #!/bin/bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+VERSION="${CODING_TOOLS_MCP_DESKTOP_VERSION:-$(node -e 'const fs=require("fs"); const p=process.argv[1]; process.stdout.write(JSON.parse(fs.readFileSync(p,"utf8")).version)' "$SCRIPT_DIR/src-tauri/tauri.conf.json")}"
+case "$(uname -m)" in
+  arm64) BUNDLE_ARCH="aarch64" ;;
+  x86_64) BUNDLE_ARCH="x64" ;;
+  *) BUNDLE_ARCH="$(uname -m)" ;;
+esac
+
 APP_PATH="${1:-src-tauri/target/release/bundle/macos/Coding Tools MCP.app}"
-OUTPUT_PATH="${2:-src-tauri/target/release/bundle/dmg/Coding Tools MCP_0.3.20_aarch64.dmg}"
+OUTPUT_PATH="${2:-src-tauri/target/release/bundle/dmg/Coding Tools MCP_${VERSION}_${BUNDLE_ARCH}.dmg}"
 VOLNAME="Coding Tools MCP"
 
 if [[ ! -d "$APP_PATH" ]]; then

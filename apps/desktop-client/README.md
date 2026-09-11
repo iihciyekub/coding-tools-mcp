@@ -29,6 +29,19 @@ The first launch imports the previous PySide client's `profiles.json`. Legacy
 `secrets.json` values are moved into the system keychain and the plaintext file
 is removed after a successful migration.
 
+## Install with Homebrew
+
+Apple Silicon releases are published as signed and notarized DMGs in the
+`iihciyekub/coding-tools-mcp` fork. Install the current desktop release with:
+
+```bash
+brew install --cask iihciyekub/tap/coding-tools-mcp
+```
+
+Desktop releases use `desktop-v<version>` tags so they remain independent from
+the Python package's `v<version>` release series. The Homebrew Cask is maintained
+in `iihciyekub/homebrew-tap`.
+
 ## Development
 
 Requirements:
