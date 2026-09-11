@@ -2,6 +2,8 @@
 
 ## 0.3.8 - 2026-09-11
 
+- Desktop 0.3.20 simplifies the agent-facing permission UI to **Standard** (workspace-confined trusted mode) and **Full Access** (host mode), while preserving the four underlying runtime modes for compatibility. Pending approvals are shown only when user action is required, and routine workflow internals are removed from the tray menu.
+- Desktop 0.3.20 consolidates Resources into Runtime, Browser, and App Control health summaries with low-level dependency details under Diagnostics, adds persisted English/Simplified Chinese native-menu localization, and exposes runtime logs without expanding the app into a separate management window.
 - Desktop 0.3.19 aligns its native menu-bar Resources menu with the panel by adding the existing **Repair uv & cloudflared** action, while keeping the individual uv and cloudflared repair entries.
 - Removed a stale desktop IPC call to the nonexistent `set_panel_auto_hide_suspended` command from the Add Workspace flow, eliminating an unknown-command failure without adding an unused window-state subsystem.
 - Added the workflow/runtime upgrades completed since 0.3.7: durable checks/tasks/checkpoints/reviews/approvals, structured Git/worktrees, protocol Tasks for long-running checks, managed browser downloads and event watches, and Rust LSP support with Cargo-subproject root detection and honest rust-analyzer availability checks.

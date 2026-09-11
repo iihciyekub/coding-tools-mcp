@@ -35,7 +35,7 @@ codesign --verify --deep --strict --verbose=2 \
 cd apps/desktop-client
 bash ./create-dmg.sh \
   "src-tauri/target/release/bundle/macos/Coding Tools MCP.app" \
-  "src-tauri/target/release/bundle/dmg/Coding Tools MCP_0.3.19_aarch64.dmg"
+  "src-tauri/target/release/bundle/dmg/Coding Tools MCP_0.3.20_aarch64.dmg"
 ```
 
 该脚本会生成标准 macOS Finder 安装窗口：左侧为较大的 Coding Tools MCP 图标，右侧为 Applications 快捷方式，用户可直接拖拽安装。
@@ -45,14 +45,14 @@ bash ./create-dmg.sh \
 ```bash
 codesign --force --timestamp \
   --sign "Developer ID Application: Yongjian Li (2NLAH5MYH8)" \
-  "Coding Tools MCP_0.3.19_aarch64.dmg"
+  "Coding Tools MCP_0.3.20_aarch64.dmg"
 ```
 
 提交 Apple 公证：
 
 ```bash
 xcrun notarytool submit \
-  "Coding Tools MCP_0.3.19_aarch64.dmg" \
+  "Coding Tools MCP_0.3.20_aarch64.dmg" \
   --keychain-profile "WOSAide-Notary" \
   --wait
 ```
@@ -60,8 +60,8 @@ xcrun notarytool submit \
 公证通过后：
 
 ```bash
-xcrun stapler staple "Coding Tools MCP_0.3.19_aarch64.dmg"
-xcrun stapler validate "Coding Tools MCP_0.3.19_aarch64.dmg"
+xcrun stapler staple "Coding Tools MCP_0.3.20_aarch64.dmg"
+xcrun stapler validate "Coding Tools MCP_0.3.20_aarch64.dmg"
 ```
 
 最关键的修正就两个：

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 APP_PATH="${1:-src-tauri/target/release/bundle/macos/Coding Tools MCP.app}"
-OUTPUT_PATH="${2:-src-tauri/target/release/bundle/dmg/Coding Tools MCP_0.3.19_aarch64.dmg}"
+OUTPUT_PATH="${2:-src-tauri/target/release/bundle/dmg/Coding Tools MCP_0.3.20_aarch64.dmg}"
 VOLNAME="Coding Tools MCP"
 
 if [[ ! -d "$APP_PATH" ]]; then

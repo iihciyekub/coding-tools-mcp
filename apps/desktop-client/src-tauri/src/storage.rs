@@ -22,6 +22,8 @@ fn storage_directory_name() -> &'static str {
 
 #[derive(Default, Deserialize, Serialize)]
 struct ProfileDocument {
+    #[serde(default)]
+    language: String,
     profiles: Vec<WorkspaceProfile>,
 }
 
@@ -57,6 +59,7 @@ impl ProfileSecrets {
 
 pub struct ProfileStore {
     home: PathBuf,
+    language: String,
     profiles: Vec<WorkspaceProfile>,
 }
 
@@ -132,6 +135,7 @@ impl ProfileStore {
         }
         let store = Self {
             home,
+            language: normalize_language(&document.language).to_string(),
             profiles: document.profiles,
         };
         if normalized_legacy_auth {
@@ -152,6 +156,16 @@ impl ProfileStore {
     pub fn profiles(&self) -> Vec<WorkspaceProfile> {
         self.profiles.clone()
     }
+
+    pub fn language(&self) -> &str {
+        &self.language
+    }
+
+    pub fn set_language(&mut self, language: &str) -> Result<(), String> {
+        self.language = normalize_language(language).to_string();
+        self.persist()
+    }
+
     pub fn get(&self, id: &str) -> Option<WorkspaceProfile> {
         self.profiles
             .iter()
@@ -249,9 +263,18 @@ impl ProfileStore {
         atomic_json(
             &self.home.join("profiles.json"),
             &ProfileDocument {
+                language: self.language.clone(),
                 profiles: public_profiles,
             },
         )
+    }
+}
+
+fn normalize_language(language: &str) -> &'static str {
+    if language.eq_ignore_ascii_case("zh-CN") || language.to_ascii_lowercase().starts_with("zh") {
+        "zh-CN"
+    } else {
+        "en"
     }
 }
 
@@ -351,9 +374,31 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let store = ProfileStore {
             home: temporary.path().to_path_buf(),
+            language: "en".into(),
             profiles: vec![],
         };
         assert!(store.log_dir("../../outside").is_err());
+    }
+
+    #[test]
+    fn menu_language_defaults_to_english_and_persists_chinese() {
+        let document: ProfileDocument = serde_json::from_value(serde_json::json!({
+            "profiles": []
+        }))
+        .unwrap();
+        assert_eq!(normalize_language(&document.language), "en");
+
+        let temporary = tempfile::tempdir().unwrap();
+        let mut store = ProfileStore {
+            home: temporary.path().to_path_buf(),
+            language: "en".into(),
+            profiles: vec![],
+        };
+        store.set_language("zh-CN").unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(temporary.path().join("profiles.json")).unwrap())
+                .unwrap();
+        assert_eq!(saved["language"], "zh-CN");
     }
 
     #[test]

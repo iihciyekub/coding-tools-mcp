@@ -10,14 +10,20 @@ API.
 - Compact menu-bar panel with no macOS Dock icon
 - Multiple workspace profiles with one automatically assigned local port per workspace
 - One-click OAuth runtime startup through Cloudflare Quick Tunnels
-- Per-workspace Safe, Trusted, Dangerous, and Host permission-mode menus
+- A simplified per-workspace access menu: **Standard** maps to the workspace-confined
+  trusted runtime, while **Full Access** maps to host mode for agent workflows that
+  intentionally need the wider Mac environment. Legacy safe/dangerous profiles remain
+  readable until the user explicitly chooses one of the two desktop modes.
 - Live runtime/tunnel status with copyable Server URL and OAuth authorization passcode
 - Secrets stored in the operating-system keychain
-- English and Simplified Chinese UI
+- English and Simplified Chinese UI, including the native menu-bar menu with a persisted language selector
 - Native process-group cleanup when the app exits
 - Project context, checks/evidence, tasks, checkpoints, LSP, structured Git,
   reviews, approvals, managed-worktree registration, and extended browser
   actions are enabled for desktop-launched runtimes
+- Native workspace menus surface pending approval decisions only when user action is
+  required; routine task/check/checkpoint/review activity stays out of the tray menu.
+  Runtime logs remain directly accessible without requiring a separate webview window.
 
 The first launch imports the previous PySide client's `profiles.json`. Legacy
 `secrets.json` values are moved into the system keychain and the plaintext file
@@ -80,30 +86,29 @@ after preparation. Old versioned environments are retained so existing Native
 Messaging registrations remain valid; they are not included in app updates.
 
 For Cloudflare Quick Tunnel profiles, a missing `cloudflared` is handled the same
-way on macOS: Desktop 0.3.19 downloads the pinned, SHA-256-verified release into
-the app-owned tools directory. The panel and native menu-bar **Resources** menu
-now separate the two concepts clearly: **Prepare runtime** installs/verifies the
-private Python + locked Python dependencies (including Playwright), **Repair
-runtime** rebuilds the current managed runtime when all workspaces are stopped,
-and **Repair uv & cloudflared** refreshes only those two managed command-line
-tools. Homebrew, `/usr/local`, and system Python are not modified. Other desktop
-platforms currently use an existing platform-installed Python/uv and cloudflared.
+way on macOS: Desktop 0.3.20 downloads the pinned, SHA-256-verified release into
+the app-owned tools directory. The native menu-bar **Resources** menu presents three
+user-facing health summaries—Runtime, Browser, and App Control—plus the normal repair,
+Chrome integration, and macOS permission actions. Low-level Playwright, uv,
+cloudflared, App Helper, CDP, and bridge details remain available under
+**Diagnostics** rather than crowding the main menu. Homebrew, `/usr/local`, and system
+Python are not modified. Other desktop platforms currently use an existing
+platform-installed Python/uv and cloudflared.
 
 Native Messaging uses the adjacent Python console entry point, or creates a small
 launcher pinned to the current interpreter/import root for module-only installs.
 After switching Python environments, run `chrome_extension_install` again to
 refresh Chrome's registration.
 
-Desktop 0.3.19 also exposes dependency readiness in both the panel and native
-menu-bar Resources menu: MCP Runtime/core version, Playwright/version, uv,
-cloudflared, App Helper, installed Chrome, Chrome CDP availability, Native
-Messaging manifest/bridge connection, Accessibility permission and Screen
-Recording permission. **Prepare Chrome bridge** installs the unpacked extension
-files and Native Messaging manifest using the prepared private runtime and opens
-`chrome://extensions`. Stable Chrome still requires the user to enable Developer
-mode and choose **Load unpacked** once; the app cannot bypass that browser policy.
-Dedicated Accessibility and Screen Recording entries open/request the matching
-macOS permission for the bundled App Helper.
+Desktop 0.3.20 keeps detailed dependency readiness under **Resources → Diagnostics**:
+MCP Runtime/core version, Playwright/version, uv, cloudflared, App Helper, installed
+Chrome, Chrome CDP availability, Native Messaging manifest/bridge connection,
+Accessibility permission and Screen Recording permission. **Prepare Chrome
+integration** installs the unpacked extension files and Native Messaging manifest
+using the prepared private runtime and opens `chrome://extensions`. Stable Chrome
+still requires the user to enable Developer mode and choose **Load unpacked** once;
+the app cannot bypass that browser policy. The compact **macOS Permissions** submenu
+opens/requests Accessibility and Screen Recording access for the bundled App Helper.
 
 macOS application automation is routed through the bundled **Coding Tools MCP App
 Helper** when the runtime is launched by the desktop app. The helper is a small

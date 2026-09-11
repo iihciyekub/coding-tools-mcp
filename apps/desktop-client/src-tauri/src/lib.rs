@@ -41,6 +41,7 @@ struct DesktopState {
 
 #[derive(Serialize)]
 struct DesktopSnapshot {
+    language: String,
     profiles: Vec<WorkspaceProfile>,
     statuses: HashMap<String, RuntimeStatus>,
     dependencies: DependencyStatus,
@@ -49,11 +50,13 @@ struct DesktopSnapshot {
 
 #[tauri::command]
 fn desktop_snapshot(state: tauri::State<'_, DesktopState>) -> Result<DesktopSnapshot, String> {
-    let profiles = state
-        .store
-        .lock()
-        .map_err(|_| "Profile store is unavailable.")?
-        .profiles();
+    let (profiles, language) = {
+        let store = state
+            .store
+            .lock()
+            .map_err(|_| "Profile store is unavailable.")?;
+        (store.profiles(), store.language().to_string())
+    };
     let mut runtime = state
         .runtime
         .lock()
@@ -74,6 +77,7 @@ fn desktop_snapshot(state: tauri::State<'_, DesktopState>) -> Result<DesktopSnap
         })
         .collect();
     Ok(DesktopSnapshot {
+        language,
         profiles,
         statuses,
         dependencies,
@@ -360,6 +364,33 @@ fn launch_external_url(url: &str) -> Result<(), String> {
         .map_err(|error| format!("Could not open the link: {error}"))
 }
 
+#[cfg(target_os = "macos")]
+fn open_path(path: &Path) -> Result<(), String> {
+    Command::new("open")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Could not open the folder: {error}"))
+}
+
+#[cfg(target_os = "windows")]
+fn open_path(path: &Path) -> Result<(), String> {
+    Command::new("explorer.exe")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Could not open the folder: {error}"))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_path(path: &Path) -> Result<(), String> {
+    Command::new("xdg-open")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Could not open the folder: {error}"))
+}
+
 fn draw_stroke(rgba: &mut [u8], size: u32, from: (f32, f32), to: (f32, f32), thickness: f32) {
     let radius = thickness / 2.0;
     let min_x = (from.0.min(to.0) - radius).floor().max(0.0) as u32;
@@ -505,25 +536,53 @@ fn menu_error(error: impl ToString) -> String {
     error.to_string()
 }
 
-fn status_text(status: &RuntimeStatus) -> &'static str {
-    if status.state == "starting" {
-        "Preparing runtime"
-    } else if status.pid.is_none() {
-        "Stopped"
-    } else if status.state == "running" {
-        "Running"
+fn menu_text<'a>(language: &str, english: &'a str, chinese: &'a str) -> &'a str {
+    if language == "zh-CN" {
+        chinese
     } else {
-        "Starting / connection issue"
+        english
     }
 }
 
-fn permission_mode_label(mode: &str) -> &'static str {
+fn status_text(status: &RuntimeStatus, language: &str) -> &'static str {
+    if status.state == "starting" {
+        menu_text(language, "Preparing runtime", "正在准备运行时")
+    } else if status.pid.is_none() {
+        menu_text(language, "Stopped", "已停止")
+    } else if status.state == "running" {
+        menu_text(language, "Running", "运行中")
+    } else {
+        menu_text(language, "Starting / connection issue", "启动中 / 连接异常")
+    }
+}
+
+fn permission_mode_label(mode: &str, language: &str) -> &'static str {
     match mode {
-        "safe" => "Safe",
-        "trusted" => "Trusted",
-        "dangerous" => "Dangerous",
-        "host" => "Host · full access",
-        _ => "Unknown",
+        "safe" => menu_text(language, "Safe", "安全"),
+        "trusted" => menu_text(language, "Trusted", "受信任"),
+        "dangerous" => menu_text(language, "Dangerous", "危险"),
+        "host" => menu_text(language, "Host · full access", "主机 · 完全访问"),
+        _ => menu_text(language, "Unknown", "未知"),
+    }
+}
+
+fn desktop_access_label(mode: &str, language: &str) -> String {
+    match mode {
+        "trusted" => menu_text(language, "Standard", "标准").to_string(),
+        "host" => menu_text(language, "Full Access", "完全访问").to_string(),
+        legacy => format!(
+            "{} · {}",
+            menu_text(language, "Legacy", "旧模式"),
+            permission_mode_label(legacy, language)
+        ),
+    }
+}
+
+fn readiness_label(ready: bool, language: &str) -> &'static str {
+    if ready {
+        menu_text(language, "Ready", "就绪")
+    } else {
+        menu_text(language, "Setup needed", "需要设置")
     }
 }
 
@@ -540,12 +599,14 @@ fn truncate_workspace_name(name: &str) -> String {
 
 fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
     let state = app.state::<DesktopState>();
-    let profiles = state
-        .store
-        .lock()
-        .map_err(|_| "Profile store is unavailable.".to_string())?
-        .profiles();
-    let (statuses, dependencies) = {
+    let (profiles, language) = {
+        let store = state
+            .store
+            .lock()
+            .map_err(|_| "Profile store is unavailable.".to_string())?;
+        (store.profiles(), store.language().to_string())
+    };
+    let (statuses, dependencies, workflow_root) = {
         let mut runtime = state
             .runtime
             .lock()
@@ -555,7 +616,8 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
             .map(|profile| (profile.id.clone(), runtime.status(profile)))
             .collect::<HashMap<_, _>>();
         let dependencies = runtime.dependency_status();
-        (statuses, dependencies)
+        let workflow_root = runtime.workflow_state_root();
+        (statuses, dependencies, workflow_root)
     };
 
     let menu = Menu::new(app).map_err(menu_error)?;
@@ -572,15 +634,26 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
     menu.append(&separator).map_err(menu_error)?;
 
     if profiles.is_empty() {
-        let empty = MenuItem::with_id(app, "menu:empty", "No workspaces yet", false, None::<&str>)
-            .map_err(menu_error)?;
+        let empty = MenuItem::with_id(
+            app,
+            "menu:empty",
+            menu_text(&language, "No workspaces yet", "尚无工作区"),
+            false,
+            None::<&str>,
+        )
+        .map_err(menu_error)?;
         menu.append(&empty).map_err(menu_error)?;
     }
 
     if !profiles.is_empty() {
-        let workspaces_title =
-            MenuItem::with_id(app, "menu:workspaces", "Workspaces", false, None::<&str>)
-                .map_err(menu_error)?;
+        let workspaces_title = MenuItem::with_id(
+            app,
+            "menu:workspaces",
+            menu_text(&language, "Workspaces", "工作区"),
+            false,
+            None::<&str>,
+        )
+        .map_err(menu_error)?;
         menu.append(&workspaces_title).map_err(menu_error)?;
     }
 
@@ -596,7 +669,7 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
             format!(
                 "{} · {}",
                 truncate_workspace_name(&profile.name),
-                status_text(&status)
+                status_text(&status, &language)
             ),
             true,
             running.then(running_indicator_icon),
@@ -606,7 +679,11 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
         let status_item = MenuItem::with_id(
             app,
             format!("status:{}", profile.id),
-            format!("Status · {}", status_text(&status)),
+            format!(
+                "{} · {}",
+                menu_text(&language, "Status", "状态"),
+                status_text(&status, &language)
+            ),
             false,
             None::<&str>,
         )
@@ -616,7 +693,11 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
         let path_item = MenuItem::with_id(
             app,
             format!("path:{}", profile.id),
-            format!("Folder · {}", profile.path),
+            format!(
+                "{} · {}",
+                menu_text(&language, "Folder", "文件夹"),
+                profile.path
+            ),
             false,
             None::<&str>,
         )
@@ -625,37 +706,132 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
         let separator = PredefinedMenuItem::separator(app).map_err(menu_error)?;
         workspace.append(&separator).map_err(menu_error)?;
 
-        let permission_menu = Submenu::with_id(
+        let access_menu = Submenu::with_id(
             app,
-            format!("permission-menu:{}", profile.id),
+            format!("access-menu:{}", profile.id),
             format!(
-                "Permission mode · {}",
-                permission_mode_label(&profile.runtime.permission_mode)
+                "{} · {}",
+                menu_text(&language, "Access", "访问权限"),
+                desktop_access_label(&profile.runtime.permission_mode, &language)
             ),
             true,
         )
         .map_err(menu_error)?;
-        for mode in ["safe", "trusted", "dangerous", "host"] {
-            let item = CheckMenuItem::with_id(
+        if !matches!(profile.runtime.permission_mode.as_str(), "trusted" | "host") {
+            let legacy = MenuItem::with_id(
                 app,
-                format!("permission:{mode}:{}", profile.id),
-                permission_mode_label(mode),
-                !running,
-                profile.runtime.permission_mode == mode,
+                format!("access-legacy:{}", profile.id),
+                desktop_access_label(&profile.runtime.permission_mode, &language),
+                false,
                 None::<&str>,
             )
             .map_err(menu_error)?;
-            permission_menu.append(&item).map_err(menu_error)?;
+            access_menu.append(&legacy).map_err(menu_error)?;
+            let separator = PredefinedMenuItem::separator(app).map_err(menu_error)?;
+            access_menu.append(&separator).map_err(menu_error)?;
         }
-        workspace.append(&permission_menu).map_err(menu_error)?;
+        let standard = CheckMenuItem::with_id(
+            app,
+            format!("access:standard:{}", profile.id),
+            menu_text(&language, "Standard", "标准"),
+            !running,
+            profile.runtime.permission_mode == "trusted",
+            None::<&str>,
+        )
+        .map_err(menu_error)?;
+        access_menu.append(&standard).map_err(menu_error)?;
+        let full_access = CheckMenuItem::with_id(
+            app,
+            format!("access:full:{}", profile.id),
+            menu_text(&language, "Full Access", "完全访问"),
+            !running,
+            profile.runtime.permission_mode == "host",
+            None::<&str>,
+        )
+        .map_err(menu_error)?;
+        access_menu.append(&full_access).map_err(menu_error)?;
+        workspace.append(&access_menu).map_err(menu_error)?;
+
+        let workflow_snapshot = read_workflow_snapshot(&workflow_root, Path::new(&profile.path))
+            .unwrap_or_else(WorkflowSnapshot::failure);
+        let pending_approvals = workflow_snapshot
+            .approvals
+            .iter()
+            .filter(|approval| approval.status == "pending")
+            .collect::<Vec<_>>();
+        if !pending_approvals.is_empty() {
+            let approvals_menu = Submenu::with_id(
+                app,
+                format!("approvals-menu:{}", profile.id),
+                format!(
+                    "⚠ {} · {}",
+                    menu_text(&language, "Approval required", "需要审批"),
+                    pending_approvals.len()
+                ),
+                true,
+            )
+            .map_err(menu_error)?;
+            for approval in &pending_approvals {
+                let approval_menu = Submenu::with_id(
+                    app,
+                    format!("approval-menu:{}:{}", profile.id, approval.approval_id),
+                    format!("{} · {}", approval.tool_name, approval.permission),
+                    true,
+                )
+                .map_err(menu_error)?;
+                let reason = MenuItem::with_id(
+                    app,
+                    format!("approval-reason:{}:{}", profile.id, approval.approval_id),
+                    approval.reason.chars().take(80).collect::<String>(),
+                    false,
+                    None::<&str>,
+                )
+                .map_err(menu_error)?;
+                approval_menu.append(&reason).map_err(menu_error)?;
+                let separator = PredefinedMenuItem::separator(app).map_err(menu_error)?;
+                approval_menu.append(&separator).map_err(menu_error)?;
+                let approve = MenuItem::with_id(
+                    app,
+                    format!("approval-approve:{}:{}", profile.id, approval.approval_id),
+                    menu_text(&language, "Approve", "批准"),
+                    true,
+                    None::<&str>,
+                )
+                .map_err(menu_error)?;
+                approval_menu.append(&approve).map_err(menu_error)?;
+                let deny = MenuItem::with_id(
+                    app,
+                    format!("approval-deny:{}:{}", profile.id, approval.approval_id),
+                    menu_text(&language, "Deny", "拒绝"),
+                    true,
+                    None::<&str>,
+                )
+                .map_err(menu_error)?;
+                approval_menu.append(&deny).map_err(menu_error)?;
+                approvals_menu.append(&approval_menu).map_err(menu_error)?;
+            }
+            workspace.append(&approvals_menu).map_err(menu_error)?;
+        }
+
+        let open_logs = MenuItem::with_id(
+            app,
+            format!("logs-open:{}", profile.id),
+            menu_text(&language, "Open logs…", "打开日志…"),
+            true,
+            None::<&str>,
+        )
+        .map_err(menu_error)?;
+        workspace.append(&open_logs).map_err(menu_error)?;
 
         let power_item = MenuItem::with_id(
             app,
             format!("{}:{}", if running { "stop" } else { "start" }, profile.id),
-            if running {
-                "Stop workspace"
+            if status.state == "starting" {
+                menu_text(&language, "Cancel startup", "取消启动")
+            } else if running {
+                menu_text(&language, "Stop workspace", "停止工作区")
             } else {
-                "Start workspace"
+                menu_text(&language, "Start workspace", "启动工作区")
             },
             true,
             None::<&str>,
@@ -671,7 +847,7 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
         let copy_url = MenuItem::with_id(
             app,
             format!("copy-url:{}", profile.id),
-            "Server URL · Copy",
+            menu_text(&language, "Server URL · Copy", "服务器 URL · 复制"),
             !endpoint.is_empty(),
             None::<&str>,
         )
@@ -680,7 +856,11 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
         let copy_passcode = MenuItem::with_id(
             app,
             format!("copy-passcode:{}", profile.id),
-            "Authorization passcode · Copy",
+            menu_text(
+                &language,
+                "Authorization passcode · Copy",
+                "授权口令 · 复制",
+            ),
             !profile.auth.oauth_password.is_empty(),
             None::<&str>,
         )
@@ -692,7 +872,7 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
         let remove = MenuItem::with_id(
             app,
             format!("remove:{}", profile.id),
-            "Remove workspace…",
+            menu_text(&language, "Remove workspace…", "移除工作区…"),
             !running,
             None::<&str>,
         )
@@ -703,23 +883,146 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
 
     let separator = PredefinedMenuItem::separator(app).map_err(menu_error)?;
     menu.append(&separator).map_err(menu_error)?;
-    let add = MenuItem::with_id(app, "add-workspace", "Add workspace…", true, None::<&str>)
-        .map_err(menu_error)?;
+    let add = MenuItem::with_id(
+        app,
+        "add-workspace",
+        menu_text(&language, "Add workspace…", "添加工作区…"),
+        true,
+        None::<&str>,
+    )
+    .map_err(menu_error)?;
     menu.append(&add).map_err(menu_error)?;
-    let refresh =
-        MenuItem::with_id(app, "refresh", "Refresh", true, None::<&str>).map_err(menu_error)?;
+    let refresh = MenuItem::with_id(
+        app,
+        "refresh",
+        menu_text(&language, "Refresh", "刷新"),
+        true,
+        None::<&str>,
+    )
+    .map_err(menu_error)?;
     menu.append(&refresh).map_err(menu_error)?;
 
-    let resources = Submenu::with_id(app, "resources", "Resources", true).map_err(menu_error)?;
+    let resources = Submenu::with_id(
+        app,
+        "resources",
+        menu_text(&language, "Resources", "资源"),
+        true,
+    )
+    .map_err(menu_error)?;
+    let runtime_ready =
+        dependencies.runtime_ready && dependencies.playwright_ready && dependencies.cloudflared;
+    let browser_ready = dependencies.chrome_installed
+        && (dependencies.chrome_cdp_ready || dependencies.chrome_bridge_connected);
+    let app_control_ready =
+        dependencies.app_helper && dependencies.accessibility_trusted == Some(true);
+    for (id, label) in [
+        (
+            "resource-summary:runtime",
+            format!(
+                "{} · {}",
+                menu_text(&language, "Runtime", "运行环境"),
+                readiness_label(runtime_ready, &language)
+            ),
+        ),
+        (
+            "resource-summary:browser",
+            format!(
+                "{} · {}",
+                menu_text(&language, "Browser", "浏览器"),
+                readiness_label(browser_ready, &language)
+            ),
+        ),
+        (
+            "resource-summary:app-control",
+            format!(
+                "{} · {}",
+                menu_text(&language, "App Control", "应用控制"),
+                readiness_label(app_control_ready, &language)
+            ),
+        ),
+    ] {
+        let item = MenuItem::with_id(app, id, label, false, None::<&str>).map_err(menu_error)?;
+        resources.append(&item).map_err(menu_error)?;
+    }
+    let separator = PredefinedMenuItem::separator(app).map_err(menu_error)?;
+    resources.append(&separator).map_err(menu_error)?;
+    let runtime_action_id = if dependencies.runtime_ready {
+        "resource:repair-runtime"
+    } else {
+        "resource:prepare-runtime"
+    };
+    let runtime_action_label = if dependencies.runtime_ready {
+        menu_text(&language, "Repair runtime…", "修复运行时…")
+    } else {
+        menu_text(&language, "Prepare runtime…", "准备运行时…")
+    };
+    let runtime_action = MenuItem::with_id(
+        app,
+        runtime_action_id,
+        runtime_action_label,
+        true,
+        None::<&str>,
+    )
+    .map_err(menu_error)?;
+    resources.append(&runtime_action).map_err(menu_error)?;
+    let chrome_bridge = MenuItem::with_id(
+        app,
+        "resource:chrome-bridge",
+        menu_text(
+            &language,
+            "Prepare Chrome integration…",
+            "准备 Chrome 集成…",
+        ),
+        true,
+        None::<&str>,
+    )
+    .map_err(menu_error)?;
+    resources.append(&chrome_bridge).map_err(menu_error)?;
+    let permissions = Submenu::with_id(
+        app,
+        "resource:permissions-menu",
+        menu_text(&language, "macOS Permissions", "macOS 权限"),
+        true,
+    )
+    .map_err(menu_error)?;
+    let accessibility = MenuItem::with_id(
+        app,
+        "resource:accessibility",
+        menu_text(&language, "Accessibility…", "辅助功能…"),
+        true,
+        None::<&str>,
+    )
+    .map_err(menu_error)?;
+    permissions.append(&accessibility).map_err(menu_error)?;
+    let screen_recording = MenuItem::with_id(
+        app,
+        "resource:screen-recording",
+        menu_text(&language, "Screen Recording…", "屏幕录制…"),
+        true,
+        None::<&str>,
+    )
+    .map_err(menu_error)?;
+    permissions.append(&screen_recording).map_err(menu_error)?;
+    resources.append(&permissions).map_err(menu_error)?;
+
+    let separator = PredefinedMenuItem::separator(app).map_err(menu_error)?;
+    resources.append(&separator).map_err(menu_error)?;
+    let diagnostics = Submenu::with_id(
+        app,
+        "resource:diagnostics-menu",
+        menu_text(&language, "Diagnostics", "诊断"),
+        true,
+    )
+    .map_err(menu_error)?;
     for (id, label) in [
         (
             "resource-status:runtime",
             format!(
                 "MCP Runtime · {}{}",
                 if dependencies.runtime_ready {
-                    "Ready"
+                    menu_text(&language, "Ready", "就绪")
                 } else {
-                    "Not prepared"
+                    menu_text(&language, "Not prepared", "未准备")
                 },
                 dependencies
                     .runtime_version
@@ -733,9 +1036,9 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
             format!(
                 "Playwright · {}{}",
                 if dependencies.playwright_ready {
-                    "Ready"
+                    menu_text(&language, "Ready", "就绪")
                 } else {
-                    "Not prepared"
+                    menu_text(&language, "Not prepared", "未准备")
                 },
                 dependencies
                     .playwright_version
@@ -746,35 +1049,20 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
         ),
         (
             "resource-status:uv",
-            format!(
-                "uv · {}",
-                if dependencies.uv {
-                    "Ready"
-                } else {
-                    "Not found"
-                }
-            ),
+            format!("uv · {}", readiness_label(dependencies.uv, &language)),
         ),
         (
             "resource-status:cloudflared",
             format!(
                 "cloudflared · {}",
-                if dependencies.cloudflared {
-                    "Ready"
-                } else {
-                    "Not found"
-                }
+                readiness_label(dependencies.cloudflared, &language)
             ),
         ),
         (
             "resource-status:app-helper",
             format!(
                 "App Helper · {}",
-                if dependencies.app_helper {
-                    "Ready"
-                } else {
-                    "Not found"
-                }
+                readiness_label(dependencies.app_helper, &language)
             ),
         ),
         (
@@ -782,9 +1070,9 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
             format!(
                 "Chrome · {}",
                 if dependencies.chrome_installed {
-                    "Installed"
+                    menu_text(&language, "Installed", "已安装")
                 } else {
-                    "Not found"
+                    menu_text(&language, "Not found", "未找到")
                 }
             ),
         ),
@@ -793,9 +1081,9 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
             format!(
                 "Chrome CDP · {}",
                 if dependencies.chrome_cdp_ready {
-                    "Connected"
+                    menu_text(&language, "Connected", "已连接")
                 } else {
-                    "Not connected"
+                    menu_text(&language, "Not connected", "未连接")
                 }
             ),
         ),
@@ -804,11 +1092,11 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
             format!(
                 "Chrome Bridge · {}",
                 if dependencies.chrome_bridge_connected {
-                    "Connected"
+                    menu_text(&language, "Connected", "已连接")
                 } else if dependencies.chrome_manifest {
-                    "Installed"
+                    menu_text(&language, "Installed", "已安装")
                 } else {
-                    "Not installed"
+                    menu_text(&language, "Not installed", "未安装")
                 }
             ),
         ),
@@ -817,9 +1105,9 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
             format!(
                 "Accessibility · {}",
                 match dependencies.accessibility_trusted {
-                    Some(true) => "Allowed",
-                    Some(false) => "Permission required",
-                    None => "Unavailable",
+                    Some(true) => menu_text(&language, "Allowed", "已允许"),
+                    Some(false) => menu_text(&language, "Permission required", "需要权限"),
+                    None => menu_text(&language, "Unavailable", "不可用"),
                 }
             ),
         ),
@@ -828,96 +1116,60 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
             format!(
                 "Screen Recording · {}",
                 match dependencies.screen_recording_trusted {
-                    Some(true) => "Allowed",
-                    Some(false) => "Permission required",
-                    None => "Unavailable",
+                    Some(true) => menu_text(&language, "Allowed", "已允许"),
+                    Some(false) => menu_text(&language, "Permission required", "需要权限"),
+                    None => menu_text(&language, "Unavailable", "不可用"),
                 }
             ),
         ),
     ] {
         let item = MenuItem::with_id(app, id, label, false, None::<&str>).map_err(menu_error)?;
-        resources.append(&item).map_err(menu_error)?;
+        diagnostics.append(&item).map_err(menu_error)?;
     }
     let separator = PredefinedMenuItem::separator(app).map_err(menu_error)?;
-    resources.append(&separator).map_err(menu_error)?;
-    let prepare_runtime = MenuItem::with_id(
-        app,
-        "resource:prepare-runtime",
-        "Prepare runtime…",
-        true,
-        None::<&str>,
-    )
-    .map_err(menu_error)?;
-    resources.append(&prepare_runtime).map_err(menu_error)?;
-    let repair_runtime = MenuItem::with_id(
-        app,
-        "resource:repair-runtime",
-        "Repair runtime…",
-        true,
-        None::<&str>,
-    )
-    .map_err(menu_error)?;
-    resources.append(&repair_runtime).map_err(menu_error)?;
-    let chrome_bridge = MenuItem::with_id(
-        app,
-        "resource:chrome-bridge",
-        "Prepare Chrome bridge…",
-        true,
-        None::<&str>,
-    )
-    .map_err(menu_error)?;
-    resources.append(&chrome_bridge).map_err(menu_error)?;
-    let accessibility = MenuItem::with_id(
-        app,
-        "resource:accessibility",
-        "Accessibility settings…",
-        true,
-        None::<&str>,
-    )
-    .map_err(menu_error)?;
-    resources.append(&accessibility).map_err(menu_error)?;
-    let screen_recording = MenuItem::with_id(
-        app,
-        "resource:screen-recording",
-        "Screen Recording settings…",
-        true,
-        None::<&str>,
-    )
-    .map_err(menu_error)?;
-    resources.append(&screen_recording).map_err(menu_error)?;
-    let separator = PredefinedMenuItem::separator(app).map_err(menu_error)?;
-    resources.append(&separator).map_err(menu_error)?;
+    diagnostics.append(&separator).map_err(menu_error)?;
     let repair_dependencies = MenuItem::with_id(
         app,
         "resource:repair-dependencies",
-        "Repair uv & cloudflared…",
+        menu_text(
+            &language,
+            "Repair uv & cloudflared…",
+            "修复 uv 与 cloudflared…",
+        ),
         true,
         None::<&str>,
     )
     .map_err(menu_error)?;
-    resources.append(&repair_dependencies).map_err(menu_error)?;
+    diagnostics
+        .append(&repair_dependencies)
+        .map_err(menu_error)?;
     let uv = MenuItem::with_id(
         app,
         "resource:uv",
-        "Install / Repair uv…",
+        menu_text(&language, "Install / Repair uv…", "安装 / 修复 uv…"),
         true,
         None::<&str>,
     )
     .map_err(menu_error)?;
-    resources.append(&uv).map_err(menu_error)?;
+    diagnostics.append(&uv).map_err(menu_error)?;
     let cloudflared = MenuItem::with_id(
         app,
         "resource:cloudflared",
-        "Install / Repair cloudflared…",
+        menu_text(
+            &language,
+            "Install / Repair cloudflared…",
+            "安装 / 修复 cloudflared…",
+        ),
         true,
         None::<&str>,
     )
     .map_err(menu_error)?;
-    resources.append(&cloudflared).map_err(menu_error)?;
+    diagnostics.append(&cloudflared).map_err(menu_error)?;
+    resources.append(&diagnostics).map_err(menu_error)?;
     let github = MenuItem::with_id(
         app,
         "resource:github",
-        "Source on GitHub…",
+        menu_text(&language, "Source on GitHub…", "GitHub 源代码…"),
         true,
         None::<&str>,
     )
@@ -925,10 +1177,37 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
     resources.append(&github).map_err(menu_error)?;
     menu.append(&resources).map_err(menu_error)?;
 
+    let language_menu = Submenu::with_id(
+        app,
+        "language-menu",
+        menu_text(&language, "Language", "语言"),
+        true,
+    )
+    .map_err(menu_error)?;
+    for (code, label) in [("en", "English"), ("zh-CN", "简体中文")] {
+        let item = CheckMenuItem::with_id(
+            app,
+            format!("language:{code}"),
+            label,
+            true,
+            language == code,
+            None::<&str>,
+        )
+        .map_err(menu_error)?;
+        language_menu.append(&item).map_err(menu_error)?;
+    }
+    menu.append(&language_menu).map_err(menu_error)?;
+
     let separator = PredefinedMenuItem::separator(app).map_err(menu_error)?;
     menu.append(&separator).map_err(menu_error)?;
-    let quit = MenuItem::with_id(app, "quit", "Quit Coding Tools MCP", true, None::<&str>)
-        .map_err(menu_error)?;
+    let quit = MenuItem::with_id(
+        app,
+        "quit",
+        menu_text(&language, "Quit Coding Tools MCP", "退出 Coding Tools MCP"),
+        true,
+        None::<&str>,
+    )
+    .map_err(menu_error)?;
     menu.append(&quit).map_err(menu_error)?;
     Ok(menu)
 }
@@ -965,11 +1244,21 @@ fn show_error(app: &AppHandle, message: impl Into<String>) {
 }
 
 fn add_workspace_from_menu(app: &AppHandle) {
+    let language = app
+        .state::<DesktopState>()
+        .store
+        .lock()
+        .map(|store| store.language().to_string())
+        .unwrap_or_else(|_| "en".to_string());
     let app = app.clone();
     let callback_app = app.clone();
     app.dialog()
         .file()
-        .set_title("Choose workspace folder")
+        .set_title(menu_text(
+            &language,
+            "Choose workspace folder",
+            "选择工作区文件夹",
+        ))
         .pick_folder(move |folder| {
             let Some(folder) = folder else {
                 return;
@@ -1130,16 +1419,117 @@ fn copy_passcode(app: &AppHandle, profile_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn open_logs_folder(app: &AppHandle, profile_id: &str) -> Result<(), String> {
+    let directory = app
+        .state::<DesktopState>()
+        .store
+        .lock()
+        .map_err(|_| "Profile store is unavailable.".to_string())?
+        .log_dir(profile_id)?;
+    open_path(&directory)
+}
+
+fn copy_recent_logs(app: &AppHandle, profile_id: &str) -> Result<(), String> {
+    let directory = app
+        .state::<DesktopState>()
+        .store
+        .lock()
+        .map_err(|_| "Profile store is unavailable.".to_string())?
+        .log_dir(profile_id)?;
+    let logs = read_logs(&directory)?;
+    let text = format!(
+        "=== stdout ===\n{}\n\n=== stderr ===\n{}\n\n=== cloudflared ===\n{}",
+        logs.stdout, logs.stderr, logs.cloudflared
+    );
+    app.clipboard().write_text(text).map_err(menu_error)
+}
+
+fn decide_approval_from_menu(
+    app: &AppHandle,
+    profile_id: &str,
+    approval_id: &str,
+    approved: bool,
+) -> Result<(), String> {
+    let state = app.state::<DesktopState>();
+    let profile = state
+        .store
+        .lock()
+        .map_err(|_| "Profile store is unavailable.".to_string())?
+        .get(profile_id)
+        .ok_or_else(|| "Workspace profile was not found.".to_string())?;
+    let workflow_root = state
+        .runtime
+        .lock()
+        .map_err(|_| "Runtime manager is unavailable.".to_string())?
+        .workflow_state_root();
+    decide_workflow_approval(
+        &workflow_root,
+        Path::new(&profile.path),
+        approval_id,
+        approved,
+    )
+}
+
+fn add_managed_worktree_from_menu(
+    app: &AppHandle,
+    profile_id: &str,
+    worktree_id: &str,
+) -> Result<(), String> {
+    let state = app.state::<DesktopState>();
+    let profile = state
+        .store
+        .lock()
+        .map_err(|_| "Profile store is unavailable.".to_string())?
+        .get(profile_id)
+        .ok_or_else(|| "Workspace profile was not found.".to_string())?;
+    let workflow_root = state
+        .runtime
+        .lock()
+        .map_err(|_| "Runtime manager is unavailable.".to_string())?
+        .workflow_state_root();
+    let snapshot = read_workflow_snapshot(&workflow_root, Path::new(&profile.path))?;
+    let worktree = snapshot
+        .worktrees
+        .into_iter()
+        .find(|worktree| worktree.worktree_id == worktree_id)
+        .ok_or_else(|| "Managed worktree was not found.".to_string())?;
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|_| "Profile store is unavailable.".to_string())?;
+    if store
+        .profiles()
+        .iter()
+        .any(|existing| existing.path == worktree.path)
+    {
+        return Ok(());
+    }
+    let profile = WorkspaceProfile::new(worktree.path, store.next_port())?;
+    store.insert(profile)?;
+    Ok(())
+}
+
+fn set_menu_language(app: &AppHandle, language: &str) -> Result<(), String> {
+    if !matches!(language, "en" | "zh-CN") {
+        return Err("Unknown menu language.".to_string());
+    }
+    app.state::<DesktopState>()
+        .store
+        .lock()
+        .map_err(|_| "Profile store is unavailable.".to_string())?
+        .set_language(language)
+}
+
 fn remove_workspace_from_menu(app: &AppHandle, profile_id: String) {
-    let profile = {
+    let profile_and_language = {
         let state = app.state::<DesktopState>();
-        state
-            .store
-            .lock()
-            .ok()
-            .and_then(|store| store.get(&profile_id))
+        state.store.lock().ok().and_then(|store| {
+            store
+                .get(&profile_id)
+                .map(|profile| (profile, store.language().to_string()))
+        })
     };
-    let Some(profile) = profile else {
+    let Some((profile, language)) = profile_and_language else {
         show_error(app, "Workspace profile was not found.");
         return;
     };
@@ -1147,10 +1537,14 @@ fn remove_workspace_from_menu(app: &AppHandle, profile_id: String) {
     let callback_app = app.clone();
     dialog_app
         .dialog()
-        .message(format!("Remove workspace “{}”?", profile.name))
+        .message(format!(
+            "{} “{}”?",
+            menu_text(&language, "Remove workspace", "移除工作区"),
+            profile.name
+        ))
         .buttons(MessageDialogButtons::OkCancelCustom(
-            "Remove".into(),
-            "Cancel".into(),
+            menu_text(&language, "Remove", "移除").into(),
+            menu_text(&language, "Cancel", "取消").into(),
         ))
         .show(move |confirmed| {
             if !confirmed {
@@ -1279,6 +1673,11 @@ fn handle_tray_menu_event(app: &AppHandle, id: &str) {
         if let Err(error) = open_resource("github".into()) {
             show_error(app, error);
         }
+    } else if let Some(language) = id.strip_prefix("language:") {
+        if let Err(error) = set_menu_language(app, language) {
+            show_error(app, error);
+        }
+        let _ = refresh_tray_menu(app);
     } else if id == "quit" {
         app.exit(0);
     } else if let Some(profile_id) = id.strip_prefix("start:") {
@@ -1294,6 +1693,45 @@ fn handle_tray_menu_event(app: &AppHandle, id: &str) {
         if let Err(error) = copy_passcode(app, profile_id) {
             show_error(app, error);
         }
+    } else if let Some(profile_id) = id.strip_prefix("logs-open:") {
+        if let Err(error) = open_logs_folder(app, profile_id) {
+            show_error(app, error);
+        }
+    } else if let Some(profile_id) = id.strip_prefix("logs-copy:") {
+        if let Err(error) = copy_recent_logs(app, profile_id) {
+            show_error(app, error);
+        }
+    } else if let Some(selection) = id.strip_prefix("approval-approve:") {
+        if let Some((profile_id, approval_id)) = selection.split_once(':') {
+            if let Err(error) = decide_approval_from_menu(app, profile_id, approval_id, true) {
+                show_error(app, error);
+            }
+            let _ = refresh_tray_menu(app);
+        }
+    } else if let Some(selection) = id.strip_prefix("approval-deny:") {
+        if let Some((profile_id, approval_id)) = selection.split_once(':') {
+            if let Err(error) = decide_approval_from_menu(app, profile_id, approval_id, false) {
+                show_error(app, error);
+            }
+            let _ = refresh_tray_menu(app);
+        }
+    } else if let Some(selection) = id.strip_prefix("worktree-add:") {
+        if let Some((profile_id, worktree_id)) = selection.split_once(':') {
+            if let Err(error) = add_managed_worktree_from_menu(app, profile_id, worktree_id) {
+                show_error(app, error);
+            }
+            let _ = refresh_tray_menu(app);
+        }
+    } else if let Some(profile_id) = id.strip_prefix("access:standard:") {
+        if let Err(error) = set_permission_mode_from_menu(app, profile_id, "trusted") {
+            show_error(app, error);
+        }
+        let _ = refresh_tray_menu(app);
+    } else if let Some(profile_id) = id.strip_prefix("access:full:") {
+        if let Err(error) = set_permission_mode_from_menu(app, profile_id, "host") {
+            show_error(app, error);
+        }
+        let _ = refresh_tray_menu(app);
     } else if let Some(selection) = id.strip_prefix("permission:") {
         if let Some((permission_mode, profile_id)) = selection.split_once(':') {
             if let Err(error) = set_permission_mode_from_menu(app, profile_id, permission_mode) {
@@ -1397,9 +1835,18 @@ mod tests {
 
     #[test]
     fn permission_mode_labels_cover_every_supported_mode() {
-        assert_eq!(permission_mode_label("safe"), "Safe");
-        assert_eq!(permission_mode_label("trusted"), "Trusted");
-        assert_eq!(permission_mode_label("dangerous"), "Dangerous");
-        assert_eq!(permission_mode_label("host"), "Host · full access");
+        assert_eq!(permission_mode_label("safe", "en"), "Safe");
+        assert_eq!(permission_mode_label("trusted", "en"), "Trusted");
+        assert_eq!(permission_mode_label("dangerous", "en"), "Dangerous");
+        assert_eq!(permission_mode_label("host", "en"), "Host · full access");
+        assert_eq!(permission_mode_label("host", "zh-CN"), "主机 · 完全访问");
+    }
+
+    #[test]
+    fn desktop_access_collapses_new_choices_without_hiding_legacy_modes() {
+        assert_eq!(desktop_access_label("trusted", "en"), "Standard");
+        assert_eq!(desktop_access_label("host", "en"), "Full Access");
+        assert_eq!(desktop_access_label("safe", "en"), "Legacy · Safe");
+        assert_eq!(desktop_access_label("dangerous", "zh-CN"), "旧模式 · 危险");
     }
 }

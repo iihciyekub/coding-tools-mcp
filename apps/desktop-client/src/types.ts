@@ -45,6 +45,7 @@ export interface RuntimeStatus {
 }
 
 export interface DesktopSnapshot {
+  language: "en" | "zh-CN";
   profiles: WorkspaceProfile[];
   statuses: Record<string, RuntimeStatus>;
   dependencies: DependencyStatus;

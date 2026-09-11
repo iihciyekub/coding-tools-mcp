@@ -4,7 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
-import { detectLanguage, translator } from "./i18n";
+import { detectLanguage, translator, type Language } from "./i18n";
 import type { DependencyStatus, PermissionMode, RuntimeStatus, WorkflowSnapshot, WorkspaceProfile } from "./types";
 import { publicEndpoint } from "./utils";
 
@@ -36,7 +36,8 @@ const quickTunnelProfile = (profile: WorkspaceProfile): WorkspaceProfile => ({
 
 function App() {
   const panelRef = useRef<HTMLElement>(null);
-  const t = useMemo(() => translator(detectLanguage()), []);
+  const [language, setLanguage] = useState<Language>(detectLanguage());
+  const t = useMemo(() => translator(language), [language]);
   const [profiles, setProfiles] = useState<WorkspaceProfile[]>([]);
   const [statuses, setStatuses] = useState<Record<string, RuntimeStatus>>({});
   const [workflow, setWorkflow] = useState<Record<string, WorkflowSnapshot>>({});
@@ -77,6 +78,7 @@ function App() {
   const refresh = useCallback(async (keepSelection = true) => {
     try {
       const snapshot = await api.snapshot();
+      setLanguage(snapshot.language);
       setProfiles(snapshot.profiles);
       setStatuses(snapshot.statuses);
       setWorkflow(snapshot.workflow);
@@ -444,8 +446,8 @@ function App() {
             )}
             <label className={`permission-mode-control ${selected.runtime.permission_mode === "host" ? "host-enabled" : ""}`}>
               <span className="permission-mode-copy">
-                <strong>{t("Permission mode")}</strong>
-                <small>{t("Choose how much command access this workspace receives.")}</small>
+                <strong>{t("Access")}</strong>
+                <small>{t("Standard stays inside the workspace. Full Access can control this Mac.")}</small>
               </span>
               <select
                 className="permission-select"
@@ -453,10 +455,11 @@ function App() {
                 disabled={Boolean(selectedStatus?.pid) || selectedStatus?.state === "starting" || busyId === selected.id}
                 onChange={(event) => void setPermissionMode(selected, event.target.value as PermissionMode)}
               >
-                <option value="safe">{t("Safe")}</option>
-                <option value="trusted">{t("Trusted")}</option>
-                <option value="dangerous">{t("Dangerous")}</option>
-                <option value="host">{t("Host")}</option>
+                {!(["trusted", "host"] as PermissionMode[]).includes(selected.runtime.permission_mode) && (
+                  <option value={selected.runtime.permission_mode} disabled>{t("Legacy mode")} · {t(selected.runtime.permission_mode === "safe" ? "Safe" : "Dangerous")}</option>
+                )}
+                <option value="trusted">{t("Standard")}</option>
+                <option value="host">{t("Full Access")}</option>
               </select>
             </label>
             {selected.runtime.permission_mode === "host" && (
