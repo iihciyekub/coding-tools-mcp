@@ -16,8 +16,10 @@ routing, plugin installation, image generation, or subagent orchestration.
 There is one stable default catalog and one opt-in workflow extension selected
 at process startup. The runtime has no dynamic `tools/list_changed`, no
 `edit_file`, and no required `open_workspace` call.
-`apply_patch` is the only direct file-write tool. `safe`, `trusted`, `dangerous`,
-and `host` are command permission policies and never alter `tools/list`.
+`apply_patch` is the only direct text/source file-editing tool. Workflow Git
+operations, checkpoint restore, and workflow-state updates have separately
+specified guarded mutation semantics. `safe`, `trusted`, `dangerous`, and
+`host` are command permission policies and never alter `tools/list`.
 
 The default catalog contains 51 tools:
 

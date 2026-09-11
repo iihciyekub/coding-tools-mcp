@@ -76,9 +76,10 @@ extension for the runtimes it starts.
 
 Prefer HTTP? Drop `--stdio` and the server speaks Streamable HTTP on
 `http://127.0.0.1:8765/mcp`. Both protocol eras are served on either
-transport: MCP `2026-07-28` in full, with `tools` as the only advertised
-capability, and the handshake era `2025-11-25` with `2025-06-18`
-compatibility. Neither has sessions. A one-line installer, per-client
+transport: MCP `2026-07-28` in full, with stable tools as the base capability
+and the Tasks extension additionally advertised by workflow-enabled runtimes,
+plus the handshake era `2025-11-25` with `2025-06-18` compatibility. Neither
+era has transport sessions. A one-line installer, per-client
 walkthroughs, and troubleshooting live in
 [docs/quickstart.md](docs/quickstart.md) and
 [docs/mcp-client-config.md](docs/mcp-client-config.md).
@@ -145,9 +146,11 @@ speak MCP to this server and inherit the whole safety boundary. →
 ## The tool catalog
 
 One stable, truthfully annotated set — permission modes change command
-*policy*, never which tools the model sees. `apply_patch` is the sole
-file-mutation primitive: staged, baseline-checked, atomic across files, with
-rollback.
+*policy*, never which tools the model sees. `apply_patch` is the sole direct
+text/source-editing primitive: staged, baseline-checked, atomic across files,
+with rollback. Workflow Git operations, checkpoint restore, and workflow-state
+updates have their own explicit guarded mutation semantics rather than acting as
+alternate general-purpose source editors.
 
 | Group | Tools |
 | --- | --- |

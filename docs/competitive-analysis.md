@@ -23,9 +23,10 @@ agent-computer sandbox; and Cline couples MCP and approvals to an editor UI.
 Those product-level workflows can host or complement this MCP server, but are
 not additional tools in its fixed catalog.
 
-The [coding runtime upgrade proposal](coding-runtime-upgrade-plan.zh-CN.md)
-separately evaluates future project intelligence and workflow extensions. It is
-a proposal, not a statement of capabilities supported by the current runtime.
+The historical [coding runtime upgrade plan](archive/coding-runtime-upgrade-plan.zh-CN.md)
+records how the workflow/runtime extensions were designed. Most M1–M3 items in
+that document are now implemented, so current capability claims must come from
+the runtime contract and tool inventory rather than the archived proposal.
 
 ## Interpreting the Devspace speed claim
 

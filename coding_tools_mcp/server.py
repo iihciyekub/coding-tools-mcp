@@ -800,7 +800,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "lsp_status": ToolSpec(
         title="Language server status",
-        description="Report optional Python and TypeScript/JavaScript LSP backend availability and process state.",
+        description="Report optional Python, TypeScript/JavaScript, and Rust LSP backend availability and process state.",
         read_only=True,
         idempotent=True,
         gated_by="enable_workflow_tools",

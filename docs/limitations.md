@@ -10,9 +10,10 @@
   directories. `apply_patch` keeps same-directory backups and rolls back the
   full staged set, but a storage failure that also prevents rollback is surfaced
   as `PATCH_ROLLBACK_FAILED` and may require operator recovery.
-- OAuth dynamic client registrations and pending authorization codes are held in
-  process memory. Restarting the server requires dynamic clients to register
-  again.
+- OAuth dynamic client registrations and generated token-signing keys are
+  persisted per workspace with user-only file permissions. Pending
+  authorization codes remain process-local and single-use, so an in-flight
+  authorization flow must be restarted after a server restart.
 - Cancelling a request does not stop the work it started any sooner. The
   response is answered as the protocol requires — on stdio the loop is serial,
   so the answer is already written before a cancellation could be read, and over

@@ -10,8 +10,10 @@ the handshake era `2025-11-25` with explicit compatibility for `2025-06-18`.
 
 This contract describes one stable, model-neutral coding tool set. There are no
 tool profiles and the server does not add or remove process tools dynamically.
-`apply_patch` is the only direct file-mutation primitive; `edit_file` is not
-provided. Permission modes alter command policy, not the advertised catalog.
+`apply_patch` is the only direct text/source file-editing primitive; `edit_file`
+is not provided. Workflow Git operations, checkpoint restore, and workflow-state
+updates have separately specified guarded mutation semantics. Permission modes
+alter command policy, not the advertised catalog.
 
 One switch, `--dangerously-fake-readonly-annotations`, rewrites the exposure hints
 in `tools/list` for clients that refuse mutating tools by annotation. It is not a

@@ -31,12 +31,18 @@ The documentation keeps stable file paths for existing links, while this index p
 ## Engineering and evaluation
 
 - [CI and tests](ci-and-tests.md)
-- [Boundary findings](boundary-findings.md)
 - [Competitive analysis](competitive-analysis.md)
-- [Coding runtime upgrade proposal (简体中文)](coding-runtime-upgrade-plan.zh-CN.md)
 - [Dogfood](dogfood.md)
 - [SWE-bench](swe-bench.md)
 - [SWE-bench supporting material](swebench/README.md)
+
+## Historical design and investigation archives
+
+- [Coding runtime upgrade plan archive (简体中文)](archive/coding-runtime-upgrade-plan.zh-CN.md)
+- [Boundary findings archive](archive/boundary-findings.md)
+
+Compatibility entry pages remain at the former document paths so existing
+inbound links continue to resolve.
 
 ## Component-local documentation
 

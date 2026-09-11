@@ -55,7 +55,11 @@ Risky capabilities return structured permission-required or unsupported response
 - `privileged_executable`
 - `write_generated_or_ignored`
 
-`request_permissions` currently returns `ELICITATION_UNSUPPORTED` unless a future MCP client elicitation flow is implemented and tested.
+When workflow tools are enabled, `request_permissions` creates an exact,
+expiring, one-shot approval request that can be approved or denied only in the
+local Coding Tools MCP Desktop app. Without workflow tools it returns
+`ELICITATION_UNSUPPORTED`. Dangerous and host modes retain their explicit
+startup-time auto-grant behavior.
 
 Operators should choose one of four permission modes:
 

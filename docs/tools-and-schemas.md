@@ -92,7 +92,7 @@ selection is fixed for that runtime; it does not change during a connection:
 - `git_worktree_list`: list repository worktrees and identify runtime-managed entries.
 - `git_worktree_create`: create an isolated managed worktree after Git state checks.
 - `git_worktree_remove`: remove a clean managed worktree while preserving its branch.
-- `lsp_status`: report optional Python, TypeScript/JavaScript, and Rust language-server availability.
+- `lsp_status`: report optional Python, TypeScript/JavaScript, and Rust language-server availability and process state.
 - `lsp_definition`: resolve semantic definitions at a source position.
 - `lsp_references`: resolve semantic references at a source position.
 - `lsp_diagnostics`: return bounded diagnostics published for one source file.
