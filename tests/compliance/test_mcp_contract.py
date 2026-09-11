@@ -74,7 +74,14 @@ def modern_request(
 
 # The methods that name their subject in the body, and the params field a
 # 2026-07-28 client repeats in Mcp-Name.
-MIRRORED_NAME_METHODS = {"tools/call": "name", "resources/read": "uri", "prompts/get": "name"}
+MIRRORED_NAME_METHODS = {
+    "tools/call": "name",
+    "resources/read": "uri",
+    "prompts/get": "name",
+    "tasks/get": "taskId",
+    "tasks/update": "taskId",
+    "tasks/cancel": "taskId",
+}
 
 
 def base64_sentinel(value: str) -> str:

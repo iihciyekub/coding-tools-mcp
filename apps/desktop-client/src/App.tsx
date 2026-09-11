@@ -5,7 +5,7 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
 import { detectLanguage, translator } from "./i18n";
-import type { DependencyStatus, PermissionMode, RuntimeStatus, WorkspaceProfile } from "./types";
+import type { DependencyStatus, PermissionMode, RuntimeStatus, WorkflowSnapshot, WorkspaceProfile } from "./types";
 import { publicEndpoint } from "./utils";
 
 const PANEL_WIDTH = 358;
@@ -39,6 +39,7 @@ function App() {
   const t = useMemo(() => translator(detectLanguage()), []);
   const [profiles, setProfiles] = useState<WorkspaceProfile[]>([]);
   const [statuses, setStatuses] = useState<Record<string, RuntimeStatus>>({});
+  const [workflow, setWorkflow] = useState<Record<string, WorkflowSnapshot>>({});
   const [dependencies, setDependencies] = useState<DependencyStatus>({
     uv: false,
     cloudflared: false,
@@ -71,12 +72,14 @@ function App() {
     ? publicEndpoint(selected, selectedStatus.public_url)
     : "";
   const selectedPassword = selected?.auth.oauth_password ?? "";
+  const selectedWorkflow = selected ? workflow[selected.id] : undefined;
 
   const refresh = useCallback(async (keepSelection = true) => {
     try {
       const snapshot = await api.snapshot();
       setProfiles(snapshot.profiles);
       setStatuses(snapshot.statuses);
+      setWorkflow(snapshot.workflow);
       setDependencies(snapshot.dependencies);
       setSelectedId((current) => {
         if (keepSelection && current && snapshot.profiles.some((profile) => profile.id === current)) {
@@ -222,16 +225,42 @@ function App() {
     }
   };
 
+  const decideApproval = async (approvalId: string, approved: boolean) => {
+    if (!selected) return;
+    setBusyId(approvalId);
+    setError("");
+    try {
+      await api.decideApproval(selected.id, approvalId, approved);
+      await refresh();
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const addManagedWorktree = async (path: string) => {
+    setBusyId(path);
+    setError("");
+    try {
+      const profile = await api.createProfile(path);
+      await refresh();
+      setSelectedId(profile.id);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   const addWorkspace = async () => {
     const appWindow = getCurrentWindow();
     setError("");
     try {
-      await api.setPanelAutoHideSuspended(true);
       let chosen: string | string[] | null;
       try {
         chosen = await open({ directory: true, multiple: false, title: t("Choose folder") });
       } finally {
-        await api.setPanelAutoHideSuspended(false);
         await appWindow.show();
         await appWindow.setFocus();
       }
@@ -501,6 +530,70 @@ function App() {
           {!profiles.length && <div className="empty-list">{t("Add a workspace to begin.")}</div>}
         </div>
       </section>
+
+      {selected && (
+        <section className="workflow-section" aria-label={t("Workflow activity")}>
+          <header className="section-header">
+            <span>{t("Workflow activity")}</span>
+            <span className="workflow-counts">
+              {selectedWorkflow?.approvals.filter((item) => item.status === "pending").length ?? 0} {t("approvals")} · {selectedWorkflow?.tasks.length ?? 0} {t("tasks")} · {selectedWorkflow?.checks.length ?? 0} {t("checks")}
+            </span>
+          </header>
+          {selectedWorkflow?.warning ? (
+            <div className="workflow-empty workflow-warning">{selectedWorkflow.warning}</div>
+          ) : !selectedWorkflow?.available || (
+            !selectedWorkflow.tasks.length && !selectedWorkflow.checks.length && !selectedWorkflow.checkpoints.length && !selectedWorkflow.reviews.length && !selectedWorkflow.approvals.length && !selectedWorkflow.worktrees.length
+          ) ? (
+            <div className="workflow-empty">{t("No workflow activity yet.")}</div>
+          ) : (
+            <div className="workflow-list">
+              {selectedWorkflow.approvals.filter((item) => item.status === "pending").map((approval) => (
+                <div className="workflow-row approval-row" key={approval.approval_id} title={approval.arguments}>
+                  <span className="workflow-badge pending">{t("Approval")}</span>
+                  <span className="workflow-copy"><strong>{approval.reason}</strong><small>{approval.tool_name} · {approval.permission}</small></span>
+                  <span className="approval-actions">
+                    <button type="button" disabled={busyId === approval.approval_id} onClick={() => void decideApproval(approval.approval_id, false)}>{t("Deny")}</button>
+                    <button className="approve" type="button" disabled={busyId === approval.approval_id} onClick={() => void decideApproval(approval.approval_id, true)}>{t("Approve")}</button>
+                  </span>
+                </div>
+              ))}
+              {selectedWorkflow.worktrees.filter((item) => !profiles.some((profile) => profile.path === item.path)).map((worktree) => (
+                <div className="workflow-row approval-row" key={worktree.worktree_id} title={worktree.path}>
+                  <span className="workflow-badge checkpoint">{t("Worktree")}</span>
+                  <span className="workflow-copy"><strong>{worktree.worktree_id}</strong><small>{t("Isolated workspace")}</small></span>
+                  <span className="approval-actions">
+                    <button className="approve" type="button" disabled={busyId === worktree.path} onClick={() => void addManagedWorktree(worktree.path)}>{t("Add")}</button>
+                  </span>
+                </div>
+              ))}
+              {selectedWorkflow.tasks.slice(0, 3).map((task) => (
+                <div className="workflow-row" key={task.task_id} title={task.task_id}>
+                  <span className={`workflow-badge ${task.status}`}>{t("Task")}</span>
+                  <span className="workflow-copy"><strong>{task.title}</strong><small>{task.status} · r{task.revision}{task.plan_total ? ` · ${task.plan_completed}/${task.plan_total} ${t("steps")}` : ""}</small></span>
+                </div>
+              ))}
+              {selectedWorkflow.checks.slice(0, 2).map((check) => (
+                <div className="workflow-row" key={check.check_run_id} title={check.check_run_id}>
+                  <span className={`workflow-badge ${check.status}`}>{t("Check")}</span>
+                  <span className="workflow-copy"><strong>{check.check_id}</strong><small>{check.status}</small></span>
+                </div>
+              ))}
+              {selectedWorkflow.checkpoints.slice(0, 2).map((checkpoint) => (
+                <div className="workflow-row" key={checkpoint.checkpoint_id} title={checkpoint.checkpoint_id}>
+                  <span className="workflow-badge checkpoint">{t("Checkpoint")}</span>
+                  <span className="workflow-copy"><strong>{checkpoint.label}</strong><small>{checkpoint.file_count} {t("files")}</small></span>
+                </div>
+              ))}
+              {selectedWorkflow.reviews.slice(0, 2).map((review) => (
+                <div className="workflow-row" key={review.review_id} title={review.review_id}>
+                  <span className={`workflow-badge ${review.status}`}>{t("Review")}</span>
+                  <span className="workflow-copy"><strong>{review.status}</strong><small>{review.finding_count} {t("findings")}</small></span>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
 
       <footer className="panel-footer">
         <span><CheckIcon />{t("Local only")}</span>

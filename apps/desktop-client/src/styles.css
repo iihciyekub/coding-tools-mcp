@@ -367,7 +367,7 @@ button:disabled { cursor: default; opacity: .38; }
 
 .workspace-list {
   display: flex;
-  max-height: 454px;
+  max-height: 260px;
   flex-direction: column;
   overflow-y: auto;
 }
@@ -439,6 +439,79 @@ button:disabled { cursor: default; opacity: .38; }
 .delete-action.confirming .stroke-icon,
 .delete-action.confirming .fa-icon { width: 12px; height: 12px; }
 .empty-list { padding: 18px 8px 20px; color: var(--panel-muted); text-align: center; font-size: 10px; }
+
+.workflow-section {
+  padding: 5px 10px 7px;
+  border-top: 1px solid var(--panel-line);
+}
+
+.workflow-counts {
+  font-size: 8px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.workflow-list {
+  max-height: 190px;
+  overflow-y: auto;
+}
+
+.workflow-row {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 7px;
+  align-items: center;
+  min-height: 35px;
+  padding: 4px 3px;
+  border-bottom: 1px solid var(--panel-line);
+}
+
+.workflow-row:last-child { border-bottom: 0; }
+
+.workflow-badge {
+  overflow: hidden;
+  padding: 3px 5px;
+  color: var(--panel-muted);
+  border-radius: 5px;
+  background: var(--panel-faint);
+  font-size: 8px;
+  font-weight: 700;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workflow-badge.completed,
+.workflow-badge.passed { color: var(--panel-success); }
+.workflow-badge.failed,
+.workflow-badge.blocked { color: var(--panel-danger); }
+
+.workflow-copy { min-width: 0; }
+.workflow-copy strong,
+.workflow-copy small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workflow-copy strong { font-size: 9px; font-weight: 650; }
+.workflow-copy small { margin-top: 2px; color: var(--panel-muted); font-size: 8px; }
+.approval-row { align-items: center; }
+.approval-actions { display: flex; gap: 4px; margin-left: auto; }
+.approval-actions button {
+  border: 1px solid var(--panel-border);
+  border-radius: 5px;
+  padding: 3px 6px;
+  color: var(--panel-muted);
+  background: transparent;
+  font-size: 8px;
+  cursor: pointer;
+}
+.approval-actions button.approve { color: var(--panel-success); }
+.approval-actions button:disabled { cursor: wait; opacity: 0.55; }
+.workflow-empty { padding: 8px 3px; color: var(--panel-muted); font-size: 9px; }
+.workflow-warning { color: var(--panel-danger); }
 
 .panel-footer {
   position: relative;

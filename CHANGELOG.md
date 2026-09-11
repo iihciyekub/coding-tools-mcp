@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.8 - 2026-09-11
+
+- Desktop 0.3.19 aligns its native menu-bar Resources menu with the panel by adding the existing **Repair uv & cloudflared** action, while keeping the individual uv and cloudflared repair entries.
+- Removed a stale desktop IPC call to the nonexistent `set_panel_auto_hide_suspended` command from the Add Workspace flow, eliminating an unknown-command failure without adding an unused window-state subsystem.
+- Added the workflow/runtime upgrades completed since 0.3.7: durable checks/tasks/checkpoints/reviews/approvals, structured Git/worktrees, protocol Tasks for long-running checks, managed browser downloads and event watches, and Rust LSP support with Cargo-subproject root detection and honest rust-analyzer availability checks.
+
 ## 0.3.7 - 2026-09-09
 
 - Desktop 0.3.18 can bootstrap pinned, SHA-256-verified `uv` 0.11.28 and `cloudflared` 2026.8.3 into its private application-data directory. Workspace startup automatically fills either missing prerequisite on macOS; the Resources menu also provides explicit install/repair actions without modifying Homebrew or system Python.

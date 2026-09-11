@@ -15,6 +15,9 @@ API.
 - Secrets stored in the operating-system keychain
 - English and Simplified Chinese UI
 - Native process-group cleanup when the app exits
+- Project context, checks/evidence, tasks, checkpoints, LSP, structured Git,
+  reviews, approvals, managed-worktree registration, and extended browser
+  actions are enabled for desktop-launched runtimes
 
 The first launch imports the previous PySide client's `profiles.json`. Legacy
 `secrets.json` values are moved into the system keychain and the plaintext file
@@ -77,7 +80,7 @@ after preparation. Old versioned environments are retained so existing Native
 Messaging registrations remain valid; they are not included in app updates.
 
 For Cloudflare Quick Tunnel profiles, a missing `cloudflared` is handled the same
-way on macOS: Desktop 0.3.18 downloads the pinned, SHA-256-verified release into
+way on macOS: Desktop 0.3.19 downloads the pinned, SHA-256-verified release into
 the app-owned tools directory. The panel and native menu-bar **Resources** menu
 now separate the two concepts clearly: **Prepare runtime** installs/verifies the
 private Python + locked Python dependencies (including Playwright), **Repair
@@ -91,7 +94,7 @@ launcher pinned to the current interpreter/import root for module-only installs.
 After switching Python environments, run `chrome_extension_install` again to
 refresh Chrome's registration.
 
-Desktop 0.3.18 also exposes dependency readiness in both the panel and native
+Desktop 0.3.19 also exposes dependency readiness in both the panel and native
 menu-bar Resources menu: MCP Runtime/core version, Playwright/version, uv,
 cloudflared, App Helper, installed Chrome, Chrome CDP availability, Native
 Messaging manifest/bridge connection, Accessibility permission and Screen

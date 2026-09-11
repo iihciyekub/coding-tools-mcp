@@ -24,16 +24,21 @@ below. Unless that switch is set, the annotations in this document are what
 
 ## Two protocol eras, one server
 
-Both eras are served by the one runtime that owns the workspace, and neither
-leaves state behind. Which era a request belongs to is decided by the request
-alone: a `params._meta` carrying `io.modelcontextprotocol/protocolVersion` is a
+Both eras are served by the one runtime that owns the workspace, and protocol
+negotiation leaves no hidden transport session behind. Workflow-enabled modern
+requests may explicitly create durable protocol Task records, addressed by
+unguessable `taskId`; that application state is not session state. Which era a
+request belongs to is decided by the request alone: a `params._meta` carrying
+`io.modelcontextprotocol/protocolVersion` is a
 `2026-07-28` request, and everything else is a handshake-era one. A legacy
 `_meta` such as `progressToken` does not make a request modern, and `initialize`
 is always the handshake, whatever `_meta` it carries.
 
-The only advertised server capability is stable tools with `listChanged: false`,
-in both eras. Logging, resources, prompts, sampling, and elicitation are not
-advertised.
+Stable tools with `listChanged: false` are advertised in both eras. When the
+workflow toolset is enabled, modern `server/discover` additionally advertises
+`extensions.io.modelcontextprotocol/tasks: {}`. The handshake era never
+advertises the incompatible 2025 experimental Tasks capability. Logging,
+resources, prompts, sampling, and elicitation are not advertised.
 
 ### The handshake era
 
@@ -55,7 +60,10 @@ advertised.
 
 A request states its own protocol version, so it needs no handshake and may
 call `server/discover`, `ping`, `tools/list`, and `tools/call` immediately.
-`notifications/cancelled` is accepted here as well. Its `params._meta` carries:
+Workflow-enabled runtimes also accept `tasks/get`, `tasks/update`, and
+`tasks/cancel` for requests that declare the Tasks extension in their current
+client capabilities. `notifications/cancelled` is accepted here as well. Its
+`params._meta` carries:
 
 | `_meta` key | Required | Value |
 | --- | --- | --- |
@@ -83,10 +91,11 @@ SEP-2243 requires, so a gateway can route it without reading the body:
 - `MCP-Protocol-Version` repeats the `_meta` protocol version.
 - `Mcp-Method` repeats the JSON-RPC method, on notifications too.
 - `Mcp-Name` repeats the subject of the methods that name one: `params.name`
-  for `tools/call` and `prompts/get`, `params.uri` for `resources/read`. A
+  for `tools/call` and `prompts/get`, `params.uri` for `resources/read`, and
+  `params.taskId` for `tasks/get`, `tasks/update`, and `tasks/cancel`. A
   value that cannot travel as an HTTP field is wrapped as
   `=?base64?<base64 of the UTF-8 value>?=`, whose payload may not exceed 8192
-  characters. No other method takes this header, `server/discover` included.
+  characters. `server/discover` does not take this header.
 
 Each of the three headers may appear exactly once. A gateway routes on them
 alone, and which of two values it would read is its own business, so a request
@@ -106,7 +115,10 @@ instructions:
 ```json
 {
   "supportedVersions": ["2026-07-28"],
-  "capabilities": {"tools": {"listChanged": false}},
+  "capabilities": {
+    "tools": {"listChanged": false},
+    "extensions": {"io.modelcontextprotocol/tasks": {}}
+  },
   "instructions": "...",
   "resultType": "complete",
   "ttlMs": 0,
@@ -115,12 +127,13 @@ instructions:
     "io.modelcontextprotocol/serverInfo": {
       "name": "coding-tools-mcp",
       "title": "Coding Tools MCP",
-      "version": "0.3.6"
+      "version": "0.3.8"
     }
   }
 }
 ```
 
+The `extensions` member above is present only when workflow tools are enabled.
 `supportedVersions` lists the modern versions only. The handshake versions are
 negotiated by `initialize` and are not accepted in `_meta`, so naming one here
 would invite a client to retry a version that cannot work.
@@ -132,7 +145,7 @@ for a method this server does not implement in that era, and is answered with
 
 ### Result encoding
 
-A `2026-07-28` result carries `resultType: "complete"` and an
+A normal `2026-07-28` result carries `resultType: "complete"` and an
 `_meta.io.modelcontextprotocol/serverInfo` naming this server. The results
 whose content a client might be tempted to keep — `tools/list` and
 `server/discover` — also carry `ttlMs: 0` and `cacheScope: "private"` on the
@@ -141,7 +154,48 @@ served under, and the discover instructions quote the workspace's own
 instruction files, so the conservative defaults are the correct ones: never
 shared, never reused. A tool result that failed still reports
 `resultType: "complete"` with `isError: true`; the envelope was complete, the
-tool was not.
+tool was not. A Task-augmented `tools/call` is the one supported exception:
+its creation response retains `resultType: "task"` so a client can distinguish
+the durable handle from a final tool result.
+
+### `io.modelcontextprotocol/tasks`
+
+This extension is exposed only by the workflow-enhanced `2026-07-28` runtime.
+It is deliberately separate from the product-level `task_create/get/list/...`
+tools: protocol Tasks represent deferred completion of one MCP request, while
+workflow tasks represent a developer's persistent plan and evidence history.
+
+The first task-augmented operation is `checks_run`. If a Tasks-capable client
+calls it and the discovered check has already completed by the time the tool
+returns, it receives the normal `CallToolResult`. If the check is still
+`running`, the server first persists a protocol Task bound to its durable
+`check_run_id`, then returns a `CreateTaskResult` with `resultType: "task"`, an
+unguessable 128-bit `taskId`, status `working`, `ttlMs: null`, and a suggested
+1000 ms poll interval. Approval ids are not copied into the protocol Task's
+stored argument summary.
+
+`tasks/get` refreshes a working Task from the persisted check evidence. While
+the command is retained it reports `working`; when the check becomes
+`passed`, `failed`, or `unknown`, the protocol Task becomes `completed` and
+stores a final `CallToolResult` under `result`. A failed test/check remains a
+completed protocol Task rather than a protocol failure, because check failure
+is a tool-domain result. After Runtime restart, a taskId still resolves from
+SQLite; if its backing command was interrupted, the existing check evidence
+mechanism resolves it honestly as `unknown` rather than inventing completion.
+
+`tasks/update` accepts an `inputResponses` object and acknowledges it. The
+current task-augmented operation never enters `input_required`, so all response
+keys are unknown/already-satisfied and are ignored as the extension permits.
+`tasks/cancel` is cooperative: for a running backing check it invokes the
+existing bounded command termination path and records `cancelled` only when the
+process was actually terminated/killed. It never uses
+`notifications/cancelled` as task cancellation. There is no `tasks/list`.
+
+Every `tasks/get/update/cancel` request must declare
+`io.modelcontextprotocol/tasks` in that request's client capability extensions;
+otherwise it fails with the extension-defined `-32003` Missing Required Client
+Capability. A missing or unknown `taskId` is `-32602`. Over Streamable HTTP,
+`Mcp-Name` must exactly mirror the `taskId`.
 
 ### Errors and HTTP statuses
 
@@ -150,6 +204,7 @@ tool was not.
 | `-32600` | invalid request envelope | `200`, in either era |
 | `-32601` | unknown method | `404` |
 | `-32602` | invalid params, including a missing or mistyped required `_meta` field | `400` |
+| `-32003` | Tasks extension request without the required per-request client extension capability | `400` |
 | `-32020` | headers do not mirror the body: missing, duplicated, or contradicting it | `400` |
 | `-32022` | `_meta` names a protocol version this server does not speak; `data.supported` lists the modern versions only | `400` |
 | `-32603` | unexpected server failure | `200` |
@@ -293,7 +348,7 @@ Retry: This command_id has expired or never existed; …
 Known tool error codes include:
 
 ```json
-["ABSOLUTE_PATH_DENIED", "ACCESSIBILITY_PERMISSION_REQUIRED", "APP_CONTROL_ERROR", "APP_HELPER_ERROR", "BINARY_FILE", "BROWSER_ERROR", "BROWSER_TIMEOUT", "CHROME_EXTENSION_ERROR", "CHROME_EXTENSION_UNAVAILABLE", "COMMAND_CLOSED", "COMMAND_LIMIT_REACHED", "COMMAND_NOT_FOUND", "ELICITATION_UNSUPPORTED", "GIT_ERROR", "INTERNAL_ERROR", "INVALID_ARGUMENT", "IS_DIRECTORY", "NOT_A_DIRECTORY", "NOT_FOUND", "OPERATION_CONFLICT", "OPERATION_NOT_FOUND", "OPERATION_PENDING", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_UNAVAILABLE", "SCREEN_RECORDING_PERMISSION_REQUIRED", "SYMLINK_ESCAPE", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING", "UNSUPPORTED_PLATFORM"]
+["ABSOLUTE_PATH_DENIED", "ACCESSIBILITY_PERMISSION_REQUIRED", "APPROVAL_EXPIRED", "APPROVAL_NOT_FOUND", "APPROVAL_NOT_USABLE", "APPROVAL_SCOPE_MISMATCH", "APP_CONTROL_ERROR", "APP_HELPER_ERROR", "BINARY_FILE", "BROWSER_DOWNLOAD_NOT_FOUND", "BROWSER_DOWNLOAD_TOO_LARGE", "BROWSER_DOWNLOAD_UNAVAILABLE", "BROWSER_ERROR", "BROWSER_TIMEOUT", "BROWSER_WATCH_NOT_FOUND", "CHECKPOINT_CONFLICT", "CHECKPOINT_NOT_FOUND", "CHECKPOINT_SCOPE_INVALID", "CHECKPOINT_TOO_LARGE", "CHECK_NOT_FOUND", "CHECK_RUN_NOT_FOUND", "CHROME_EXTENSION_ERROR", "CHROME_EXTENSION_UNAVAILABLE", "COMMAND_CLOSED", "COMMAND_LIMIT_REACHED", "COMMAND_NOT_FOUND", "ELICITATION_UNSUPPORTED", "GIT_COMMIT_SCOPE_MISMATCH", "GIT_ERROR", "GIT_NOT_REPOSITORY", "GIT_PATH_SCOPE_REQUIRED", "GIT_STATE_CONFLICT", "GIT_WORKTREE_DIRTY", "GIT_WORKTREE_EXISTS", "GIT_WORKTREE_NOT_FOUND", "INTERNAL_ERROR", "INVALID_ARGUMENT", "INVALID_GIT_BRANCH", "INVALID_TASK_TRANSITION", "IS_DIRECTORY", "LSP_EDIT_TOO_LARGE", "LSP_EDIT_UNSUPPORTED", "LSP_ERROR", "LSP_EXITED", "LSP_LANGUAGE_UNSUPPORTED", "LSP_PATH_OUTSIDE_WORKSPACE", "LSP_TIMEOUT", "LSP_UNAVAILABLE", "NOT_A_DIRECTORY", "NOT_FOUND", "OPERATION_CONFLICT", "OPERATION_NOT_FOUND", "OPERATION_PENDING", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "PROTOCOL_TASK_NOT_FOUND", "REVIEW_CONFLICT", "REVIEW_NOT_FOUND", "REVIEW_TOO_LARGE", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_UNAVAILABLE", "SCREEN_RECORDING_PERMISSION_REQUIRED", "SYMLINK_ESCAPE", "TASK_CONFLICT", "TASK_NOT_FOUND", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING", "UNSUPPORTED_PLATFORM", "WORKFLOW_STORE_ERROR"]
 ```
 
 Error categories are `validation`, `security`, `permission`, `runtime`,
@@ -301,8 +356,10 @@ Error categories are `validation`, `security`, `permission`, `runtime`,
 
 Malformed JSON-RPC uses standard protocol errors: parse `-32700`, invalid
 request `-32600`, unknown method `-32601`, invalid params/tool `-32602`, and
-unexpected server failure `-32603`. The two codes the modern era adds are
-`-32020` and `-32022`, described above.
+unexpected server failure `-32603`. The base modern era adds `-32020` and
+`-32022`; the opt-in Tasks extension additionally uses `-32003`, described
+above. `PROTOCOL_TASK_NOT_FOUND` is an internal workflow-store code that the
+protocol adapter always translates to `-32602` before it reaches a Tasks client.
 
 ## Command lifecycle
 
@@ -371,8 +428,10 @@ remain short-lived and process-local. Forwarded headers are ignored unless
 ## Stable tool inventory
 
 The default catalog has 51 tools, including `view_image`. Setting
-`CODING_TOOLS_MCP_ENABLE_VIEW_IMAGE=0` is the sole installation capability gate
-and removes only that optional binary-content tool. It is not a tool profile.
+`CODING_TOOLS_MCP_ENABLE_VIEW_IMAGE=0` removes that optional binary-content
+tool. `--enable-workflow-tools` adds the 53 tools specified in the opt-in
+workflow section. Both selections are fixed at startup; the runtime does not
+emit dynamic tool-list changes.
 
 Each definition below lists the live input property names and annotations. The
 authoritative JSON Schemas are returned by `tools/list` and checked for drift in
@@ -455,7 +514,7 @@ Supports `*** Add File`, `*** Update File`, `*** Delete File`, and
 
 ### exec_command
 
-Inputs: `"cmd"`, `"operation_id"`, `"workdir"`, `"cwd"`, `"timeout_ms"`, `"yield_time_ms"`, `"max_output_bytes"`, `"verbosity"`, `"preview_bytes"`, `"stdin"`, `"tty"`, `"env"`.
+Inputs: `"cmd"`, `"approval_ids"`, `"operation_id"`, `"workdir"`, `"cwd"`, `"timeout_ms"`, `"yield_time_ms"`, `"max_output_bytes"`, `"verbosity"`, `"preview_bytes"`, `"stdin"`, `"tty"`, `"env"`.
 
 Annotations: `{"title":"Execute command","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
 
@@ -568,11 +627,15 @@ Annotations: `{"title":"Git blame","readOnlyHint":true,"destructiveHint":false,"
 
 Inputs: `"tool_name"`, `"permission"`, `"reason"`, `"arguments"`, `"scope"`, `"ttl_seconds"`.
 
-Annotations: `{"title":"Request permissions","readOnlyHint":true,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false}`.
+Annotations: `{"title":"Request permissions","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
 
-The current server does not advertise MCP elicitation. This tool therefore
-returns `ELICITATION_UNSUPPORTED`, except that dangerous and host modes report
-the operator's explicit auto-grant policy. It never silently escalates safe mode.
+When workflow tools are enabled in safe or trusted mode, this creates an
+expiring `pending` request bound to the exact tool name and arguments. The local
+Desktop app is the trusted decision channel. An approved request is consumed by
+one matching call and cannot be replayed. Without workflow tools, this returns
+`ELICITATION_UNSUPPORTED`. Dangerous and host modes continue to report the
+operator's explicit startup-time auto-grant policy. The accepted durable scope
+is `once`; session-wide escalation is rejected.
 
 ### view_image
 
@@ -648,11 +711,13 @@ request indefinitely.
 
 ### browser_click
 
-Inputs: `"selector"`, `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`.
+Inputs: `"selector"`, `"dialog_action"`, `"dialog_text"`, `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`.
 
 Annotations: `{"title":"Browser click","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
 
-Clicks the first element matching the supplied Playwright selector.
+Clicks the first element matching the supplied Playwright selector. Optional
+dialog handling is registered before the click and can accept, dismiss, or
+supply prompt text without leaving the page blocked.
 
 ### browser_type
 
@@ -663,6 +728,157 @@ Annotations: `{"title":"Browser type","readOnlyHint":false,"destructiveHint":tru
 By default fills the first matching element, replacing its current value. With
 `clear=false`, it types sequentially and optionally applies `delay_ms` between
 characters.
+
+### browser_navigate
+
+Inputs: `"url"`, `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`, `"wait_until"`.
+
+Annotations: `{"title":"Browser navigate","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Navigates the selected tab to an HTTP(S) URL and returns the resulting tab and
+response status when available.
+
+### browser_back
+
+Inputs: `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`, `"wait_until"`.
+
+Annotations: `{"title":"Browser back","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Moves the selected tab back once and reports whether a history entry existed.
+
+### browser_reload
+
+Inputs: `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`, `"wait_until"`.
+
+Annotations: `{"title":"Browser reload","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Reloads the selected tab with a bounded Playwright load-state wait.
+
+### browser_hover
+
+Inputs: `"selector"`, `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`.
+
+Annotations: `{"title":"Browser hover","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Hovers the first matching element so menus and hover-driven UI can be operated.
+
+### browser_select
+
+Inputs: `"selector"`, `"values"`, `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`.
+
+Annotations: `{"title":"Browser select","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Selects one or more option values on the first matching native select control.
+
+### browser_press
+
+Inputs: `"key"`, `"selector"`, `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`.
+
+Annotations: `{"title":"Browser press","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Sends a Playwright key or key chord to a matched element or the active page.
+
+### browser_upload
+
+Inputs: `"selector"`, `"paths"`, `"download_ids"`, `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`.
+
+Annotations: `{"title":"Browser upload","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Attaches up to 32 files to the first matching file input. Inputs may be explicit
+workspace-confined paths or `download_id` values returned by `browser_download`.
+Direct host paths and unmanaged runtime files are rejected. Managed downloads
+expire with the runtime instance and are not silently copied into the workspace.
+
+### browser_download
+
+Inputs: `"selector"`, `"url"`, `"filename"`, `"max_bytes"`, `"endpoint"`,
+`"tab_index"`, `"tab_id"`, `"timeout_ms"`.
+
+Annotations: `{"title":"Browser download","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Requires exactly one of `selector` or `url`. A selector must identify an element
+with an `href`; relative URLs are resolved against the selected page. The final
+resource must be HTTP(S). The runtime asks Chrome to load the resource through
+the selected tab's CDP network context with credentials enabled, receives a CDP
+stream, and writes it incrementally into the runtime-private `browser-downloads`
+area. The browser's native Downloads UI and its unreliable default-context
+Playwright download events are not used.
+
+`max_bytes` defaults to 64 MiB and is capped by schema at 256 MiB. A declared
+`Content-Length` above the limit is rejected before streaming; an undeclared or
+incorrect length is still enforced while reading. Partial files are removed on
+failure. A successful result returns a random `download_id`, filename, byte
+count, SHA-256, source URL, HTTP status, content type, and managed path. The
+managed file can be reused by `browser_upload` with its `download_id`.
+
+### browser_watch_start
+
+Inputs: `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`,
+`"max_entries"`, `"dialog_action"`, `"dialog_text"`.
+
+Annotations: `{"title":"Start browser watch","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Starts one background Playwright/CDP attachment owned by the current Runtime and
+selected tab. The worker continuously services Playwright so console, page-error,
+failed-request, dialog, and popup events remain observable across later MCP tool
+calls. Events receive monotonically increasing `seq` values and Unix timestamps.
+The retained deque is bounded by `max_entries` (default 1000, maximum 10000);
+old entries are dropped rather than growing memory without bound.
+
+The watch installs a dialog handler for its whole lifetime and is therefore
+mutating: dialogs are dismissed by default or accepted when configured. The
+watch is process-local. It is not stored in the workflow database, does not
+survive Runtime restart, and never closes the user's Chrome when stopped.
+
+### browser_watch_poll
+
+Inputs: `"watch_id"`, `"after_seq"`, `"max_entries"`, `"wait_ms"`.
+
+Annotations: `{"title":"Poll browser watch","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
+
+Returns retained events with `seq > after_seq`, up to `max_entries`. `wait_ms`
+optionally waits until at least one new event arrives, the watch stops/fails, or
+the bounded deadline expires. `next_after_seq` is the continuation cursor.
+`dropped_since_cursor` and `dropped_total` disclose buffer loss; `truncated`
+also becomes true when more retained events remain than the current result cap.
+Unknown or previous-runtime ids return `BROWSER_WATCH_NOT_FOUND`.
+
+### browser_watch_stop
+
+Inputs: `"watch_id"`.
+
+Annotations: `{"title":"Stop browser watch","readOnlyHint":false,"destructiveHint":true,"idempotentHint":true,"openWorldHint":true}`.
+
+Signals the watch worker to stop and waits briefly for the dedicated attachment
+thread to exit. Repeating stop for the same retained watch is safe. Runtime
+shutdown stops all remaining watches before command-manager cleanup.
+
+### browser_wait
+
+Inputs: `"selector"`, `"url"`, `"text"`, `"exact"`, `"state"`, `"wait_ms"`, `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`.
+
+Annotations: `{"title":"Browser wait","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
+
+Waits for any supplied selector, URL pattern, text, and bounded delay in order.
+At least one condition is required; unmet conditions return `BROWSER_TIMEOUT`.
+
+### browser_events
+
+Inputs: `"trigger_selector"`, `"endpoint"`, `"tab_index"`, `"tab_id"`,
+`"timeout_ms"`, `"wait_ms"`, `"max_entries"`, `"reload"`,
+`"dialog_action"`, `"dialog_text"`.
+
+Annotations: `{"title":"Capture browser events","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Samples bounded console, page-error, failed-request, dialog, and popup
+events emitted after the Playwright attachment. When `trigger_selector` is
+provided, listeners are installed before the first matching element is clicked,
+so click-triggered dialogs and new windows can be observed without a cross-call
+race. `dialog_action` controls any dialog seen during the sample.
+This tool is a bounded one-call sample, not a persistent browser subscription;
+events that happened before attachment are not recoverable. Native browser
+download events are still not claimed here; use `browser_download` for bounded,
+managed resource retrieval instead.
 
 ### browser_console
 
@@ -897,6 +1113,354 @@ Annotations: `{"title":"App screenshot","readOnlyHint":true,"destructiveHint":fa
 Captures the Accessibility bounds of one app window as PNG. The image is
 returned once as MCP image content with metadata-only structured content.
 macOS Screen Recording permission may be required in addition to Accessibility.
+
+## Opt-in workflow toolset
+
+The tools in this section are exposed only when the server starts with
+`--enable-workflow-tools` (or `CODING_TOOLS_MCP_ENABLE_WORKFLOW_TOOLS=1`). The
+selection remains fixed for the lifetime of the runtime and `listChanged` stays
+`false`. Persistent state is stored outside the workspace in the platform
+application-state directory, or under `--state-root`; it is partitioned by a
+hash of the canonical workspace path. A task id does not create a new transport
+session or client trust boundary.
+
+### workspace_overview
+
+Inputs: `"max_files"`.
+
+Returns bounded manifest, language, entry-point, top-level area, and project
+instruction metadata. `scan_complete` and `truncated` disclose coverage.
+
+### repo_map
+
+Inputs: `"path"`, `"query"`, `"max_files"`, `"max_symbols"`.
+
+Returns bounded code symbols grouped by file. `coverage` identifies the current
+Python-AST and language-pattern implementation; this tool does not claim LSP
+reference or call-graph semantics.
+
+### project_instructions
+
+Inputs: `"path"`.
+
+Returns root and nested `AGENTS.md`/`CLAUDE.md` files whose directory scope
+contains the selected path, ordered from broad to narrow scope.
+
+### skills_list
+
+Inputs: `"max_results"`.
+
+Lists metadata and content hashes for UTF-8 workspace
+`.agents/skills/**/SKILL.md` entries. Listing or reading a Skill never executes
+its scripts and cannot raise runtime permissions.
+
+### skills_read
+
+Inputs: `"path"`.
+
+Reads one selected workspace Skill, with a 128 KiB limit and workspace/symlink
+confinement.
+
+### checks_discover
+
+Inputs: `"path"`.
+
+Discovers bounded test, lint, typecheck, aggregate, and build commands from
+recognized project files without executing them.
+
+### checks_run
+
+Inputs: `"check_id"`, `"path"`, `"task_id"`, `"operation_id"`, `"timeout_ms"`,
+`"yield_time_ms"`, `"max_output_bytes"`, `"approval_ids"`.
+
+Re-discovers the requested check and runs its exact command through the existing
+`exec_command` policy and command manager. Unknown or removed checks return
+`CHECK_NOT_FOUND`; command handles and retry deduplication keep their existing
+semantics.
+
+Completed and running checks receive a persistent `check_run_id`. When
+`task_id` is supplied, the run is also appended to that task's event history.
+The evidence records bounded output and code fingerprints before and after the
+command.
+
+### checks_result
+
+Inputs: `"check_run_id"`.
+
+Returns persisted check evidence. A retained running command is refreshed from
+the command manager; after a runtime restart an unresolvable running command is
+reported as `unknown`. `stale` is true when the current code fingerprint differs
+from the recorded post-check fingerprint. Unknown ids return
+`CHECK_RUN_NOT_FOUND`.
+
+### task_create
+
+Inputs: `"title"`, `"objective"`, `"details"`.
+
+Creates a persistent task in `pending` state at revision 1.
+
+### task_get
+
+Inputs: `"task_id"`.
+
+Returns one persistent task or `TASK_NOT_FOUND`.
+
+### task_list
+
+Inputs: `"status"`, `"max_results"`.
+
+Lists tasks by latest update, optionally filtered to a declared task status.
+
+### task_update
+
+Inputs: `"task_id"`, `"expected_revision"`, `"status"`, `"title"`,
+`"objective"`, `"details"`.
+
+Updates a task only when `expected_revision` is current. Concurrent updates
+return retryable `TASK_CONFLICT`; invalid state changes return
+`INVALID_TASK_TRANSITION`. Details are shallow-merged and the revision advances
+once.
+
+### task_event_add
+
+Inputs: `"task_id"`, `"event_type"`, `"message"`, `"details"`.
+
+Appends a progress, decision, evidence, note, blocked, or resumed event to one
+task. It does not change task status or revision.
+
+### task_events
+
+Inputs: `"task_id"`, `"max_results"`.
+
+Lists the most recent persistent events for a task. Task creation, updates,
+linked checks, and linked checkpoints also generate events automatically.
+
+### task_context
+
+Inputs: `"task_id"`, `"event_limit"`.
+
+Returns the task record together with recent events and linked check/checkpoint
+evidence so a client can resume after reconnecting or restarting the runtime.
+
+### task_plan_get
+
+Inputs: `"task_id"`.
+
+Annotations: `{"title":"Get task plan","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+Returns ordered plan steps and the current task revision.
+
+### task_plan_update
+
+Inputs: `"task_id"`, `"expected_revision"`, `"steps"`.
+
+Annotations: `{"title":"Update task plan","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
+
+Atomically replaces up to 100 ordered steps and advances the task revision.
+Step ids must be unique and at most one step may be `in_progress`. A concurrent
+task or plan update returns retryable `TASK_CONFLICT`.
+
+### checkpoint_create
+
+Inputs: `"paths"`, `"label"`, `"task_id"`.
+
+Snapshots 1-64 unique explicit UTF-8 regular-file paths, including their
+existence state and mode, up to 8 MiB total. It does not change HEAD, the index,
+or unlisted files. Directories, symlinks and unsupported content are rejected.
+When `task_id` is supplied, the checkpoint is linked through the task event log.
+
+### checkpoint_list
+
+Inputs: `"max_results"`.
+
+Lists checkpoint identity, label, optional HEAD, creation time, file count and
+stored byte count without returning file content.
+
+### checkpoint_diff
+
+Inputs: `"checkpoint_id"`.
+
+Compares every checkpointed path to the current workspace and returns per-file
+restore actions plus a `restore_token` bound to the checkpoint id and the exact
+current existence/digest/mode state.
+
+### checkpoint_restore
+
+Inputs: `"checkpoint_id"`, `"restore_token"`.
+
+Rechecks every path and rejects stale previews with retryable
+`CHECKPOINT_CONFLICT`. A current token restores the complete explicit scope
+through the existing atomic multi-file committer; files absent at checkpoint
+creation are deleted. Git index and external side effects are outside its scope.
+
+### git_branch_list
+
+Inputs: `"max_results"`.
+
+Lists local branches and returns the current `head` and `index_fingerprint`.
+Those values are concurrency tokens for every Git write tool.
+
+### git_branch_create
+
+Inputs: `"name"`, `"start_point"`, `"checkout"`, `"expected_head"`,
+`"expected_index_fingerprint"`.
+
+Validates the branch name with Git and creates a local branch only while HEAD
+and index match the reviewed state. Checkout is explicit and defaults to false.
+
+### git_conflicts
+
+Inputs: none.
+
+Lists unmerged paths and all index stages. It also returns current HEAD and
+index fingerprints and never resolves conflicts automatically.
+
+### git_stage
+
+Inputs: `"paths"`, `"expected_head"`, `"expected_index_fingerprint"`.
+
+Stages 1-200 unique explicit workspace paths. The workspace root is rejected,
+and stale HEAD/index values return retryable `GIT_STATE_CONFLICT`.
+
+### git_unstage
+
+Inputs: `"paths"`, `"expected_head"`, `"expected_index_fingerprint"`.
+
+Removes only the explicit paths from the index through `git restore --staged`.
+Working-tree content is preserved.
+
+### git_commit
+
+Inputs: `"paths"`, `"message"`, `"expected_head"`,
+`"expected_index_fingerprint"`.
+
+Commits only when the complete staged path set exactly equals `paths`; unrelated
+staged content returns `GIT_COMMIT_SCOPE_MISMATCH`. Hooks and configured signing
+may run and their failures are returned as `GIT_ERROR`. This tool does not push.
+
+### git_worktree_list
+
+Inputs: none.
+
+Annotations: `{"title":"List Git worktrees","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+Lists all repository worktrees and marks entries stored under this workspace's
+private workflow state as managed.
+
+### git_worktree_create
+
+Inputs: `"worktree_id"`, `"branch"`, `"create_branch"`, `"start_point"`,
+`"expected_head"`, `"expected_index_fingerprint"`.
+
+Annotations: `{"title":"Create Git worktree","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
+
+Creates an isolated checkout under private workflow state after HEAD and index
+concurrency checks. It can create a new branch or attach an existing branch and
+returns the absolute path so the Desktop app can register it as a workspace.
+
+### git_worktree_remove
+
+Inputs: `"worktree_id"`.
+
+Annotations: `{"title":"Remove Git worktree","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
+
+Removes only a runtime-managed worktree. Dirty or untracked content returns
+`GIT_WORKTREE_DIRTY`; the branch is always preserved.
+
+### lsp_status
+
+Inputs: none.
+
+Reports available/running Python, TypeScript/JavaScript, and Rust language-server
+backends, their commands and supported extensions. Rust uses `rust-analyzer` and
+is rooted at the nearest ancestor `Cargo.toml`; a rustup proxy without the actual
+component installed is reported unavailable. Backends start only when a semantic
+operation first needs them.
+
+### lsp_definition
+
+Inputs: `"path"`, `"line"`, `"column"`.
+
+Returns workspace-confined semantic definitions. Public input positions are
+one-based; requests use negotiated UTF-16 positions, and results identify that
+encoding explicitly.
+
+### lsp_references
+
+Inputs: `"path"`, `"line"`, `"column"`, `"include_declaration"`,
+`"max_results"`.
+
+Returns bounded semantic references and source-file SHA-256. Results beyond the
+limit set `truncated`.
+
+### lsp_diagnostics
+
+Inputs: `"path"`, `"wait_ms"`, `"max_results"`.
+
+Opens or refreshes the UTF-8 document and returns bounded diagnostics published
+by the language server. It does not label AST or text-search results as LSP.
+
+### lsp_rename_preview
+
+Inputs: `"path"`, `"line"`, `"column"`, `"new_name"`, `"max_files"`,
+`"max_edits"`.
+
+Returns text edits grouped by workspace path with each current file SHA-256.
+The tool never applies edits. Resource operations and paths outside the
+workspace are rejected; oversized previews return `LSP_EDIT_TOO_LARGE`.
+
+Python backend discovery tries `basedpyright-langserver`,
+`pyright-langserver`, then `pylsp`. TypeScript/JavaScript discovery tries
+`typescript-language-server`. Operators may set
+`CODING_TOOLS_MCP_PYTHON_LSP_COMMAND` or
+`CODING_TOOLS_MCP_TYPESCRIPT_LSP_COMMAND`. Missing backends return
+`LSP_UNAVAILABLE` while the existing `code_*` tools remain usable.
+
+### review_prepare
+
+Inputs: `"path"`, `"paths"`, `"task_id"`, `"staged"`, `"unstaged"`,
+`"max_bytes"`.
+
+Persists a bounded review snapshot containing Git status and diff, applicable
+project instructions, optional task evidence, and a code fingerprint. Preparing
+materials does not claim that an AI or human has reviewed them.
+
+### review_record
+
+Inputs: `"review_id"`, `"expected_revision"`, `"status"`, `"findings"`.
+
+Records up to 500 workspace-confined findings with path, line/end line,
+priority, title, body, and finding status. Revision mismatch returns retryable
+`REVIEW_CONFLICT`; the review status is `completed`, `changes_requested`, or
+`approved`.
+
+### review_get
+
+Inputs: `"review_id"`.
+
+Returns the immutable preparation snapshot and current recorded findings.
+`stale` becomes true when the current scoped code fingerprint differs from the
+prepared fingerprint. Unknown ids return `REVIEW_NOT_FOUND`.
+
+### approval_get
+
+Inputs: `"approval_id"`.
+
+Annotations: `{"title":"Get approval request","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+Returns one approval as `pending`, `approved`, `denied`, `expired`, or
+`consumed`. Reading an elapsed pending or approved request marks it expired.
+
+### approval_list
+
+Inputs: `"status"`, `"max_results"`.
+
+Annotations: `{"title":"List approval requests","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+Lists recent approvals with redacted display arguments. MCP clients cannot
+approve or deny requests; those mutations are restricted to the local Desktop
+app. Approved requests must match the exact tool arguments and every required
+permission, expire after their TTL, and are consumed atomically before use.
 
 ## Forbidden product-layer tools
 

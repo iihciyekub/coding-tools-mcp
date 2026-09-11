@@ -16,7 +16,7 @@ Coding Tools MCP is a **model-neutral coding runtime** served over the
 search, structured multi-file patches, command execution, interactive
 sessions, and git — one server that any MCP client can drive. Claude Desktop,
 Claude Code, Codex, Cursor, Cline, VS Code, Windsurf, Gemini CLI, or an agent
-you build yourself all get the same 18 battle-tested tools, workspace-confined
+you build yourself all get the same 51 default tools, workspace-confined
 by default and gated by explicit permission modes.
 
 [![Watch the demo](https://img.youtube.com/vi/N9lQaXt1eqQ/maxresdefault.jpg)](https://youtu.be/N9lQaXt1eqQ?si=LyEwvzzQF6QjUxR0)
@@ -32,9 +32,9 @@ by default and gated by explicit permission modes.
   destructive commands. On Linux, [Landlock](docs/security-boundary.md) adds
   kernel-level filesystem confinement. Explicit `host` mode opts command
   execution out of that boundary for full local development.
-- **It is model- and vendor-neutral.** A fixed, truthfully annotated catalog —
-  no profile switching, no annotation games. Swap models or clients freely;
-  the runtime and its behavior stay put.
+- **It is model- and vendor-neutral.** A truthfully annotated catalog with an
+  opt-in workflow extension. Swap models or clients freely; the runtime and
+  its behavior stay put.
 - **It is engineered for context windows.** Results are summarized, paginated,
   and capped by design; serialized tool-result bytes dropped 37%
   release-over-release on the deterministic dogfood workload with unchanged
@@ -67,6 +67,12 @@ if you prefer Node):
 ```
 
 Then ask your client: *"run the test suite and fix the first failure."*
+
+Add `--enable-workflow-tools` to expose project overview, repository map,
+workspace Skills, checks and evidence, persistent tasks, guarded checkpoints,
+semantic LSP queries, structured Git and managed worktrees, review records,
+desktop approvals, and extended browser actions. The desktop app enables this
+extension for the runtimes it starts.
 
 Prefer HTTP? Drop `--stdio` and the server speaks Streamable HTTP on
 `http://127.0.0.1:8765/mcp`. Both protocol eras are served on either

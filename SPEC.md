@@ -5,15 +5,17 @@ in [docs/runtime-contract-v0.3.md](docs/runtime-contract-v0.3.md).
 
 ## Product boundary
 
-The server exposes low-level coding primitives over MCP: inspect a workspace,
-apply structured patches, run and interact with commands, and inspect Git. It is
-not an agent wrapper and does not expose accounts, memory, cloud tasks, web
-search, model routing, plugins, image generation, or subagent orchestration.
+The server exposes coding primitives over MCP: inspect a workspace, apply
+structured patches, run and interact with commands, inspect Git, and optionally
+persist workspace-local task/checkpoint records. It is not an agent wrapper and
+does not expose accounts, personal memory, cloud tasks, web search, model
+routing, plugin installation, image generation, or subagent orchestration.
 
 ## Fixed tool model
 
-There is one stable catalog. The runtime has no tool profiles, no `edit_file`,
-no dynamic `tools/list_changed`, and no required `open_workspace` call.
+There is one stable default catalog and one opt-in workflow extension selected
+at process startup. The runtime has no dynamic `tools/list_changed`, no
+`edit_file`, and no required `open_workspace` call.
 `apply_patch` is the only direct file-write tool. `safe`, `trusted`, `dangerous`,
 and `host` are command permission policies and never alter `tools/list`.
 
@@ -38,7 +40,9 @@ The default catalog contains 51 tools:
   `app_screenshot`
 
 `view_image` can be disabled as an installation capability. All other tools are
-fixed.
+fixed by the selected startup configuration. `--enable-workflow-tools` adds 53
+project insight, Skills, checks, task, and checkpoint tools; see
+[tools and schemas](docs/tools-and-schemas.md) for their authoritative inventory.
 
 ## Protocol
 

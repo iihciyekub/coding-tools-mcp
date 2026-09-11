@@ -2,6 +2,7 @@ mod models;
 mod resource_installer;
 mod runtime;
 mod storage;
+mod workflow;
 
 use models::{LogBundle, RuntimeStatus, WorkspaceProfile};
 use resource_installer::managed_version;
@@ -13,6 +14,7 @@ use runtime::{
 };
 use serde::Serialize;
 use std::collections::HashMap;
+use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -23,6 +25,10 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use workflow::{
+    decide_approval as decide_workflow_approval, read_snapshot as read_workflow_snapshot,
+    WorkflowSnapshot,
+};
 
 const TRAY_ID: &str = "coding-tools-mcp";
 const WORKSPACE_NAME_MAX_CHARS: usize = 22;
@@ -38,6 +44,7 @@ struct DesktopSnapshot {
     profiles: Vec<WorkspaceProfile>,
     statuses: HashMap<String, RuntimeStatus>,
     dependencies: DependencyStatus,
+    workflow: HashMap<String, WorkflowSnapshot>,
 }
 
 #[tauri::command]
@@ -56,11 +63,48 @@ fn desktop_snapshot(state: tauri::State<'_, DesktopState>) -> Result<DesktopSnap
         .map(|profile| (profile.id.clone(), runtime.status(profile)))
         .collect();
     let dependencies = runtime.dependency_status();
+    let workflow_root = runtime.workflow_state_root();
+    drop(runtime);
+    let workflow = profiles
+        .iter()
+        .map(|profile| {
+            let snapshot = read_workflow_snapshot(&workflow_root, Path::new(&profile.path))
+                .unwrap_or_else(WorkflowSnapshot::failure);
+            (profile.id.clone(), snapshot)
+        })
+        .collect();
     Ok(DesktopSnapshot {
         profiles,
         statuses,
         dependencies,
+        workflow,
     })
+}
+
+#[tauri::command]
+fn decide_approval(
+    profile_id: String,
+    approval_id: String,
+    approved: bool,
+    state: tauri::State<'_, DesktopState>,
+) -> Result<(), String> {
+    let profile = state
+        .store
+        .lock()
+        .map_err(|_| "Profile store is unavailable.")?
+        .get(&profile_id)
+        .ok_or("Workspace profile was not found.")?;
+    let workflow_root = state
+        .runtime
+        .lock()
+        .map_err(|_| "Runtime manager is unavailable.")?
+        .workflow_state_root();
+    decide_workflow_approval(
+        &workflow_root,
+        Path::new(&profile.path),
+        &approval_id,
+        approved,
+    )
 }
 
 #[tauri::command]
@@ -843,6 +887,15 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
     resources.append(&screen_recording).map_err(menu_error)?;
     let separator = PredefinedMenuItem::separator(app).map_err(menu_error)?;
     resources.append(&separator).map_err(menu_error)?;
+    let repair_dependencies = MenuItem::with_id(
+        app,
+        "resource:repair-dependencies",
+        "Repair uv & cloudflared…",
+        true,
+        None::<&str>,
+    )
+    .map_err(menu_error)?;
+    resources.append(&repair_dependencies).map_err(menu_error)?;
     let uv = MenuItem::with_id(
         app,
         "resource:uv",
@@ -1205,6 +1258,14 @@ fn handle_tray_menu_event(app: &AppHandle, id: &str) {
             }
             refresh_tray_menu_on_main(callback_app);
         });
+    } else if id == "resource:repair-dependencies" {
+        let callback_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = repair_dependencies(callback_app.clone()).await {
+                show_error(&callback_app, error);
+            }
+            refresh_tray_menu_on_main(callback_app);
+        });
     } else if id == "resource:uv" || id == "resource:cloudflared" {
         let target = id.trim_start_matches("resource:").to_string();
         let callback_app = app.clone();
@@ -1288,6 +1349,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             desktop_snapshot,
+            decide_approval,
             create_profile,
             save_profile,
             delete_profile,

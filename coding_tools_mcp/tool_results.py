@@ -384,6 +384,35 @@ def _render_browser_evaluate(payload: dict[str, Any]) -> str:
     return f"{tab}\nJavaScript result: {_bounded_json(payload.get('result'))}"
 
 
+def _render_browser_download(payload: dict[str, Any]) -> str:
+    tab = _render_browser_tab(payload)
+    filename = payload.get("filename") or "download"
+    size = payload.get("bytes", 0)
+    download_id = payload.get("download_id", "unknown")
+    digest = payload.get("sha256", "")
+    return f"{tab}\nDownloaded {filename} ({size} bytes); download_id={download_id}; sha256={digest}."
+
+
+def _render_browser_watch(payload: dict[str, Any]) -> str:
+    watch_id = payload.get("watch_id", "unknown")
+    status = payload.get("status", "unknown")
+    sections = [f"Browser watch {watch_id}: {status}."]
+    tab = _tab_summary(payload.get("tab"))
+    if tab:
+        sections.append(tab)
+    events = payload.get("events")
+    if isinstance(events, list):
+        if events:
+            sections.extend(_bounded_json(item, 1200) for item in events[:200])
+        else:
+            sections.append("No new watch events.")
+        if payload.get("truncated") or len(events) > 200:
+            sections.append("… watch events truncated; continue from next_after_seq.")
+    if payload.get("dropped_since_cursor"):
+        sections.append(f"Dropped before cursor: {payload['dropped_since_cursor']} event(s).")
+    return "\n".join(sections)
+
+
 def _render_event_list(payload: dict[str, Any]) -> str:
     if isinstance(payload.get("events"), list) and isinstance(payload.get("resources"), list):
         prefix = _render_browser_tab(payload)
@@ -455,6 +484,10 @@ def _render_git_status(payload: dict[str, Any]) -> str:
     raw_entries = payload.get("entries")
     entries = raw_entries if isinstance(raw_entries, list) else []
     lines = [f"## {branch}"]
+    if payload.get("head"):
+        lines.append(f"HEAD: {payload['head']}")
+    if payload.get("index_fingerprint"):
+        lines.append(f"Index fingerprint: {payload['index_fingerprint']}")
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -465,6 +498,46 @@ def _render_git_status(payload: dict[str, Any]) -> str:
         lines.append("Working tree clean.")
     if payload.get("truncated"):
         lines.append("… status entries truncated; narrow path or raise max_entries.")
+    return "\n".join(lines)
+
+
+def _render_git_workflow(payload: dict[str, Any]) -> str:
+    lines = [str(payload.get("summary") or "Git operation completed.")]
+    for key in ("head", "index_fingerprint", "commit"):
+        if payload.get(key):
+            lines.append(f"{key}: {payload[key]}")
+    for key in ("branches", "conflicts", "paths"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            lines.append(f"{key}: {_bounded_json(value, 16000)}")
+    return "\n".join(lines)
+
+
+def _render_lsp(payload: dict[str, Any]) -> str:
+    lines = [str(payload.get("summary") or "Language server operation completed.")]
+    for key in ("backends", "definitions", "references", "diagnostics", "changes"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            lines.append(f"{key}: {_bounded_json(value, 24000)}")
+    if payload.get("file_sha256"):
+        lines.append(f"file_sha256: {payload['file_sha256']}")
+    if payload.get("truncated"):
+        lines.append("… LSP results truncated; narrow the request or raise its limit.")
+    return "\n".join(lines)
+
+
+def _render_review(payload: dict[str, Any]) -> str:
+    lines = [str(payload.get("summary") or "Review operation completed.")]
+    lines.append(
+        f"review_id={payload.get('review_id', '')} revision={payload.get('revision', '')} "
+        f"status={payload.get('status', '')} stale={bool(payload.get('stale'))}"
+    )
+    findings = payload.get("findings")
+    if isinstance(findings, list) and findings:
+        lines.append(f"findings: {_bounded_json(findings, 24000)}")
+    snapshot = payload.get("snapshot")
+    if isinstance(snapshot, dict):
+        lines.append(f"snapshot: {_bounded_json(snapshot, 32000)}")
     return "\n".join(lines)
 
 
@@ -603,6 +676,151 @@ def _render_image(payload: dict[str, Any]) -> str:
     return f"Image: {payload.get('path', '')} ({payload.get('mime_type', 'unknown')}{dimensions})"
 
 
+def _render_workspace_overview(payload: dict[str, Any]) -> str:
+    lines = [str(payload.get("summary") or "Workspace overview.")]
+    for key in ("manifests", "languages", "top_level", "entrypoints"):
+        value = payload.get(key)
+        if isinstance(value, list) and value:
+            lines.append(f"{key}: {_bounded_json(value, 12000)}")
+    instructions = payload.get("instructions")
+    if isinstance(instructions, dict):
+        lines.append(f"instructions: {_bounded_json(instructions, 8000)}")
+    if payload.get("truncated"):
+        lines.append("… workspace scan truncated; raise max_files for broader coverage.")
+    return "\n".join(lines)
+
+
+def _render_repo_map(payload: dict[str, Any]) -> str:
+    lines = [str(payload.get("summary") or "Repository map.")]
+    files = payload.get("files")
+    if isinstance(files, list):
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            lines.append(str(item.get("path", "")))
+            symbols = item.get("symbols")
+            if isinstance(symbols, list):
+                for symbol in symbols:
+                    if isinstance(symbol, dict):
+                        lines.append(
+                            f"  {symbol.get('kind', 'symbol')} {symbol.get('qualified_name') or symbol.get('name', '')}"
+                            f" :{symbol.get('line', '?')} [{symbol.get('backend', 'unknown')}]"
+                        )
+    if payload.get("truncated"):
+        lines.append("… repository map truncated; narrow query/path or raise limits.")
+    return "\n".join(lines)
+
+
+def _render_project_instructions(payload: dict[str, Any]) -> str:
+    instructions = payload.get("instructions")
+    if not isinstance(instructions, list) or not instructions:
+        return "No applicable project instructions found."
+    lines: list[str] = []
+    for item in instructions:
+        if not isinstance(item, dict):
+            continue
+        suffix = " [truncated]" if item.get("truncated") else ""
+        lines.append(f"## {item.get('path', '')}{suffix}\n{item.get('content', '')}")
+    return "\n\n".join(lines)
+
+
+def _render_skills_list(payload: dict[str, Any]) -> str:
+    skills = payload.get("skills")
+    if not isinstance(skills, list) or not skills:
+        return "No workspace skills found."
+    return "\n".join(
+        f"{item.get('name', '')}: {item.get('description', '')} ({item.get('path', '')})"
+        for item in skills
+        if isinstance(item, dict)
+    )
+
+
+def _render_skill(payload: dict[str, Any]) -> str:
+    content = payload.get("content")
+    return str(content) if isinstance(content, str) else str(payload.get("summary") or "Skill read.")
+
+
+def _render_checks(payload: dict[str, Any]) -> str:
+    checks = payload.get("checks")
+    if not isinstance(checks, list) or not checks:
+        return "No checks discovered."
+    return "\n".join(
+        f"{item.get('id', '')}: {item.get('command', '')} (workdir={item.get('workdir', '.')}, source={item.get('source', '')})"
+        for item in checks
+        if isinstance(item, dict)
+    )
+
+
+def _render_check_result(payload: dict[str, Any]) -> str:
+    lines = [str(payload.get("summary") or "Check evidence loaded.")]
+    lines.append(
+        f"check_run_id={payload.get('check_run_id', '')} status={payload.get('status', 'unknown')} "
+        f"exit={payload.get('exit_code')} stale={bool(payload.get('stale'))}"
+    )
+    result = payload.get("result")
+    if isinstance(result, dict):
+        for key in ("stdout", "stderr"):
+            value = result.get(key)
+            if isinstance(value, str) and value:
+                lines.append(f"{key}:\n{value}")
+    return "\n".join(lines)
+
+
+def _render_task(payload: dict[str, Any]) -> str:
+    if isinstance(payload.get("tasks"), list):
+        return "\n".join(_bounded_json(item, 3000) for item in payload["tasks"]) or "No tasks found."
+    return _bounded_json(
+        {key: payload.get(key) for key in ("task_id", "title", "objective", "status", "revision", "details")},
+        12000,
+    )
+
+
+def _render_task_plan(payload: dict[str, Any]) -> str:
+    steps = payload.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return str(payload.get("summary") or "Task plan is empty.")
+    lines = [str(payload.get("summary") or "Task plan.")]
+    lines.extend(
+        f"{item.get('step_id', '?')} [{item.get('status', 'pending')}] {item.get('title', '')}"
+        for item in steps
+        if isinstance(item, dict)
+    )
+    return "\n".join(lines)
+
+
+def _render_task_events(payload: dict[str, Any]) -> str:
+    events = payload.get("events")
+    if not isinstance(events, list):
+        return _bounded_json(payload, 12000)
+    if not events:
+        return "No task events found."
+    return "\n".join(
+        f"{item.get('event_type', 'event')}: {item.get('message', '')}"
+        for item in events
+        if isinstance(item, dict)
+    )
+
+
+def _render_task_context(payload: dict[str, Any]) -> str:
+    lines = [str(payload.get("summary") or "Task context loaded.")]
+    task = payload.get("task")
+    if isinstance(task, dict):
+        lines.append(_bounded_json(task, 6000))
+    for key in ("checks", "checkpoints", "events"):
+        value = payload.get(key)
+        if isinstance(value, list) and value:
+            lines.append(f"{key}: {_bounded_json(value, 12000)}")
+    return "\n".join(lines)
+
+
+def _render_checkpoint(payload: dict[str, Any]) -> str:
+    for key in ("changes", "checkpoints", "files", "restored_files"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return f"{payload.get('summary', 'Checkpoint operation completed.')}\n{_bounded_json(value, 20000)}"
+    return str(payload.get("summary") or "Checkpoint operation completed.")
+
+
 _RENDERERS = {
     "server_info": _render_server_info,
     "check_exec_environment": _render_exec_environment,
@@ -622,7 +840,45 @@ _RENDERERS = {
     "git_log": _render_git_log,
     "git_show": _render_git_show,
     "git_blame": _render_git_blame,
+    "git_branch_list": _render_git_workflow,
+    "git_branch_create": _render_git_workflow,
+    "git_conflicts": _render_git_workflow,
+    "git_stage": _render_git_workflow,
+    "git_unstage": _render_git_workflow,
+    "git_commit": _render_git_workflow,
+    "git_worktree_list": _render_git_workflow,
+    "git_worktree_create": _render_git_workflow,
+    "git_worktree_remove": _render_git_workflow,
+    "lsp_status": _render_lsp,
+    "lsp_definition": _render_lsp,
+    "lsp_references": _render_lsp,
+    "lsp_diagnostics": _render_lsp,
+    "lsp_rename_preview": _render_lsp,
+    "review_prepare": _render_review,
+    "review_record": _render_review,
+    "review_get": _render_review,
     "request_permissions": lambda payload: f"Permission request: {payload.get('status', 'completed')}.",
+    "workspace_overview": _render_workspace_overview,
+    "repo_map": _render_repo_map,
+    "project_instructions": _render_project_instructions,
+    "skills_list": _render_skills_list,
+    "skills_read": _render_skill,
+    "checks_discover": _render_checks,
+    "checks_run": _render_exec,
+    "checks_result": _render_check_result,
+    "task_create": _render_task,
+    "task_get": _render_task,
+    "task_list": _render_task,
+    "task_update": _render_task,
+    "task_event_add": _render_task_events,
+    "task_events": _render_task_events,
+    "task_context": _render_task_context,
+    "task_plan_get": _render_task_plan,
+    "task_plan_update": _render_task_plan,
+    "checkpoint_create": _render_checkpoint,
+    "checkpoint_list": _render_checkpoint,
+    "checkpoint_diff": _render_checkpoint,
+    "checkpoint_restore": _render_checkpoint,
     "view_image": _render_image,
     "browser_status": _render_browser_status,
     "browser_tabs": _render_browser_tabs,
@@ -632,6 +888,19 @@ _RENDERERS = {
     "browser_evaluate": _render_browser_evaluate,
     "browser_click": _render_browser_tab,
     "browser_type": _render_browser_tab,
+    "browser_navigate": _render_browser_tab,
+    "browser_back": _render_browser_tab,
+    "browser_reload": _render_browser_tab,
+    "browser_hover": _render_browser_tab,
+    "browser_select": _render_browser_tab,
+    "browser_press": _render_browser_tab,
+    "browser_upload": _render_browser_tab,
+    "browser_download": _render_browser_download,
+    "browser_watch_start": _render_browser_watch,
+    "browser_watch_poll": _render_browser_watch,
+    "browser_watch_stop": _render_browser_watch,
+    "browser_wait": _render_browser_tab,
+    "browser_events": _render_event_list,
     "browser_console": _render_event_list,
     "browser_network": _render_event_list,
     "browser_inspect": _render_generic_items,

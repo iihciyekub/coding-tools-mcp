@@ -48,6 +48,68 @@ export interface DesktopSnapshot {
   profiles: WorkspaceProfile[];
   statuses: Record<string, RuntimeStatus>;
   dependencies: DependencyStatus;
+  workflow: Record<string, WorkflowSnapshot>;
+}
+
+export interface WorkflowTask {
+  task_id: string;
+  title: string;
+  status: string;
+  revision: number;
+  updated_at: number;
+  plan_completed: number;
+  plan_total: number;
+}
+
+export interface WorkflowCheckpoint {
+  checkpoint_id: string;
+  label: string;
+  file_count: number;
+  created_at: number;
+}
+
+export interface WorkflowCheck {
+  check_run_id: string;
+  check_id: string;
+  status: string;
+  task_id: string | null;
+  created_at: number;
+}
+
+export interface WorkflowReview {
+  review_id: string;
+  status: string;
+  finding_count: number;
+  task_id: string | null;
+  updated_at: number;
+}
+
+export interface WorkflowApproval {
+  approval_id: string;
+  tool_name: string;
+  permission: string;
+  reason: string;
+  arguments: string;
+  status: "pending" | "approved" | "denied" | "expired" | "consumed";
+  expires_at: number;
+  created_at: number;
+}
+
+export interface WorkflowWorktree {
+  worktree_id: string;
+  path: string;
+}
+
+export interface WorkflowSnapshot {
+  available: boolean;
+  workspace_id: string;
+  tasks: WorkflowTask[];
+  checkpoints: WorkflowCheckpoint[];
+  checks: WorkflowCheck[];
+  reviews: WorkflowReview[];
+  approvals: WorkflowApproval[];
+  worktrees: WorkflowWorktree[];
+  warning: string | null;
 }
 
 export interface DependencyStatus {

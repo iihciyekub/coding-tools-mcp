@@ -36,6 +36,9 @@ from . import browser as browser_tools
 from . import chrome_bridge
 from . import code_intel
 from . import macos_apps
+from . import lsp as lsp_tools
+from . import skills as skill_tools
+from . import workspace_insight
 from .envutils import ENV_PREFIX, truthy_env
 from .errors import JsonRpcError, ToolFailure
 from .landlock_exec import libc_syscall
@@ -79,6 +82,8 @@ from .protocol import (
     LATEST_LEGACY_PROTOCOL_VERSION,
     MODERN_ERA,
     MODERN_PROTOCOL_VERSIONS,
+    TASKS_MISSING_REQUIRED_CLIENT_CAPABILITY,
+    TASKS_EXTENSION,
     UNSUPPORTED_PROTOCOL_VERSION,
     RequestContext,
     dispatch_rpc,
@@ -96,6 +101,7 @@ from .telemetry import SessionTelemetry
 from .textutils import DEFAULT_MAX_LINES, TextTruncation, truncate_text_head
 from .tool_results import make_tool_result
 from .transport_stdio import serve_stdio
+from .workflow_store import MAX_CHECKPOINT_BYTES, TASK_STATES, WorkflowStore, restore_token
 
 
 SERVER_NAME = "coding-tools-mcp"
@@ -734,10 +740,278 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         read_only=True,
         idempotent=True,
     ),
+    "git_branch_list": ToolSpec(
+        title="List Git branches",
+        description="List bounded local branches with current branch, upstream, and commit metadata.",
+        read_only=True,
+        idempotent=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "git_branch_create": ToolSpec(
+        title="Create Git branch",
+        description="Create a validated local branch when the workspace HEAD still matches the reviewed value.",
+        destructive=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "git_conflicts": ToolSpec(
+        title="List Git conflicts",
+        description="List unmerged paths and their index stages without modifying the repository.",
+        read_only=True,
+        idempotent=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "git_stage": ToolSpec(
+        title="Stage Git paths",
+        description="Stage only explicit workspace paths when HEAD and index still match reviewed fingerprints.",
+        destructive=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "git_unstage": ToolSpec(
+        title="Unstage Git paths",
+        description="Unstage only explicit paths when HEAD and index still match reviewed fingerprints.",
+        destructive=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "git_commit": ToolSpec(
+        title="Commit staged Git paths",
+        description="Commit exactly the declared staged path set after HEAD and index concurrency checks.",
+        destructive=True,
+        open_world=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "git_worktree_list": ToolSpec(
+        title="List Git worktrees",
+        description="List repository worktrees and identify those managed by this workspace runtime.",
+        read_only=True,
+        idempotent=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "git_worktree_create": ToolSpec(
+        title="Create Git worktree",
+        description="Create a managed isolated worktree after reviewed HEAD/index checks.",
+        destructive=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "git_worktree_remove": ToolSpec(
+        title="Remove Git worktree",
+        description="Remove one clean runtime-managed worktree while preserving its branch.",
+        destructive=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "lsp_status": ToolSpec(
+        title="Language server status",
+        description="Report optional Python and TypeScript/JavaScript LSP backend availability and process state.",
+        read_only=True,
+        idempotent=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "lsp_definition": ToolSpec(
+        title="LSP definition",
+        description="Resolve definitions at a UTF-16-aware source position through the configured language server.",
+        read_only=True,
+        idempotent=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "lsp_references": ToolSpec(
+        title="LSP references",
+        description="Resolve semantic references at a source position through the configured language server.",
+        read_only=True,
+        idempotent=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "lsp_diagnostics": ToolSpec(
+        title="LSP diagnostics",
+        description="Open or refresh a source file and return bounded published language-server diagnostics.",
+        read_only=True,
+        idempotent=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "lsp_rename_preview": ToolSpec(
+        title="LSP rename preview",
+        description="Return a bounded workspace-confined rename edit preview with source hashes; does not modify files.",
+        read_only=True,
+        idempotent=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "review_prepare": ToolSpec(
+        title="Prepare code review",
+        description="Persist a bounded Git diff, project instructions, task evidence, and exact code fingerprint for review.",
+        destructive=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "review_record": ToolSpec(
+        title="Record code review",
+        description="Record structured review findings with optimistic revision checking.",
+        destructive=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "review_get": ToolSpec(
+        title="Get code review",
+        description="Read a review snapshot and report whether its code state is now stale.",
+        read_only=True,
+        idempotent=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "approval_get": ToolSpec(
+        title="Get approval request",
+        description="Read one persistent operator approval request and its expiry/consumption state.",
+        read_only=True,
+        idempotent=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "approval_list": ToolSpec(
+        title="List approval requests",
+        description="List bounded persistent approval requests; decisions remain restricted to the local desktop.",
+        read_only=True,
+        idempotent=True,
+        gated_by="enable_workflow_tools",
+    ),
     "request_permissions": ToolSpec(
         title="Request permissions",
-        description="Report scoped permission-request status without silently granting operations.",
+        description="Create an exact, expiring operator approval request without silently granting operations.",
+        destructive=True,
+    ),
+    "workspace_overview": ToolSpec(
+        title="Workspace overview",
+        description="Summarize project manifests, languages, entry points, top-level areas, and instruction files.",
         read_only=True,
+        idempotent=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "repo_map": ToolSpec(
+        title="Repository map",
+        description="Return a bounded, task-filtered map of files and code symbols with backend coverage metadata.",
+        read_only=True,
+        idempotent=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "project_instructions": ToolSpec(
+        title="Project instructions",
+        description="Resolve root and nested project instruction files that apply to one workspace path.",
+        read_only=True,
+        idempotent=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "skills_list": ToolSpec(
+        title="List workspace skills",
+        description="List bounded metadata for local .agents/skills entries without executing their scripts.",
+        read_only=True,
+        idempotent=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "skills_read": ToolSpec(
+        title="Read workspace skill",
+        description="Read one UTF-8 workspace SKILL.md selected from .agents/skills.",
+        read_only=True,
+        idempotent=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "checks_discover": ToolSpec(
+        title="Discover checks",
+        description="Discover test, lint, typecheck, and build commands from project manifests without running them.",
+        read_only=True,
+        idempotent=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "checks_run": ToolSpec(
+        title="Run discovered check",
+        description="Run one currently discovered check through the existing bounded command and permission engine.",
+        destructive=True,
+        open_world=True,
+        error_status="failed",
+        gated_by="enable_workflow_tools",
+    ),
+    "checks_result": ToolSpec(
+        title="Get check evidence",
+        description="Read a persisted check result and report whether its code fingerprint is stale.",
+        read_only=True,
+        idempotent=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "task_create": ToolSpec(
+        title="Create task record",
+        description="Create a persistent workspace task record with an objective and revision.",
+        destructive=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "task_get": ToolSpec(
+        title="Get task record",
+        description="Read one persistent workspace task record.",
+        read_only=True,
+        idempotent=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "task_list": ToolSpec(
+        title="List task records",
+        description="List persistent workspace task records, optionally filtered by status.",
+        read_only=True,
+        idempotent=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "task_update": ToolSpec(
+        title="Update task record",
+        description="Update a task using optimistic revision checking and validated status transitions.",
+        destructive=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "task_event_add": ToolSpec(
+        title="Add task event",
+        description="Append a bounded progress, decision, evidence, or note event to a persistent task.",
+        destructive=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "task_events": ToolSpec(
+        title="List task events",
+        description="List the recent event history for a persistent task.",
+        read_only=True,
+        idempotent=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "task_context": ToolSpec(
+        title="Get task context",
+        description="Return a restart-safe task summary with recent events, checks, and checkpoints.",
+        read_only=True,
+        idempotent=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "task_plan_get": ToolSpec(
+        title="Get task plan",
+        description="Read the current ordered plan steps and task revision.",
+        read_only=True,
+        idempotent=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "task_plan_update": ToolSpec(
+        title="Update task plan",
+        description="Atomically replace ordered plan steps using the task revision as a concurrency token.",
+        destructive=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "checkpoint_create": ToolSpec(
+        title="Create checkpoint",
+        description="Snapshot an explicit bounded set of UTF-8 workspace files without changing Git state.",
+        destructive=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "checkpoint_list": ToolSpec(
+        title="List checkpoints",
+        description="List persistent checkpoints for this workspace.",
+        read_only=True,
+        idempotent=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "checkpoint_diff": ToolSpec(
+        title="Diff checkpoint",
+        description="Compare checkpointed files with the current workspace and return a restore token bound to current state.",
+        read_only=True,
+        idempotent=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "checkpoint_restore": ToolSpec(
+        title="Restore checkpoint",
+        description="Restore a checkpoint only when its preview token still matches every current file.",
+        destructive=True,
+        gated_by="enable_workflow_tools",
     ),
     "view_image": ToolSpec(
         title="View image",
@@ -800,6 +1074,100 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         description="Fill or type text into the first element matching a Playwright selector.",
         destructive=True,
         open_world=True,
+    ),
+    "browser_navigate": ToolSpec(
+        title="Browser navigate",
+        description="Navigate the selected Chrome tab to an HTTP(S) URL and wait for a bounded load state.",
+        destructive=True,
+        open_world=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "browser_back": ToolSpec(
+        title="Browser back",
+        description="Navigate the selected Chrome tab back in history.",
+        destructive=True,
+        open_world=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "browser_reload": ToolSpec(
+        title="Browser reload",
+        description="Reload the selected Chrome tab and wait for a bounded load state.",
+        destructive=True,
+        open_world=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "browser_hover": ToolSpec(
+        title="Browser hover",
+        description="Hover the first element matching a Playwright selector.",
+        destructive=True,
+        open_world=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "browser_select": ToolSpec(
+        title="Browser select",
+        description="Select one or more values in the first matching select element.",
+        destructive=True,
+        open_world=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "browser_press": ToolSpec(
+        title="Browser press",
+        description="Send a Playwright key chord to the page or first matching element.",
+        destructive=True,
+        open_world=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "browser_upload": ToolSpec(
+        title="Browser upload",
+        description="Set explicit workspace files or runtime-managed browser downloads on the first matching file input.",
+        destructive=True,
+        open_world=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "browser_download": ToolSpec(
+        title="Browser download",
+        description="Fetch one HTTP(S) resource through the selected tab's CDP network context into managed runtime storage.",
+        destructive=True,
+        open_world=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "browser_watch_start": ToolSpec(
+        title="Start browser watch",
+        description="Start a runtime-local bounded event watch for the selected Chrome tab.",
+        destructive=True,
+        open_world=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "browser_watch_poll": ToolSpec(
+        title="Poll browser watch",
+        description="Read bounded browser watch events after a sequence cursor.",
+        read_only=True,
+        idempotent=True,
+        open_world=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "browser_watch_stop": ToolSpec(
+        title="Stop browser watch",
+        description="Stop one runtime-local browser event watch.",
+        destructive=True,
+        idempotent=True,
+        open_world=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "browser_wait": ToolSpec(
+        title="Browser wait",
+        description="Wait for bounded selector, URL, text, or time conditions in the selected tab.",
+        read_only=True,
+        idempotent=True,
+        open_world=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "browser_events": ToolSpec(
+        title="Capture browser events",
+        description="Capture bounded console, error, failed-request, dialog, and popup events.",
+        destructive=True,
+        open_world=True,
+        gated_by="enable_workflow_tools",
     ),
     "browser_console": ToolSpec(
         title="Browser console",
@@ -1594,6 +1962,8 @@ class Runtime:
         workspace: Path,
         *,
         enable_view_image: bool = True,
+        enable_workflow_tools: bool = False,
+        state_root: Path | None = None,
         permission_mode: str = "safe",
         shell_env_policy: ShellEnvPolicy | None = None,
         allow_network: bool = False,
@@ -1606,6 +1976,10 @@ class Runtime:
     ) -> None:
         self.workspace = Workspace(workspace)
         self.enable_view_image = enable_view_image
+        self.enable_workflow_tools = enable_workflow_tools
+        self.workflow_store = (
+            WorkflowStore(self.workspace.root, state_root=state_root) if enable_workflow_tools else None
+        )
         self._exposed_tool_names = [
             name
             for name, spec in TOOL_REGISTRY.items()
@@ -1660,6 +2034,10 @@ class Runtime:
         self._runtime_dir_lock = threading.Lock()
         self._runtime_dir_resolved = False
         self._closed = False
+        self.lsp_manager = (
+            lsp_tools.LSPManager(self.workspace.root, self._command_env({})) if enable_workflow_tools else None
+        )
+        self.browser_watch_manager = browser_tools.BrowserWatchManager() if enable_workflow_tools else None
         self.patch_baselines: dict[str, str | None] = {}
         self.patch_lock = threading.Lock()
         self.patch_committer = AtomicPatchCommitter()
@@ -1682,6 +2060,10 @@ class Runtime:
         if self._closed:
             return
         self._closed = True
+        if self.lsp_manager is not None:
+            self.lsp_manager.close()
+        if self.browser_watch_manager is not None:
+            self.browser_watch_manager.close()
         if self._owns_command_manager:
             self.command_manager.close()
         self.telemetry.finish(output_retention=self.command_manager.retention_stats_snapshot())
@@ -1840,11 +2222,19 @@ class Runtime:
         result envelope, so the fields returned are the answer itself.
         """
 
+        capabilities: dict[str, Any] = {"tools": {"listChanged": False}}
+        if self.protocol_tasks_enabled():
+            capabilities["extensions"] = {TASKS_EXTENSION: {}}
         return {
             "supportedVersions": list(MODERN_PROTOCOL_VERSIONS),
-            "capabilities": {"tools": {"listChanged": False}},
+            "capabilities": capabilities,
             "instructions": self.project_context.server_instructions(),
         }
+
+    def protocol_tasks_enabled(self) -> bool:
+        """Return whether this Runtime can durably back 2026 protocol Tasks."""
+
+        return self.enable_workflow_tools and self.workflow_store is not None
 
     def server_identity(self) -> dict[str, Any]:
         """Name this server for the handshake and for modern result metadata.
@@ -1875,6 +2265,16 @@ class Runtime:
 
     def oauth_enabled(self) -> bool:
         return self.oauth_config is not None
+
+    def _workflow_store(self) -> WorkflowStore:
+        if self.workflow_store is None:
+            raise ToolFailure("INTERNAL_ERROR", "Workflow toolset is not enabled.", category="internal")
+        return self.workflow_store
+
+    def _lsp_manager(self) -> lsp_tools.LSPManager:
+        if self.lsp_manager is None:
+            raise ToolFailure("INTERNAL_ERROR", "Workflow toolset is not enabled.", category="internal")
+        return self.lsp_manager
 
     def resolve_existing(self, raw_path: str = ".") -> ResolvedPath:
         return self.workspace.resolve_existing(raw_path)
@@ -1956,6 +2356,12 @@ class Runtime:
                 "nested_instruction_files": list(self.project_context.nested_files),
                 "warnings": list(self.project_context.warnings),
             },
+            "toolsets": ["core", *(["workflow"] if self.enable_workflow_tools else [])],
+            "workflow_state": (
+                {"workspace_id": self._workflow_store().workspace_id, "persistent": True}
+                if self.enable_workflow_tools
+                else {"enabled": False}
+            ),
             "tools": tools,
             "tool_count": len(tools),
         }
@@ -2995,54 +3401,67 @@ class Runtime:
         if self.dangerously_skip_all_permissions:
             return
         self._check_command_paths(cmd)
+        failures: list[ToolFailure] = []
         env = args.get("env", {})
         if isinstance(env, dict) and any(
             is_filtered_env_var(str(key), str(value)) for key, value in env.items()
         ):
-            raise ToolFailure(
+            failures.append(ToolFailure(
                 "PERMISSION_REQUIRED",
                 "Sensitive or loader/startup environment variables require explicit permission.",
                 category="permission",
                 details={"permission": "sensitive_env", "env_keys": sorted(str(key) for key in env)},
-            )
+            ))
         if not self.capabilities.inline_script:
             inline_script = inline_script_command(cmd)
             if inline_script is not None:
-                raise ToolFailure(
+                failures.append(ToolFailure(
                     "PERMISSION_REQUIRED",
                     "Inline interpreter or shell code requires explicit permission because network and filesystem effects cannot be verified statically.",
                     category="permission",
                     details={"permission": INLINE_SCRIPT_PERMISSION, **inline_script},
-                )
+                ))
         compact = " ".join(cmd.split()).lower()
         if not self.capabilities.shell_expansion and SHELL_EXPANSION_RE.search(cmd):
-            raise ToolFailure(
+            failures.append(ToolFailure(
                 "PERMISSION_REQUIRED",
                 "Shell command substitution and parameter expansion require explicit permission.",
                 category="permission",
                 details={"permission": "shell_expansion", "command": compact},
-            )
+            ))
         if re.search(r"(^|[;&|]\s*)rm\s+(-[^\s]*r[^\s]*f|-?[^\s]*f[^\s]*r)\s+/", compact):
-            raise ToolFailure(
+            failures.append(ToolFailure(
                 "PERMISSION_REQUIRED",
                 "Destructive commands are blocked without explicit permission.",
                 category="permission",
                 details={"permission": "destructive_command", "command": compact},
-            )
-        if DESTRUCTIVE_RE.search(cmd):
-            raise ToolFailure(
+            ))
+        elif DESTRUCTIVE_RE.search(cmd):
+            failures.append(ToolFailure(
                 "PERMISSION_REQUIRED",
                 "Destructive commands are blocked without explicit permission.",
                 category="permission",
                 details={"permission": "destructive_command", "command": compact},
-            )
+            ))
         if not self.allow_network and NETWORK_RE.search(cmd) and not is_literal_network_reference_command(cmd):
-            raise ToolFailure(
+            failures.append(ToolFailure(
                 "PERMISSION_REQUIRED",
                 "Network access is denied by default.",
                 category="permission",
                 details={"permission": "network", "command": compact},
+            ))
+        if not failures:
+            return
+        approval_ids = args.get("approval_ids")
+        if self.enable_workflow_tools and isinstance(approval_ids, list) and approval_ids:
+            self._workflow_store().consume_approvals(
+                [str(item) for item in approval_ids],
+                tool_name="exec_command",
+                arguments_hash=approval_arguments_hash("exec_command", args),
+                required_permissions={str(item.details["permission"]) for item in failures},
             )
+            return
+        raise failures[0]
 
     def _add_exec_diagnostics(self, payload: dict[str, Any]) -> None:
         diagnostics = exec_output_diagnostics(payload)
@@ -3208,6 +3627,57 @@ class Runtime:
     def _git_rev_parse(self, path: Path, rev: str, *, env: dict[str, str] | None = None) -> str:
         completed = self._run_git_text([require_git(), "-C", str(path), "rev-parse", rev], env=env)
         return completed.stdout.strip() if completed.returncode == 0 else ""
+
+    def _git_index_fingerprint(self, *, env: dict[str, str] | None = None) -> str:
+        completed = self._run_git_bytes(
+            [require_git(), "-C", str(self.workspace.root), "ls-files", "--stage", "-z"],
+            timeout=10,
+            env=env,
+        )
+        if completed.returncode != 0:
+            raise ToolFailure(
+                "GIT_ERROR",
+                completed.stderr.decode("utf-8", errors="replace").strip() or "git ls-files failed",
+                category="runtime",
+            )
+        return hashlib.sha256(completed.stdout).hexdigest()
+
+    def _git_write_state(self, *, env: dict[str, str] | None = None) -> dict[str, str]:
+        if not self._is_git_repo(self.workspace.root, env=env):
+            raise ToolFailure("GIT_NOT_REPOSITORY", "Workspace is not a Git repository.", category="validation")
+        return {
+            "head": self._git_rev_parse(self.workspace.root, "HEAD", env=env),
+            "index_fingerprint": self._git_index_fingerprint(env=env),
+        }
+
+    def _require_git_write_state(
+        self,
+        expected_head: str,
+        expected_index_fingerprint: str | None = None,
+        *,
+        env: dict[str, str] | None = None,
+    ) -> dict[str, str]:
+        current = self._git_write_state(env=env)
+        if current["head"] != expected_head:
+            raise ToolFailure(
+                "GIT_STATE_CONFLICT",
+                "Git HEAD changed after the operation was reviewed.",
+                category="conflict",
+                retryable=True,
+                details={"expected_head": expected_head, "actual_head": current["head"]},
+            )
+        if expected_index_fingerprint is not None and current["index_fingerprint"] != expected_index_fingerprint:
+            raise ToolFailure(
+                "GIT_STATE_CONFLICT",
+                "Git index changed after the operation was reviewed.",
+                category="conflict",
+                retryable=True,
+                details={
+                    "expected_index_fingerprint": expected_index_fingerprint,
+                    "actual_index_fingerprint": current["index_fingerprint"],
+                },
+            )
+        return current
 
     def _git_path_filters(self, args: dict[str, Any]) -> list[str]:
         path_filters: list[str] = []
@@ -3786,6 +4256,7 @@ class Runtime:
             "is_repo": True,
             "branch": branch,
             "head": self._git_rev_parse(resolved.path, "HEAD", env=git_env),
+            "index_fingerprint": self._git_index_fingerprint(env=git_env),
             "upstream": upstream,
             "ahead": ahead,
             "behind": behind,
@@ -4049,6 +4520,503 @@ class Runtime:
             }
         return result
 
+    def _git_explicit_paths(self, args: dict[str, Any]) -> list[str]:
+        paths = self._git_path_filters(args)
+        if not paths or any(path == "." for path in paths):
+            raise ToolFailure(
+                "GIT_PATH_SCOPE_REQUIRED",
+                "Git write operations require explicit paths and do not accept the workspace root.",
+                category="validation",
+            )
+        if len(paths) != len(set(paths)):
+            raise ToolFailure("INVALID_ARGUMENT", "Git paths must be unique.", category="validation")
+        return paths
+
+    def git_branch_list(self, args: dict[str, Any]) -> dict[str, Any]:
+        git = require_git()
+        git_env = self._git_env()
+        state = self._git_write_state(env=git_env)
+        max_results = int(args.get("max_results", 200))
+        completed = self._run_git_text(
+            [
+                git,
+                "-C",
+                str(self.workspace.root),
+                "for-each-ref",
+                f"--count={max_results + 1}",
+                "--sort=-committerdate",
+                "--format=%(refname:short)%1f%(objectname)%1f%(upstream:short)%1f%(HEAD)%1f%(subject)",
+                "refs/heads",
+            ],
+            timeout=10,
+            env=git_env,
+        )
+        if completed.returncode != 0:
+            raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git for-each-ref failed", category="runtime")
+        branches: list[dict[str, Any]] = []
+        for line in completed.stdout.splitlines():
+            fields = line.split("\x1f")
+            if len(fields) != 5:
+                continue
+            branches.append(
+                {
+                    "name": fields[0],
+                    "head": fields[1],
+                    "upstream": fields[2] or None,
+                    "current": fields[3].strip() == "*",
+                    "subject": fields[4],
+                }
+            )
+        truncated = len(branches) > max_results
+        return {
+            "ok": True,
+            **state,
+            "branches": branches[:max_results],
+            "count": min(len(branches), max_results),
+            "truncated": truncated,
+            "summary": f"Found {min(len(branches), max_results)} local branches.",
+        }
+
+    def git_branch_create(self, args: dict[str, Any]) -> dict[str, Any]:
+        git = require_git()
+        git_env = self._git_env()
+        expected_head = str(args["expected_head"])
+        expected_index = str(args["expected_index_fingerprint"])
+        self._require_git_write_state(expected_head, expected_index, env=git_env)
+        name = str(args["name"])
+        valid = self._run_git_text([git, "check-ref-format", "--branch", name], timeout=5, env=git_env)
+        if valid.returncode != 0:
+            raise ToolFailure("INVALID_GIT_BRANCH", "Invalid Git branch name.", category="validation")
+        start_point = validate_git_ref(str(args.get("start_point", "HEAD")))
+        checkout = bool(args.get("checkout", False))
+        command = [git, "-C", str(self.workspace.root)]
+        command.extend(["switch", "-c", name, start_point] if checkout else ["branch", name, start_point])
+        completed = self._run_git_text(command, timeout=30, env=git_env)
+        if completed.returncode != 0:
+            raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git branch creation failed", category="runtime")
+        state = self._git_write_state(env=git_env)
+        return {
+            "ok": True,
+            "name": name,
+            "checkout": checkout,
+            **state,
+            "summary": f"Created branch {name}{' and checked it out' if checkout else ''}.",
+        }
+
+    def _managed_worktree_root(self, *, create: bool = False) -> Path:
+        root = self._workflow_store().root / "worktrees"
+        if create:
+            root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        return root.resolve()
+
+    def git_worktree_list(self, args: dict[str, Any]) -> dict[str, Any]:
+        git = require_git()
+        git_env = self._git_env()
+        self._git_write_state(env=git_env)
+        completed = self._run_git_text(
+            [git, "-C", str(self.workspace.root), "worktree", "list", "--porcelain"],
+            timeout=10,
+            env=git_env,
+        )
+        if completed.returncode != 0:
+            raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git worktree list failed", category="runtime")
+        managed_root = self._managed_worktree_root()
+        worktrees: list[dict[str, Any]] = []
+        current: dict[str, Any] = {}
+        for line in [*completed.stdout.splitlines(), ""]:
+            if not line:
+                if current:
+                    path = Path(str(current["path"])).resolve()
+                    current["managed"] = path.is_relative_to(managed_root)
+                    current["worktree_id"] = path.name if current["managed"] else None
+                    worktrees.append(current)
+                    current = {}
+                continue
+            key, _, value = line.partition(" ")
+            if key == "worktree":
+                current["path"] = value
+            elif key == "HEAD":
+                current["head"] = value
+            elif key == "branch":
+                current["branch"] = value.removeprefix("refs/heads/")
+            elif key in {"detached", "bare"}:
+                current[key] = True
+            elif key == "prunable":
+                current["prunable"] = value or True
+        return {
+            "ok": True,
+            "worktrees": worktrees,
+            "count": len(worktrees),
+            "summary": f"Found {len(worktrees)} Git worktrees.",
+        }
+
+    def git_worktree_create(self, args: dict[str, Any]) -> dict[str, Any]:
+        git = require_git()
+        git_env = self._git_env()
+        self._require_git_write_state(
+            str(args["expected_head"]), str(args["expected_index_fingerprint"]), env=git_env
+        )
+        worktree_id = str(args["worktree_id"])
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", worktree_id):
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "worktree_id must use 1-80 letters, digits, dots, underscores, or hyphens.",
+                category="validation",
+            )
+        branch = str(args["branch"])
+        valid = self._run_git_text([git, "check-ref-format", "--branch", branch], timeout=5, env=git_env)
+        if valid.returncode != 0:
+            raise ToolFailure("INVALID_GIT_BRANCH", "Invalid Git branch name.", category="validation")
+        destination = self._managed_worktree_root(create=True) / worktree_id
+        if destination.exists():
+            raise ToolFailure("GIT_WORKTREE_EXISTS", f"Managed worktree already exists: {worktree_id}", category="conflict")
+        create_branch = bool(args.get("create_branch", True))
+        start_point = validate_git_ref(str(args.get("start_point", "HEAD")))
+        command = [git, "-C", str(self.workspace.root), "worktree", "add"]
+        if create_branch:
+            command.extend(["-b", branch, str(destination), start_point])
+        else:
+            command.extend([str(destination), branch])
+        completed = self._run_git_text(command, timeout=60, env=git_env)
+        if completed.returncode != 0:
+            raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git worktree creation failed", category="runtime")
+        return {
+            "ok": True,
+            "worktree_id": worktree_id,
+            "path": str(destination),
+            "branch": branch,
+            "created_branch": create_branch,
+            "summary": f"Created managed worktree {worktree_id} on branch {branch}.",
+        }
+
+    def git_worktree_remove(self, args: dict[str, Any]) -> dict[str, Any]:
+        git = require_git()
+        git_env = self._git_env()
+        worktree_id = str(args["worktree_id"])
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", worktree_id):
+            raise ToolFailure("INVALID_ARGUMENT", "Invalid managed worktree id.", category="validation")
+        destination = (self._managed_worktree_root() / worktree_id).resolve()
+        if not destination.is_relative_to(self._managed_worktree_root()) or not destination.is_dir():
+            raise ToolFailure("GIT_WORKTREE_NOT_FOUND", f"Managed worktree not found: {worktree_id}", category="not_found")
+        status = self._run_git_text(
+            [git, "-C", str(destination), "status", "--porcelain", "--untracked-files=all"],
+            timeout=10,
+            env=git_env,
+        )
+        if status.returncode != 0:
+            raise ToolFailure("GIT_ERROR", status.stderr.strip() or "git worktree status failed", category="runtime")
+        if status.stdout.strip():
+            raise ToolFailure(
+                "GIT_WORKTREE_DIRTY",
+                "Managed worktree has uncommitted or untracked changes.",
+                category="conflict",
+                details={"worktree_id": worktree_id},
+            )
+        completed = self._run_git_text(
+            [git, "-C", str(self.workspace.root), "worktree", "remove", "--", str(destination)],
+            timeout=60,
+            env=git_env,
+        )
+        if completed.returncode != 0:
+            raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git worktree removal failed", category="runtime")
+        return {
+            "ok": True,
+            "worktree_id": worktree_id,
+            "path": str(destination),
+            "summary": f"Removed managed worktree {worktree_id}; its Git branch was preserved.",
+        }
+
+    def git_conflicts(self, args: dict[str, Any]) -> dict[str, Any]:
+        git = require_git()
+        git_env = self._git_env()
+        state = self._git_write_state(env=git_env)
+        completed = self._run_git_bytes(
+            [git, "-C", str(self.workspace.root), "ls-files", "--unmerged", "-z"],
+            timeout=10,
+            env=git_env,
+        )
+        if completed.returncode != 0:
+            raise ToolFailure(
+                "GIT_ERROR",
+                completed.stderr.decode("utf-8", errors="replace").strip() or "git conflict query failed",
+                category="runtime",
+            )
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for record in completed.stdout.decode("utf-8", errors="surrogateescape").split("\0"):
+            if not record or "\t" not in record:
+                continue
+            metadata, path = record.split("\t", 1)
+            fields = metadata.split()
+            if len(fields) != 3:
+                continue
+            grouped.setdefault(path, []).append({"mode": fields[0], "object": fields[1], "stage": int(fields[2])})
+        conflicts = [{"path": path, "stages": stages} for path, stages in sorted(grouped.items())]
+        return {
+            "ok": True,
+            **state,
+            "conflicts": conflicts,
+            "count": len(conflicts),
+            "summary": f"Found {len(conflicts)} unmerged paths.",
+        }
+
+    def git_stage(self, args: dict[str, Any]) -> dict[str, Any]:
+        git = require_git()
+        git_env = self._git_env()
+        paths = self._git_explicit_paths(args)
+        self._require_git_write_state(
+            str(args["expected_head"]), str(args["expected_index_fingerprint"]), env=git_env
+        )
+        completed = self._run_git_text(
+            [git, "-C", str(self.workspace.root), "add", "--", *paths], timeout=30, env=git_env
+        )
+        if completed.returncode != 0:
+            raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git add failed", category="runtime")
+        state = self._git_write_state(env=git_env)
+        return {"ok": True, "paths": paths, **state, "summary": f"Staged {len(paths)} explicit paths."}
+
+    def git_unstage(self, args: dict[str, Any]) -> dict[str, Any]:
+        git = require_git()
+        git_env = self._git_env()
+        paths = self._git_explicit_paths(args)
+        self._require_git_write_state(
+            str(args["expected_head"]), str(args["expected_index_fingerprint"]), env=git_env
+        )
+        completed = self._run_git_text(
+            [git, "-C", str(self.workspace.root), "restore", "--staged", "--", *paths],
+            timeout=30,
+            env=git_env,
+        )
+        if completed.returncode != 0:
+            raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git restore --staged failed", category="runtime")
+        state = self._git_write_state(env=git_env)
+        return {"ok": True, "paths": paths, **state, "summary": f"Unstaged {len(paths)} explicit paths."}
+
+    def git_commit(self, args: dict[str, Any]) -> dict[str, Any]:
+        git = require_git()
+        git_env = self._git_env()
+        paths = self._git_explicit_paths(args)
+        self._require_git_write_state(
+            str(args["expected_head"]), str(args["expected_index_fingerprint"]), env=git_env
+        )
+        staged = self._run_git_bytes(
+            [git, "-C", str(self.workspace.root), "diff", "--cached", "--name-only", "-z"],
+            timeout=10,
+            env=git_env,
+        )
+        if staged.returncode != 0:
+            raise ToolFailure("GIT_ERROR", "Could not inspect staged paths.", category="runtime")
+        staged_paths = sorted(
+            item for item in staged.stdout.decode("utf-8", errors="surrogateescape").split("\0") if item
+        )
+        if staged_paths != sorted(paths):
+            raise ToolFailure(
+                "GIT_COMMIT_SCOPE_MISMATCH",
+                "The staged path set does not exactly match the declared commit paths.",
+                category="conflict",
+                retryable=True,
+                details={"declared_paths": sorted(paths), "staged_paths": staged_paths},
+            )
+        message = str(args["message"])
+        completed = self._run_git_text(
+            [git, "-C", str(self.workspace.root), "commit", "-m", message], timeout=120, env=git_env
+        )
+        if completed.returncode != 0:
+            raise ToolFailure("GIT_ERROR", completed.stderr.strip() or completed.stdout.strip() or "git commit failed", category="runtime")
+        state = self._git_write_state(env=git_env)
+        return {
+            "ok": True,
+            "commit": state["head"],
+            "paths": paths,
+            "stdout": completed.stdout.strip(),
+            **state,
+            "summary": f"Committed {len(paths)} explicit paths as {state['head'][:12]}.",
+        }
+
+    def lsp_status(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self._lsp_manager().status()
+
+    def _lsp_document(self, args: dict[str, Any]) -> tuple[lsp_tools.LanguageServer, ResolvedPath, str, str]:
+        resolved = self.resolve_existing(str(args["path"]))
+        if not resolved.path.is_file():
+            raise ToolFailure("IS_DIRECTORY", "LSP path must be a source file.", category="validation")
+        server = self._lsp_manager().server_for(resolved.path)
+        uri, digest = server.open_document(resolved.path)
+        return server, resolved, uri, digest
+
+    def lsp_definition(self, args: dict[str, Any]) -> dict[str, Any]:
+        server, resolved, uri, digest = self._lsp_document(args)
+        position = lsp_tools.lsp_position(resolved.path, int(args["line"]), int(args["column"]))
+        result = server.request(
+            "textDocument/definition", {"textDocument": {"uri": uri}, "position": position}
+        )
+        locations = lsp_tools.normalize_locations(self.workspace.root, result)
+        return {
+            "ok": True,
+            "path": resolved.display,
+            "file_sha256": digest,
+            "backend": server.command,
+            "position_encoding": "utf-16",
+            "definitions": locations,
+            "count": len(locations),
+            "summary": f"Found {len(locations)} semantic definitions.",
+        }
+
+    def lsp_references(self, args: dict[str, Any]) -> dict[str, Any]:
+        server, resolved, uri, digest = self._lsp_document(args)
+        position = lsp_tools.lsp_position(resolved.path, int(args["line"]), int(args["column"]))
+        result = server.request(
+            "textDocument/references",
+            {
+                "textDocument": {"uri": uri},
+                "position": position,
+                "context": {"includeDeclaration": bool(args.get("include_declaration", True))},
+            },
+        )
+        locations = lsp_tools.normalize_locations(self.workspace.root, result)
+        max_results = int(args.get("max_results", 1000))
+        return {
+            "ok": True,
+            "path": resolved.display,
+            "file_sha256": digest,
+            "backend": server.command,
+            "position_encoding": "utf-16",
+            "references": locations[:max_results],
+            "count": min(len(locations), max_results),
+            "truncated": len(locations) > max_results,
+            "summary": f"Found {min(len(locations), max_results)} semantic references.",
+        }
+
+    def lsp_diagnostics(self, args: dict[str, Any]) -> dict[str, Any]:
+        server, resolved, uri, digest = self._lsp_document(args)
+        diagnostics = lsp_tools.normalize_diagnostics(
+            self.workspace.root,
+            uri,
+            server.diagnostics(uri, int(args.get("wait_ms", 500))),
+        )
+        max_results = int(args.get("max_results", 500))
+        return {
+            "ok": True,
+            "path": resolved.display,
+            "file_sha256": digest,
+            "backend": server.command,
+            "position_encoding": "utf-16",
+            "diagnostics": diagnostics[:max_results],
+            "count": min(len(diagnostics), max_results),
+            "truncated": len(diagnostics) > max_results,
+            "summary": f"Received {min(len(diagnostics), max_results)} LSP diagnostics.",
+        }
+
+    def lsp_rename_preview(self, args: dict[str, Any]) -> dict[str, Any]:
+        server, resolved, uri, digest = self._lsp_document(args)
+        position = lsp_tools.lsp_position(resolved.path, int(args["line"]), int(args["column"]))
+        result = server.request(
+            "textDocument/rename",
+            {"textDocument": {"uri": uri}, "position": position, "newName": str(args["new_name"])},
+        )
+        changes = lsp_tools.normalize_workspace_edit(self.workspace.root, result)
+        edit_count = sum(len(item["edits"]) for item in changes)
+        if len(changes) > int(args.get("max_files", 100)) or edit_count > int(args.get("max_edits", 2000)):
+            raise ToolFailure(
+                "LSP_EDIT_TOO_LARGE",
+                "Rename preview exceeds configured file or edit limits.",
+                category="validation",
+                details={"files": len(changes), "edits": edit_count},
+            )
+        return {
+            "ok": True,
+            "path": resolved.display,
+            "file_sha256": digest,
+            "backend": server.command,
+            "position_encoding": "utf-16",
+            "new_name": str(args["new_name"]),
+            "changes": changes,
+            "file_count": len(changes),
+            "edit_count": edit_count,
+            "applied": False,
+            "summary": f"Prepared {edit_count} rename edits across {len(changes)} files; no files were changed.",
+        }
+
+    def review_prepare(self, args: dict[str, Any]) -> dict[str, Any]:
+        target = self.resolve_existing(str(args.get("path", "."))).path
+        if not target.is_dir():
+            raise ToolFailure("NOT_A_DIRECTORY", "Review path must be a directory.", category="validation")
+        fingerprint = workspace_insight.workspace_fingerprint(self.workspace.root, target)
+        diff_args: dict[str, Any] = {
+            "staged": bool(args.get("staged", True)),
+            "unstaged": bool(args.get("unstaged", True)),
+            "max_bytes": int(args.get("max_bytes", 524288)),
+        }
+        if isinstance(args.get("paths"), list):
+            diff_args["paths"] = args["paths"]
+        git_status = self.git_status({"path": target.relative_to(self.workspace.root).as_posix() or "."})
+        diff = self.git_diff(diff_args)
+        instructions = self.project_instructions(
+            {"path": target.relative_to(self.workspace.root).as_posix() or "."}
+        )
+        task_id = str(args["task_id"]) if args.get("task_id") else None
+        task = self._workflow_store().task_context(task_id) if task_id else None
+        snapshot = {
+            "path": target.relative_to(self.workspace.root).as_posix() or ".",
+            "git": {
+                "branch": git_status.get("branch"),
+                "head": git_status.get("head"),
+                "index_fingerprint": git_status.get("index_fingerprint"),
+                "status_entries": git_status.get("entries", []),
+            },
+            "diff": diff,
+            "instructions": instructions,
+            "task_context": task,
+        }
+        review = self._workflow_store().create_review(
+            snapshot,
+            code_fingerprint=str(fingerprint["fingerprint"]),
+            fingerprint_complete=bool(fingerprint["scan_complete"]),
+            task_id=task_id,
+        )
+        review["stale"] = False
+        return review
+
+    def review_record(self, args: dict[str, Any]) -> dict[str, Any]:
+        findings = cast(list[dict[str, Any]], args.get("findings", []))
+        normalized: list[dict[str, Any]] = []
+        for finding in findings:
+            resolved = self.resolve_for_write(str(finding["path"]))
+            line = int(finding["line"])
+            end_line = int(finding.get("end_line", line))
+            if end_line < line:
+                raise ToolFailure("INVALID_ARGUMENT", "Review end_line must be >= line.", category="validation")
+            normalized.append(
+                {
+                    "path": resolved.display,
+                    "line": line,
+                    "end_line": end_line,
+                    "priority": int(finding.get("priority", 2)),
+                    "title": str(finding["title"]),
+                    "body": str(finding["body"]),
+                    "status": str(finding.get("status", "open")),
+                }
+            )
+        return self._workflow_store().record_review(
+            str(args["review_id"]),
+            expected_revision=int(args["expected_revision"]),
+            status=str(args["status"]),
+            findings=normalized,
+        )
+
+    def review_get(self, args: dict[str, Any]) -> dict[str, Any]:
+        review = self._workflow_store().get_review(str(args["review_id"]))
+        snapshot = review.get("snapshot")
+        scope = snapshot.get("path", ".") if isinstance(snapshot, dict) else "."
+        target = self.resolve_existing(str(scope)).path
+        fingerprint = workspace_insight.workspace_fingerprint(self.workspace.root, target)
+        review["current_code_fingerprint"] = fingerprint["fingerprint"]
+        review["stale"] = fingerprint["fingerprint"] != review["code_fingerprint"]
+        review["summary"] = (
+            f"Review {review['review_id']} is {review['status']} with {review['finding_count']} findings"
+            f"{' and is stale' if review['stale'] else ''}."
+        )
+        return review
+
     def request_permissions(self, args: dict[str, Any]) -> dict[str, Any]:
         if self.dangerously_skip_all_permissions:
             grant_mode = "host" if self.capabilities.host_environment else "dangerously_skip_all_permissions"
@@ -4069,6 +5037,28 @@ class Runtime:
                 },
                 "warnings": [warning],
             }
+        if self.enable_workflow_tools:
+            if args.get("scope", "once") != "once":
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    "Persistent session approvals are not supported; request a one-shot approval.",
+                    category="validation",
+                )
+            tool_name = str(args["tool_name"])
+            arguments = cast(dict[str, Any], args["arguments"])
+            approval = self._workflow_store().create_approval(
+                tool_name=tool_name,
+                permission=str(args["permission"]),
+                reason=str(args["reason"]),
+                arguments_hash=approval_arguments_hash(tool_name, arguments),
+                displayed_arguments=cast(dict[str, Any], redact_for_trace(arguments)),
+                ttl_seconds=int(args.get("ttl_seconds", 300)),
+            )
+            approval["next_action"] = {
+                "type": "operator_approval",
+                "message": "Approve or deny this exact request in Coding Tools MCP Desktop.",
+            }
+            return approval
         return {
             "ok": False,
             "status": "unsupported",
@@ -4081,6 +5071,474 @@ class Runtime:
                 "retryable": False,
                 "details": {"requested": args},
             },
+        }
+
+    def approval_get(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self._workflow_store().get_approval(str(args["approval_id"]))
+
+    def approval_list(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self._workflow_store().list_approvals(
+            status=str(args["status"]) if args.get("status") else None,
+            limit=int(args.get("max_results", 100)),
+        )
+
+    def workspace_overview(self, args: dict[str, Any]) -> dict[str, Any]:
+        return workspace_insight.workspace_overview(self.workspace.root, self.project_context, args)
+
+    def repo_map(self, args: dict[str, Any]) -> dict[str, Any]:
+        target = self.resolve_existing(str(args.get("path", "."))).path
+        if not target.is_dir():
+            raise ToolFailure("NOT_A_DIRECTORY", "repo_map path must be a directory.", category="validation")
+        return workspace_insight.repo_map(self.workspace.root, target, args)
+
+    def project_instructions(self, args: dict[str, Any]) -> dict[str, Any]:
+        target = self.resolve_existing(str(args.get("path", "."))).path
+        target_dir = target if target.is_dir() else target.parent
+        applicable: list[dict[str, Any]] = []
+        for item in self.project_context.root_files:
+            applicable.append({"path": item.path, "content": item.content, "truncated": item.truncated, "scope": "."})
+        for rel in self.project_context.nested_files:
+            instruction_path = self.workspace.root / rel
+            try:
+                instruction_path.parent.relative_to(self.workspace.root)
+                target_dir.relative_to(instruction_path.parent)
+            except ValueError:
+                continue
+            resolved = self.resolve_existing(rel)
+            raw = resolved.path.read_bytes()
+            try:
+                content = raw[:16 * 1024].decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            applicable.append(
+                {
+                    "path": rel,
+                    "content": content,
+                    "truncated": len(raw) > 16 * 1024,
+                    "scope": resolved.path.parent.relative_to(self.workspace.root).as_posix() or ".",
+                }
+            )
+        applicable.sort(key=lambda item: (0 if item["scope"] == "." else len(str(item["scope"]).split("/")), item["path"]))
+        return {
+            "ok": True,
+            "path": target.relative_to(self.workspace.root).as_posix() or ".",
+            "instructions": applicable,
+            "count": len(applicable),
+            "warnings": list(self.project_context.warnings),
+            "summary": f"Resolved {len(applicable)} applicable instruction files.",
+        }
+
+    def skills_list(self, args: dict[str, Any]) -> dict[str, Any]:
+        return skill_tools.list_skills(self.workspace.root, max_results=int(args.get("max_results", 200)))
+
+    def skills_read(self, args: dict[str, Any]) -> dict[str, Any]:
+        resolved = self.resolve_existing(str(args.get("path", "")))
+        return skill_tools.read_skill(self.workspace.root, resolved.path)
+
+    def checks_discover(self, args: dict[str, Any]) -> dict[str, Any]:
+        target = self.resolve_existing(str(args.get("path", "."))).path
+        if not target.is_dir():
+            raise ToolFailure("NOT_A_DIRECTORY", "checks_discover path must be a directory.", category="validation")
+        checks = workspace_insight.discover_checks(self.workspace.root, target)
+        return {"ok": True, "path": target.relative_to(self.workspace.root).as_posix() or ".", "checks": checks, "count": len(checks), "summary": f"Discovered {len(checks)} checks."}
+
+    def checks_run(self, args: dict[str, Any]) -> dict[str, Any]:
+        target = self.resolve_existing(str(args.get("path", "."))).path
+        if not target.is_dir():
+            raise ToolFailure("NOT_A_DIRECTORY", "checks_run path must be a directory.", category="validation")
+        check_id = str(args.get("check_id", ""))
+        selected = next((item for item in workspace_insight.discover_checks(self.workspace.root, target) if item["id"] == check_id), None)
+        if selected is None:
+            raise ToolFailure("CHECK_NOT_FOUND", f"Discovered check not found: {check_id}", category="not_found", details={"retry_hint": "Call checks_discover again for the same path."})
+        command_args = {
+            "cmd": selected["command"],
+            "workdir": selected["workdir"],
+            "timeout_ms": int(args.get("timeout_ms", 30000)),
+            "yield_time_ms": int(args.get("yield_time_ms", 10000)),
+            "max_output_bytes": int(args.get("max_output_bytes", 65536)),
+        }
+        if args.get("approval_ids"):
+            command_args["approval_ids"] = list(args["approval_ids"])
+        if args.get("operation_id"):
+            command_args["operation_id"] = str(args["operation_id"])
+        before = workspace_insight.workspace_fingerprint(self.workspace.root, target)
+        result = self.exec_command(command_args)
+        after = workspace_insight.workspace_fingerprint(self.workspace.root, target)
+        evidence = self._workflow_store().record_check_run(
+            selected,
+            result,
+            before_fingerprint=str(before["fingerprint"]),
+            after_fingerprint=str(after["fingerprint"]),
+            fingerprint_complete=bool(before["scan_complete"] and after["scan_complete"]),
+            task_id=str(args["task_id"]) if args.get("task_id") else None,
+        )
+        result["check"] = selected
+        result["check_run_id"] = evidence["check_run_id"]
+        result["evidence_status"] = evidence["status"]
+        return result
+
+    def checks_result(self, args: dict[str, Any]) -> dict[str, Any]:
+        check_run_id = str(args["check_run_id"])
+        evidence = self._workflow_store().get_check_run(check_run_id)
+        target = self.resolve_existing(str(evidence["workdir"])).path
+        if evidence["status"] == "running" and evidence.get("command_id"):
+            try:
+                command_result = self.get_command({"command_id": evidence["command_id"]})
+            except ToolFailure as exc:
+                if exc.code != "COMMAND_NOT_FOUND":
+                    raise
+                command_result = {
+                    "status": "unknown",
+                    "command_id": evidence["command_id"],
+                    "operation_id": evidence.get("operation_id"),
+                    "diagnostics": [
+                        {
+                            "code": "CHECK_COMMAND_INTERRUPTED",
+                            "severity": "warning",
+                            "evidence": "The runtime no longer retains this command.",
+                        }
+                    ],
+                }
+            after = workspace_insight.workspace_fingerprint(self.workspace.root, target)
+            evidence = self._workflow_store().update_check_run_result(
+                check_run_id,
+                command_result,
+                after_fingerprint=str(after["fingerprint"]),
+                fingerprint_complete=bool(after["scan_complete"]),
+            )
+        current = workspace_insight.workspace_fingerprint(self.workspace.root, target)
+        evidence["current_fingerprint"] = current["fingerprint"]
+        evidence["stale"] = evidence["after_fingerprint"] != current["fingerprint"]
+        evidence["current_fingerprint_complete"] = current["scan_complete"]
+        evidence["summary"] = (
+            f"Check {evidence['check_id']} is {evidence['status']}"
+            f"{' and stale' if evidence['stale'] else ''}."
+        )
+        return evidence
+
+    def _get_protocol_task(self, task_id: str) -> dict[str, Any]:
+        try:
+            return self._workflow_store().get_protocol_task(task_id)
+        except ToolFailure as exc:
+            if exc.code == "PROTOCOL_TASK_NOT_FOUND":
+                raise JsonRpcError(-32602, f"Failed to retrieve task: Task not found: {task_id}") from exc
+            raise
+
+    @staticmethod
+    def _protocol_task_payload(record: dict[str, Any]) -> dict[str, Any]:
+        def iso8601(value: float) -> str:
+            return datetime.fromtimestamp(value, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+        payload: dict[str, Any] = {
+            "taskId": record["task_id"],
+            "status": record["status"],
+            "createdAt": iso8601(float(record["created_at"])),
+            "lastUpdatedAt": iso8601(float(record["updated_at"])),
+            "ttlMs": None,
+            "pollIntervalMs": int(record["poll_interval_ms"]),
+        }
+        if record.get("status_message"):
+            payload["statusMessage"] = record["status_message"]
+        if record["status"] == "completed" and isinstance(record.get("result"), dict):
+            payload["result"] = record["result"]
+        if record["status"] == "failed" and isinstance(record.get("error"), dict):
+            payload["error"] = record["error"]
+        return payload
+
+    def maybe_create_protocol_task(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        result: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Promote selected already-running tool calls into durable protocol Tasks."""
+
+        if not self.protocol_tasks_enabled() or tool_name != "checks_run":
+            return None
+        structured = result.get("structuredContent")
+        if not isinstance(structured, dict) or structured.get("status") != "running":
+            return None
+        check_run_id = structured.get("check_run_id")
+        if not isinstance(check_run_id, str) or not check_run_id:
+            return None
+        retained_arguments = {
+            key: arguments[key]
+            for key in ("check_id", "path", "task_id", "operation_id")
+            if key in arguments
+        }
+        record = self._workflow_store().create_protocol_task(
+            request_method="tools/call",
+            tool_name=tool_name,
+            arguments=retained_arguments,
+            backing_type="check_run",
+            backing_id=check_run_id,
+            status_message=f"Check {structured.get('check', {}).get('id', retained_arguments.get('check_id', 'unknown'))} is running.",
+            poll_interval_ms=1000,
+        )
+        return {"resultType": "task", **self._protocol_task_payload(record)}
+
+    def protocol_task_get(self, task_id: str) -> dict[str, Any]:
+        record = self._get_protocol_task(task_id)
+        if record["status"] == "working" and record["backing_type"] == "check_run":
+            try:
+                evidence = self.checks_result({"check_run_id": record["backing_id"]})
+            except ToolFailure as exc:
+                raise JsonRpcError(-32603, f"Failed to refresh task backing check: {exc.message}") from exc
+            if evidence["status"] != "running":
+                final_result = make_tool_result("checks_result", evidence, is_error=False)
+                record = self._workflow_store().finish_protocol_task(
+                    task_id,
+                    status="completed",
+                    status_message=f"Check {evidence['check_id']} is {evidence['status']}.",
+                    result=final_result,
+                )
+        return self._protocol_task_payload(record)
+
+    def protocol_task_update(self, task_id: str, input_responses: dict[str, Any]) -> dict[str, Any]:
+        # The first supported task-augmented operation (checks_run) never emits
+        # inputRequests. Per the extension, unknown/already-satisfied response
+        # keys are ignored, but the task id itself must still resolve.
+        _ = input_responses
+        self._get_protocol_task(task_id)
+        return {}
+
+    def protocol_task_cancel(self, task_id: str) -> dict[str, Any]:
+        record = self._get_protocol_task(task_id)
+        if record["status"] != "working":
+            return {}
+        if record["backing_type"] == "check_run":
+            try:
+                evidence = self._workflow_store().get_check_run(str(record["backing_id"]))
+            except ToolFailure as exc:
+                raise JsonRpcError(-32603, f"Failed to retrieve task backing check: {exc.message}") from exc
+            command_id = evidence.get("command_id")
+            if evidence["status"] == "running" and isinstance(command_id, str) and command_id:
+                try:
+                    stopped = self.kill_command({"command_id": command_id})
+                except ToolFailure as exc:
+                    if exc.code != "COMMAND_NOT_FOUND":
+                        raise JsonRpcError(-32603, f"Failed to cancel task command: {exc.message}") from exc
+                else:
+                    if stopped.get("status") in {"terminated", "killed"}:
+                        after = workspace_insight.workspace_fingerprint(
+                            self.workspace.root,
+                            self.resolve_existing(str(evidence["workdir"])).path,
+                        )
+                        self._workflow_store().update_check_run_result(
+                            str(record["backing_id"]),
+                            stopped,
+                            after_fingerprint=str(after["fingerprint"]),
+                            fingerprint_complete=bool(after["scan_complete"]),
+                        )
+                        self._workflow_store().finish_protocol_task(
+                            task_id,
+                            status="cancelled",
+                            status_message="Cancellation completed for the backing check command.",
+                        )
+                        return {}
+            # The process may already have completed or disappeared between the
+            # stored check read and cancellation. Refresh rather than falsely
+            # claiming that completed work was cancelled.
+            self.protocol_task_get(task_id)
+        return {}
+
+    def task_create(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self._workflow_store().create_task(str(args["title"]), str(args["objective"]), cast(dict[str, Any] | None, args.get("details")))
+
+    def task_get(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self._workflow_store().get_task(str(args["task_id"]))
+
+    def task_list(self, args: dict[str, Any]) -> dict[str, Any]:
+        status = str(args["status"]) if args.get("status") else None
+        return self._workflow_store().list_tasks(status=status, limit=int(args.get("max_results", 100)))
+
+    def task_update(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self._workflow_store().update_task(
+            str(args["task_id"]),
+            expected_revision=int(args["expected_revision"]),
+            status=str(args["status"]) if args.get("status") else None,
+            title=str(args["title"]) if args.get("title") is not None else None,
+            objective=str(args["objective"]) if args.get("objective") is not None else None,
+            details=cast(dict[str, Any] | None, args.get("details")),
+        )
+
+    def task_event_add(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self._workflow_store().add_task_event(
+            str(args["task_id"]),
+            str(args["event_type"]),
+            str(args["message"]),
+            details=cast(dict[str, Any] | None, args.get("details")),
+        )
+
+    def task_events(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self._workflow_store().task_events(
+            str(args["task_id"]), limit=int(args.get("max_results", 100))
+        )
+
+    def task_context(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self._workflow_store().task_context(
+            str(args["task_id"]), event_limit=int(args.get("event_limit", 50))
+        )
+
+    def task_plan_get(self, args: dict[str, Any]) -> dict[str, Any]:
+        task = self._workflow_store().get_task(str(args["task_id"]))
+        steps = task["details"].get("plan", [])
+        return {
+            "ok": True,
+            "task_id": task["task_id"],
+            "revision": task["revision"],
+            "steps": steps,
+            "summary": f"Task {task['task_id']} has {len(steps)} plan steps.",
+        }
+
+    def task_plan_update(self, args: dict[str, Any]) -> dict[str, Any]:
+        steps = cast(list[dict[str, Any]], args["steps"])
+        step_ids = [str(step["step_id"]) for step in steps]
+        if len(step_ids) != len(set(step_ids)):
+            raise ToolFailure("INVALID_ARGUMENT", "Plan step_id values must be unique.", category="validation")
+        if sum(step["status"] == "in_progress" for step in steps) > 1:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "At most one plan step may be in progress.",
+                category="validation",
+            )
+        return self._workflow_store().update_plan(
+            str(args["task_id"]),
+            expected_revision=int(args["expected_revision"]),
+            steps=steps,
+        )
+
+    def checkpoint_create(self, args: dict[str, Any]) -> dict[str, Any]:
+        paths = [str(item) for item in args["paths"]]
+        if len(paths) != len(set(paths)):
+            raise ToolFailure("CHECKPOINT_SCOPE_INVALID", "Checkpoint paths must be unique.", category="validation")
+        captured: list[dict[str, Any]] = []
+        resolved_paths: set[Path] = set()
+        total_bytes = 0
+        for raw_path in paths:
+            self.workspace.reject_write_symlink(raw_path)
+            resolved = self.resolve_for_write(raw_path)
+            if resolved.path.exists() and not resolved.path.is_file():
+                raise ToolFailure("CHECKPOINT_SCOPE_INVALID", f"Checkpoint path is not a regular file: {raw_path}", category="validation")
+            if resolved.path in resolved_paths:
+                raise ToolFailure("CHECKPOINT_SCOPE_INVALID", "Checkpoint paths must resolve to unique files.", category="validation")
+            resolved_paths.add(resolved.path)
+            if resolved.path.exists():
+                total_bytes += resolved.path.stat().st_size
+                if total_bytes > MAX_CHECKPOINT_BYTES:
+                    raise ToolFailure(
+                        "CHECKPOINT_TOO_LARGE",
+                        "Checkpoint content exceeds the supported size.",
+                        category="validation",
+                        details={"bytes": total_bytes, "max_bytes": MAX_CHECKPOINT_BYTES},
+                    )
+            content = resolved.path.read_bytes() if resolved.path.exists() else None
+            if content is not None:
+                try:
+                    content.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise ToolFailure("UNSUPPORTED_ENCODING", f"Checkpoint only supports UTF-8 text: {raw_path}", category="validation") from exc
+            mode = stat.S_IMODE(resolved.path.stat().st_mode) if resolved.path.exists() else None
+            captured.append(
+                {
+                    "path": resolved.display,
+                    "existed": resolved.path.exists(),
+                    "content": content,
+                    "mode": mode,
+                    "digest": hashlib.sha256(content).hexdigest() if content is not None else None,
+                }
+            )
+        head = self._git_rev_parse(self.workspace.root, "HEAD") if self._is_git_repo(self.workspace.root) else None
+        return self._workflow_store().create_checkpoint(
+            str(args.get("label", "checkpoint")),
+            head or None,
+            captured,
+            task_id=str(args["task_id"]) if args.get("task_id") else None,
+        )
+
+    def _checkpoint_current_snapshot(
+        self, files: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], dict[str, FileBaseline]]:
+        states: list[dict[str, Any]] = []
+        baselines: dict[str, FileBaseline] = {}
+        for item in files:
+            raw_path = str(item["path"])
+            self.workspace.reject_write_symlink(raw_path)
+            resolved = self.resolve_for_write(raw_path)
+            baseline = FileBaseline.capture(resolved.path)
+            baselines[resolved.display] = baseline
+            states.append(
+                {
+                    "path": resolved.display,
+                    "existed": baseline.data is not None,
+                    "digest": baseline.digest,
+                    "mode": baseline.mode,
+                }
+            )
+        return states, baselines
+
+    def checkpoint_list(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self._workflow_store().list_checkpoints(limit=int(args.get("max_results", 100)))
+
+    def checkpoint_diff(self, args: dict[str, Any]) -> dict[str, Any]:
+        checkpoint_id = str(args["checkpoint_id"])
+        checkpoint, files = self._workflow_store().checkpoint(checkpoint_id)
+        current, _baselines = self._checkpoint_current_snapshot(files)
+        changes: list[dict[str, Any]] = []
+        for saved, now in zip(files, current, strict=True):
+            if saved["existed"] == now["existed"] and saved.get("digest") == now.get("digest") and saved.get("mode") == now.get("mode"):
+                status = "unchanged"
+            elif not saved["existed"]:
+                status = "delete_on_restore"
+            elif not now["existed"]:
+                status = "create_on_restore"
+            else:
+                status = "restore_content"
+            changes.append({"path": saved["path"], "status": status, "checkpoint_digest": saved.get("digest"), "current_digest": now.get("digest")})
+        token = restore_token(checkpoint_id, current)
+        changed = sum(1 for item in changes if item["status"] != "unchanged")
+        return {
+            "ok": True,
+            "checkpoint_id": checkpoint_id,
+            "label": checkpoint["label"],
+            "head": checkpoint["head"],
+            "changes": changes,
+            "changed_count": changed,
+            "restore_token": token,
+            "summary": f"Checkpoint differs from {changed} current files; use this restore_token only after reviewing the changes.",
+        }
+
+    def checkpoint_restore(self, args: dict[str, Any]) -> dict[str, Any]:
+        checkpoint_id = str(args["checkpoint_id"])
+        supplied_token = str(args["restore_token"])
+        checkpoint, files = self._workflow_store().checkpoint(checkpoint_id)
+        current, baselines = self._checkpoint_current_snapshot(files)
+        expected_token = restore_token(checkpoint_id, current)
+        if not secrets.compare_digest(supplied_token, expected_token):
+            raise ToolFailure(
+                "CHECKPOINT_CONFLICT",
+                "Workspace files changed after the restore preview.",
+                category="conflict",
+                retryable=True,
+                details={"checkpoint_id": checkpoint_id, "retry_hint": "Call checkpoint_diff again and review the new restore token."},
+            )
+        staged: list[StagedFile] = []
+        for item in files:
+            resolved = self.resolve_for_write(str(item["path"]))
+            raw_content = item.get("content")
+            content = bytes(raw_content).decode("utf-8") if raw_content is not None else None
+            staged.append(
+                StagedFile(resolved.display, resolved.path, content, baselines[resolved.display], item.get("mode"))
+            )
+        with self.patch_lock:
+            self.patch_committer.commit(staged)
+        return {
+            "ok": True,
+            "checkpoint_id": checkpoint_id,
+            "label": checkpoint["label"],
+            "restored_files": [item["path"] for item in files],
+            "file_count": len(files),
+            "summary": f"Restored {len(files)} files from checkpoint {checkpoint_id}.",
         }
 
     def view_image(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -4147,6 +5605,92 @@ class Runtime:
 
     def browser_type(self, args: dict[str, Any]) -> dict[str, Any]:
         return browser_tools.type_text(args)
+
+    def browser_navigate(self, args: dict[str, Any]) -> dict[str, Any]:
+        return browser_tools.navigate(args)
+
+    def browser_back(self, args: dict[str, Any]) -> dict[str, Any]:
+        return browser_tools.back(args)
+
+    def browser_reload(self, args: dict[str, Any]) -> dict[str, Any]:
+        return browser_tools.reload(args)
+
+    def browser_hover(self, args: dict[str, Any]) -> dict[str, Any]:
+        return browser_tools.hover(args)
+
+    def browser_select(self, args: dict[str, Any]) -> dict[str, Any]:
+        return browser_tools.select_option(args)
+
+    def browser_press(self, args: dict[str, Any]) -> dict[str, Any]:
+        return browser_tools.press(args)
+
+    def browser_upload(self, args: dict[str, Any]) -> dict[str, Any]:
+        files: list[str] = []
+        for path in cast(list[str], args.get("paths") or []):
+            resolved = self.resolve_existing(path)
+            if not resolved.path.is_file():
+                raise ToolFailure("IS_DIRECTORY", f"Upload path is not a file: {path}", category="validation")
+            files.append(str(resolved.path))
+        for download_id in cast(list[str], args.get("download_ids") or []):
+            files.append(str(self._browser_download_path(download_id)))
+        if not files:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "Provide at least one workspace path or managed download_id for browser_upload.",
+                category="validation",
+            )
+        if len(files) > 32:
+            raise ToolFailure("INVALID_ARGUMENT", "Browser upload accepts at most 32 files.", category="validation")
+        return browser_tools.upload({**args, "_resolved_files": files})
+
+    def _browser_download_root(self) -> Path:
+        self._ensure_runtime_dirs()
+        root = self.runtime_dir / "browser-downloads"
+        root.mkdir(parents=True, mode=0o700, exist_ok=True)
+        return root
+
+    def _browser_download_path(self, download_id: str) -> Path:
+        if not re.fullmatch(r"[0-9a-f]{24}", str(download_id)):
+            raise ToolFailure("INVALID_ARGUMENT", "Invalid managed browser download id.", category="validation")
+        directory = self._browser_download_root() / str(download_id)
+        if not directory.is_dir() or directory.is_symlink():
+            raise ToolFailure(
+                "BROWSER_DOWNLOAD_NOT_FOUND",
+                f"Managed browser download {download_id!r} was not found.",
+                category="not_found",
+            )
+        files = [path for path in directory.iterdir() if path.is_file() and not path.is_symlink() and not path.name.startswith(".")]
+        if len(files) != 1:
+            raise ToolFailure(
+                "BROWSER_DOWNLOAD_NOT_FOUND",
+                f"Managed browser download {download_id!r} is incomplete or unavailable.",
+                category="not_found",
+            )
+        return files[0]
+
+    def browser_download(self, args: dict[str, Any]) -> dict[str, Any]:
+        return browser_tools.download({**args, "_download_root": str(self._browser_download_root())})
+
+    def browser_watch_start(self, args: dict[str, Any]) -> dict[str, Any]:
+        if self.browser_watch_manager is None:
+            raise ToolFailure("INTERNAL_ERROR", "Browser watch manager is unavailable.", category="internal")
+        return self.browser_watch_manager.start(args)
+
+    def browser_watch_poll(self, args: dict[str, Any]) -> dict[str, Any]:
+        if self.browser_watch_manager is None:
+            raise ToolFailure("INTERNAL_ERROR", "Browser watch manager is unavailable.", category="internal")
+        return self.browser_watch_manager.poll(args)
+
+    def browser_watch_stop(self, args: dict[str, Any]) -> dict[str, Any]:
+        if self.browser_watch_manager is None:
+            raise ToolFailure("INTERNAL_ERROR", "Browser watch manager is unavailable.", category="internal")
+        return self.browser_watch_manager.stop(args)
+
+    def browser_wait(self, args: dict[str, Any]) -> dict[str, Any]:
+        return browser_tools.wait(args)
+
+    def browser_events(self, args: dict[str, Any]) -> dict[str, Any]:
+        return browser_tools.events(args)
 
     def browser_console(self, args: dict[str, Any]) -> dict[str, Any]:
         return browser_tools.console(args)
@@ -4805,6 +6349,19 @@ def redact_for_trace(value: Any) -> Any:
     return value
 
 
+def approval_arguments_hash(tool_name: str, arguments: dict[str, Any]) -> str:
+    """Bind a one-shot approval to one tool invocation without its approval token."""
+    normalized = dict(arguments)
+    normalized.pop("approval_ids", None)
+    payload = json.dumps(
+        {"tool_name": tool_name, "arguments": normalized},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 class LandlockRulesetAttr(ctypes.Structure):
     _fields_ = [("handled_access_fs", ctypes.c_uint64)]
 
@@ -5230,6 +6787,9 @@ def validate_schema_value(value: Any, schema: dict[str, Any], *, path: str) -> N
         min_length = schema.get("minLength")
         if isinstance(min_length, int) and len(value) < min_length:
             raise ToolFailure("INVALID_ARGUMENT", f"{path} is shorter than {min_length}.", category="validation")
+        max_length = schema.get("maxLength")
+        if isinstance(max_length, int) and len(value) > max_length:
+            raise ToolFailure("INVALID_ARGUMENT", f"{path} is longer than {max_length}.", category="validation")
         if "enum" in schema and value not in schema["enum"]:
             raise ToolFailure("INVALID_ARGUMENT", f"{path} must be one of {schema['enum']!r}.", category="validation")
 
@@ -5242,6 +6802,12 @@ def validate_schema_value(value: Any, schema: dict[str, Any], *, path: str) -> N
             raise ToolFailure("INVALID_ARGUMENT", f"{path} must be <= {maximum}.", category="validation")
 
     if isinstance(value, list) and isinstance(schema.get("items"), dict):
+        min_items = schema.get("minItems")
+        max_items = schema.get("maxItems")
+        if isinstance(min_items, int) and len(value) < min_items:
+            raise ToolFailure("INVALID_ARGUMENT", f"{path} must contain at least {min_items} items.", category="validation")
+        if isinstance(max_items, int) and len(value) > max_items:
+            raise ToolFailure("INVALID_ARGUMENT", f"{path} must contain at most {max_items} items.", category="validation")
         item_schema = schema["items"]
         for index, item in enumerate(value):
             validate_schema_value(item, item_schema, path=f"{path}[{index}]")
@@ -5394,6 +6960,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         "exec_command": object_schema(
             {
                 "cmd": {**string, "minLength": 1},
+                "approval_ids": {"type": "array", "items": {**string, "minLength": 1}, "maxItems": 16},
                 "operation_id": {**string, "minLength": 1, "maxLength": 200},
                 "workdir": {**string, "default": "."},
                 "cwd": {**string},
@@ -5497,6 +7064,146 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             },
             ["path"],
         ),
+        "git_branch_list": object_schema(
+            {"max_results": {**integer, "minimum": 1, "maximum": 1000, "default": 200}}
+        ),
+        "git_branch_create": object_schema(
+            {
+                "name": {**string, "minLength": 1, "maxLength": 200},
+                "start_point": {**string, "default": "HEAD"},
+                "checkout": {**boolean, "default": False},
+                "expected_head": {**string, "minLength": 1, "maxLength": 64},
+                "expected_index_fingerprint": {**string, "minLength": 64, "maxLength": 64},
+            },
+            ["name", "expected_head", "expected_index_fingerprint"],
+        ),
+        "git_conflicts": object_schema({}),
+        "git_stage": object_schema(
+            {
+                "paths": {"type": "array", "items": {**string, "minLength": 1}, "minItems": 1, "maxItems": 200},
+                "expected_head": {**string, "minLength": 1, "maxLength": 64},
+                "expected_index_fingerprint": {**string, "minLength": 64, "maxLength": 64},
+            },
+            ["paths", "expected_head", "expected_index_fingerprint"],
+        ),
+        "git_unstage": object_schema(
+            {
+                "paths": {"type": "array", "items": {**string, "minLength": 1}, "minItems": 1, "maxItems": 200},
+                "expected_head": {**string, "minLength": 1, "maxLength": 64},
+                "expected_index_fingerprint": {**string, "minLength": 64, "maxLength": 64},
+            },
+            ["paths", "expected_head", "expected_index_fingerprint"],
+        ),
+        "git_commit": object_schema(
+            {
+                "paths": {"type": "array", "items": {**string, "minLength": 1}, "minItems": 1, "maxItems": 200},
+                "message": {**string, "minLength": 1, "maxLength": 10000},
+                "expected_head": {**string, "minLength": 1, "maxLength": 64},
+                "expected_index_fingerprint": {**string, "minLength": 64, "maxLength": 64},
+            },
+            ["paths", "message", "expected_head", "expected_index_fingerprint"],
+        ),
+        "git_worktree_list": object_schema({}),
+        "git_worktree_create": object_schema(
+            {
+                "worktree_id": {**string, "minLength": 1, "maxLength": 80},
+                "branch": {**string, "minLength": 1, "maxLength": 200},
+                "create_branch": {**boolean, "default": True},
+                "start_point": {**string, "default": "HEAD"},
+                "expected_head": {**string, "minLength": 1, "maxLength": 64},
+                "expected_index_fingerprint": {**string, "minLength": 64, "maxLength": 64},
+            },
+            ["worktree_id", "branch", "expected_head", "expected_index_fingerprint"],
+        ),
+        "git_worktree_remove": object_schema(
+            {"worktree_id": {**string, "minLength": 1, "maxLength": 80}}, ["worktree_id"]
+        ),
+        "lsp_status": object_schema({}),
+        "lsp_definition": object_schema(
+            {
+                "path": {**string, "minLength": 1},
+                "line": {**integer, "minimum": 1},
+                "column": {**integer, "minimum": 1},
+            },
+            ["path", "line", "column"],
+        ),
+        "lsp_references": object_schema(
+            {
+                "path": {**string, "minLength": 1},
+                "line": {**integer, "minimum": 1},
+                "column": {**integer, "minimum": 1},
+                "include_declaration": {**boolean, "default": True},
+                "max_results": {**integer, "minimum": 1, "maximum": 5000, "default": 1000},
+            },
+            ["path", "line", "column"],
+        ),
+        "lsp_diagnostics": object_schema(
+            {
+                "path": {**string, "minLength": 1},
+                "wait_ms": {**integer, "minimum": 0, "maximum": 5000, "default": 500},
+                "max_results": {**integer, "minimum": 1, "maximum": 5000, "default": 500},
+            },
+            ["path"],
+        ),
+        "lsp_rename_preview": object_schema(
+            {
+                "path": {**string, "minLength": 1},
+                "line": {**integer, "minimum": 1},
+                "column": {**integer, "minimum": 1},
+                "new_name": {**string, "minLength": 1, "maxLength": 500},
+                "max_files": {**integer, "minimum": 1, "maximum": 500, "default": 100},
+                "max_edits": {**integer, "minimum": 1, "maximum": 10000, "default": 2000},
+            },
+            ["path", "line", "column", "new_name"],
+        ),
+        "review_prepare": object_schema(
+            {
+                "path": {**string, "default": "."},
+                "paths": string_array,
+                "task_id": {**string, "minLength": 1},
+                "staged": {**boolean, "default": True},
+                "unstaged": {**boolean, "default": True},
+                "max_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 524288},
+            }
+        ),
+        "review_record": object_schema(
+            {
+                "review_id": {**string, "minLength": 1},
+                "expected_revision": {**integer, "minimum": 1},
+                "status": {**string, "enum": ["completed", "changes_requested", "approved"]},
+                "findings": {
+                    "type": "array",
+                    "maxItems": 500,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {**string, "minLength": 1},
+                            "line": {**integer, "minimum": 1},
+                            "end_line": {**integer, "minimum": 1},
+                            "priority": {**integer, "minimum": 0, "maximum": 3},
+                            "title": {**string, "minLength": 1, "maxLength": 500},
+                            "body": {**string, "minLength": 1, "maxLength": 10000},
+                            "status": {**string, "enum": ["open", "resolved", "dismissed"]},
+                        },
+                        "required": ["path", "line", "title", "body"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            ["review_id", "expected_revision", "status", "findings"],
+        ),
+        "review_get": object_schema(
+            {"review_id": {**string, "minLength": 1}}, ["review_id"]
+        ),
+        "approval_get": object_schema(
+            {"approval_id": {**string, "minLength": 1}}, ["approval_id"]
+        ),
+        "approval_list": object_schema(
+            {
+                "status": {**string, "enum": ["pending", "approved", "denied", "expired", "consumed"]},
+                "max_results": {**integer, "minimum": 1, "maximum": 1000, "default": 100},
+            }
+        ),
         "request_permissions": object_schema(
             {
                 "tool_name": {**string, "enum": ["exec_command", "apply_patch"]},
@@ -5519,6 +7226,137 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "ttl_seconds": {**integer, "minimum": 1, "maximum": 3600, "default": 300},
             },
             ["tool_name", "permission", "reason", "arguments"],
+        ),
+        "workspace_overview": object_schema(
+            {"max_files": {**integer, "minimum": 1, "maximum": 50000, "default": 20000}}
+        ),
+        "repo_map": object_schema(
+            {
+                "path": {**string, "default": "."},
+                "query": string,
+                "max_files": {**integer, "minimum": 1, "maximum": 20000, "default": 2000},
+                "max_symbols": {**integer, "minimum": 1, "maximum": 5000, "default": 300},
+            }
+        ),
+        "project_instructions": object_schema({"path": {**string, "default": "."}}),
+        "skills_list": object_schema(
+            {"max_results": {**integer, "minimum": 1, "maximum": 1000, "default": 200}}
+        ),
+        "skills_read": object_schema({"path": {**string, "minLength": 1}}, ["path"]),
+        "checks_discover": object_schema({"path": {**string, "default": "."}}),
+        "checks_run": object_schema(
+            {
+                "check_id": {**string, "minLength": 1},
+                "path": {**string, "default": "."},
+                "task_id": {**string, "minLength": 1},
+                "operation_id": {**string, "minLength": 1, "maxLength": 200},
+                "timeout_ms": {**integer, "minimum": 1, "maximum": 600000, "default": 30000},
+                "yield_time_ms": {**integer, "minimum": 0, "maximum": 30000, "default": 10000},
+                "max_output_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 65536},
+                "approval_ids": {"type": "array", "items": {**string, "minLength": 1}, "maxItems": 16},
+            },
+            ["check_id"],
+        ),
+        "checks_result": object_schema(
+            {"check_run_id": {**string, "minLength": 1}}, ["check_run_id"]
+        ),
+        "task_create": object_schema(
+            {
+                "title": {**string, "minLength": 1, "maxLength": 200},
+                "objective": {**string, "minLength": 1, "maxLength": 10000},
+                "details": {"type": "object", "additionalProperties": True},
+            },
+            ["title", "objective"],
+        ),
+        "task_get": object_schema({"task_id": {**string, "minLength": 1}}, ["task_id"]),
+        "task_list": object_schema(
+            {
+                "status": {**string, "enum": sorted(TASK_STATES)},
+                "max_results": {**integer, "minimum": 1, "maximum": 1000, "default": 100},
+            }
+        ),
+        "task_update": object_schema(
+            {
+                "task_id": {**string, "minLength": 1},
+                "expected_revision": {**integer, "minimum": 1},
+                "status": {**string, "enum": sorted(TASK_STATES)},
+                "title": {**string, "minLength": 1, "maxLength": 200},
+                "objective": {**string, "minLength": 1, "maxLength": 10000},
+                "details": {"type": "object", "additionalProperties": True},
+            },
+            ["task_id", "expected_revision"],
+        ),
+        "task_event_add": object_schema(
+            {
+                "task_id": {**string, "minLength": 1},
+                "event_type": {
+                    **string,
+                    "enum": ["progress", "decision", "evidence", "note", "blocked", "resumed"],
+                },
+                "message": {**string, "minLength": 1, "maxLength": 10000},
+                "details": {"type": "object", "additionalProperties": True},
+            },
+            ["task_id", "event_type", "message"],
+        ),
+        "task_events": object_schema(
+            {
+                "task_id": {**string, "minLength": 1},
+                "max_results": {**integer, "minimum": 1, "maximum": 1000, "default": 100},
+            },
+            ["task_id"],
+        ),
+        "task_context": object_schema(
+            {
+                "task_id": {**string, "minLength": 1},
+                "event_limit": {**integer, "minimum": 1, "maximum": 500, "default": 50},
+            },
+            ["task_id"],
+        ),
+        "task_plan_get": object_schema(
+            {"task_id": {**string, "minLength": 1}}, ["task_id"]
+        ),
+        "task_plan_update": object_schema(
+            {
+                "task_id": {**string, "minLength": 1},
+                "expected_revision": {**integer, "minimum": 1},
+                "steps": {
+                    "type": "array",
+                    "maxItems": 100,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "step_id": {**string, "minLength": 1, "maxLength": 100},
+                            "title": {**string, "minLength": 1, "maxLength": 500},
+                            "status": {**string, "enum": ["pending", "in_progress", "completed"]},
+                            "result": {**string, "maxLength": 10000},
+                        },
+                        "required": ["step_id", "title", "status"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            ["task_id", "expected_revision", "steps"],
+        ),
+        "checkpoint_create": object_schema(
+            {
+                "paths": {"type": "array", "items": {**string, "minLength": 1}, "minItems": 1, "maxItems": 64},
+                "label": {**string, "minLength": 1, "maxLength": 200, "default": "checkpoint"},
+                "task_id": {**string, "minLength": 1},
+            },
+            ["paths"],
+        ),
+        "checkpoint_list": object_schema(
+            {"max_results": {**integer, "minimum": 1, "maximum": 1000, "default": 100}}
+        ),
+        "checkpoint_diff": object_schema(
+            {"checkpoint_id": {**string, "minLength": 1}}, ["checkpoint_id"]
+        ),
+        "checkpoint_restore": object_schema(
+            {
+                "checkpoint_id": {**string, "minLength": 1},
+                "restore_token": {**string, "minLength": 64, "maxLength": 64},
+            },
+            ["checkpoint_id", "restore_token"],
         ),
         "view_image": object_schema(
             {
@@ -5580,6 +7418,8 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         "browser_click": object_schema(
             {
                 "selector": {**string, "minLength": 1},
+                "dialog_action": {**string, "enum": ["accept", "dismiss"]},
+                "dialog_text": string,
                 "endpoint": string,
                 "tab_index": {**integer, "minimum": 0},
                 "tab_id": {**string, "minLength": 1},
@@ -5599,6 +7439,145 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "delay_ms": {**integer, "minimum": 0, "maximum": 1000, "default": 0},
             },
             ["selector", "text"],
+        ),
+        "browser_navigate": object_schema(
+            {
+                "url": {**string, "minLength": 1},
+                "endpoint": string,
+                "tab_index": {**integer, "minimum": 0},
+                "tab_id": {**string, "minLength": 1},
+                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
+                "wait_until": {**string, "enum": ["commit", "domcontentloaded", "load", "networkidle"], "default": "domcontentloaded"},
+            },
+            ["url"],
+        ),
+        "browser_back": object_schema(
+            {
+                "endpoint": string,
+                "tab_index": {**integer, "minimum": 0},
+                "tab_id": {**string, "minLength": 1},
+                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
+                "wait_until": {**string, "enum": ["commit", "domcontentloaded", "load", "networkidle"], "default": "domcontentloaded"},
+            }
+        ),
+        "browser_reload": object_schema(
+            {
+                "endpoint": string,
+                "tab_index": {**integer, "minimum": 0},
+                "tab_id": {**string, "minLength": 1},
+                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
+                "wait_until": {**string, "enum": ["commit", "domcontentloaded", "load", "networkidle"], "default": "domcontentloaded"},
+            }
+        ),
+        "browser_hover": object_schema(
+            {
+                "selector": {**string, "minLength": 1},
+                "endpoint": string,
+                "tab_index": {**integer, "minimum": 0},
+                "tab_id": {**string, "minLength": 1},
+                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
+            },
+            ["selector"],
+        ),
+        "browser_select": object_schema(
+            {
+                "selector": {**string, "minLength": 1},
+                "values": {"type": "array", "items": string, "minItems": 1, "maxItems": 100},
+                "endpoint": string,
+                "tab_index": {**integer, "minimum": 0},
+                "tab_id": {**string, "minLength": 1},
+                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
+            },
+            ["selector", "values"],
+        ),
+        "browser_press": object_schema(
+            {
+                "key": {**string, "minLength": 1},
+                "selector": {**string, "minLength": 1},
+                "endpoint": string,
+                "tab_index": {**integer, "minimum": 0},
+                "tab_id": {**string, "minLength": 1},
+                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
+            },
+            ["key"],
+        ),
+        "browser_upload": object_schema(
+            {
+                "selector": {**string, "minLength": 1},
+                "paths": {"type": "array", "items": {**string, "minLength": 1}, "minItems": 1, "maxItems": 32},
+                "download_ids": {"type": "array", "items": {**string, "pattern": "^[0-9a-f]{24}$"}, "minItems": 1, "maxItems": 32},
+                "endpoint": string,
+                "tab_index": {**integer, "minimum": 0},
+                "tab_id": {**string, "minLength": 1},
+                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
+            },
+            ["selector"],
+        ),
+        "browser_download": object_schema(
+            {
+                "selector": {**string, "minLength": 1},
+                "url": {**string, "minLength": 1},
+                "filename": {**string, "minLength": 1, "maxLength": 180},
+                "max_bytes": {**integer, "minimum": 1, "maximum": 268435456, "default": 67108864},
+                "endpoint": string,
+                "tab_index": {**integer, "minimum": 0},
+                "tab_id": {**string, "minLength": 1},
+                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
+            }
+        ),
+        "browser_watch_start": object_schema(
+            {
+                "endpoint": string,
+                "tab_index": {**integer, "minimum": 0},
+                "tab_id": {**string, "minLength": 1},
+                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
+                "max_entries": {**integer, "minimum": 1, "maximum": 10000, "default": 1000},
+                "dialog_action": {**string, "enum": ["accept", "dismiss"], "default": "dismiss"},
+                "dialog_text": string,
+            }
+        ),
+        "browser_watch_poll": object_schema(
+            {
+                "watch_id": {**string, "pattern": "^[0-9a-f]{24}$"},
+                "after_seq": {**integer, "minimum": 0, "default": 0},
+                "max_entries": {**integer, "minimum": 1, "maximum": 5000, "default": 200},
+                "wait_ms": {**integer, "minimum": 0, "maximum": 30000, "default": 0},
+            },
+            ["watch_id"],
+        ),
+        "browser_watch_stop": object_schema(
+            {
+                "watch_id": {**string, "pattern": "^[0-9a-f]{24}$"},
+            },
+            ["watch_id"],
+        ),
+        "browser_wait": object_schema(
+            {
+                "selector": {**string, "minLength": 1},
+                "url": {**string, "minLength": 1},
+                "text": string,
+                "exact": {**boolean, "default": False},
+                "state": {**string, "enum": ["attached", "detached", "visible", "hidden"], "default": "visible"},
+                "wait_ms": {**integer, "minimum": 0, "maximum": 30000, "default": 0},
+                "endpoint": string,
+                "tab_index": {**integer, "minimum": 0},
+                "tab_id": {**string, "minLength": 1},
+                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
+            }
+        ),
+        "browser_events": object_schema(
+            {
+                "trigger_selector": {**string, "minLength": 1},
+                "endpoint": string,
+                "tab_index": {**integer, "minimum": 0},
+                "tab_id": {**string, "minLength": 1},
+                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
+                "wait_ms": {**integer, "minimum": 0, "maximum": 30000, "default": 500},
+                "max_entries": {**integer, "minimum": 1, "maximum": 5000, "default": 300},
+                "reload": {**boolean, "default": False},
+                "dialog_action": {**string, "enum": ["accept", "dismiss"], "default": "dismiss"},
+                "dialog_text": string,
+            }
         ),
         "browser_console": object_schema(
             {
@@ -5851,6 +7830,7 @@ MIRROR_HEADERS = ("MCP-Protocol-Version", "Mcp-Method", "Mcp-Name")
 MODERN_ERROR_STATUSES = {
     -32601: 404,
     -32602: 400,
+    TASKS_MISSING_REQUIRED_CLIENT_CAPABILITY: 400,
     HEADER_MISMATCH: 400,
     UNSUPPORTED_PROTOCOL_VERSION: 400,
 }
@@ -6638,6 +8618,8 @@ def build_runtime(
     runtime = Runtime(
         workspace,
         enable_view_image=args.enable_view_image,
+        enable_workflow_tools=bool(getattr(args, "enable_workflow_tools", False)),
+        state_root=Path(args.state_root).expanduser() if getattr(args, "state_root", None) else None,
         permission_mode=runtime_policy.permission_mode,
         shell_env_policy=runtime_policy.shell_env_policy,
         allow_network=runtime_policy.allow_network,
@@ -6956,6 +8938,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=os.environ.get("CODING_TOOLS_MCP_ENABLE_VIEW_IMAGE", "1") != "0",
         help="enable the P1 view_image tool",
+    )
+    parser.add_argument(
+        "--enable-workflow-tools",
+        action="store_true",
+        default=truthy_env(os.environ.get(f"{ENV_PREFIX}_ENABLE_WORKFLOW_TOOLS")),
+        help="enable the opt-in project insight, Skills, checks, task, and checkpoint toolset",
+    )
+    parser.add_argument(
+        "--state-root",
+        default=os.environ.get(f"{ENV_PREFIX}_STATE_ROOT"),
+        help="persistent workflow state root; defaults to the platform application-state directory",
     )
     parser.add_argument(
         "--dangerously-skip-all-permissions",

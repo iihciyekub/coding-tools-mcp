@@ -8,7 +8,7 @@ from MCP unit tests alone.
 
 | Concern | This runtime in 0.3 | Practical comparison |
 | --- | --- | --- |
-| Tool choice | One stable catalog of 18 low-level coding tools; no profiles or dynamic process tools | A fixed catalog reduces discovery and routing variance, but a host agent can still add its own tools |
+| Tool choice | One stable catalog; see the authoritative [tool inventory](../SPEC.md#fixed-tool-model); no profiles or dynamic process tools | A fixed catalog reduces discovery and routing variance, but a host agent can still add its own tools |
 | Editing | `apply_patch` is the sole direct mutation primitive; it stages all files, checks baselines, preserves mode/BOM/newlines, and rolls back partial commits | A whole-file `edit_file` can be simpler for a model, while patching sends fewer unchanged bytes and gives stronger conflict/rollback behavior |
 | Results | Concise bounded `content`, complete `structuredContent`, image bytes once | Avoids paying model context for duplicated JSON, diffs, and base64 |
 | Commands | Ten-second default foreground yield; fixed `write_stdin`, `read_output`, and `kill_command`; bounded commands and real POSIX PTY | Short tests normally finish in one call; background/interactive work has explicit next actions |
@@ -22,6 +22,10 @@ repo maps and disciplined edit/diff/test loops; OpenHands adds a broader
 agent-computer sandbox; and Cline couples MCP and approvals to an editor UI.
 Those product-level workflows can host or complement this MCP server, but are
 not additional tools in its fixed catalog.
+
+The [coding runtime upgrade proposal](coding-runtime-upgrade-plan.zh-CN.md)
+separately evaluates future project intelligence and workflow extensions. It is
+a proposal, not a statement of capabilities supported by the current runtime.
 
 ## Interpreting the Devspace speed claim
 

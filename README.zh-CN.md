@@ -16,7 +16,7 @@ Coding Tools MCP 是一个**模型中立的编程运行时**，通过
 文件读取与搜索、结构化多文件补丁、命令执行、交互式命令、git 操作——
 一个服务器，任何 MCP 客户端都能驱动。Claude Desktop、Claude Code、Codex、
 Cursor、Cline、VS Code、Windsurf、Gemini CLI，或你自己写的 agent，拿到的
-都是同一套久经考验的 18 个工具：默认限定在单一工作区内，由显式权限模式
+都是同一套久经考验的 51 个默认工具：默认限定在单一工作区内，由显式权限模式
 层层把关。
 
 [![观看演示](https://img.youtube.com/vi/N9lQaXt1eqQ/maxresdefault.jpg)](https://youtu.be/N9lQaXt1eqQ?si=LyEwvzzQF6QjUxR0)
@@ -30,8 +30,8 @@ Cursor、Cline、VS Code、Windsurf、Gemini CLI，或你自己写的 agent，�
   展开、内联脚本和破坏性命令逐项把关；Linux 上还有
   [Landlock](docs/security-boundary.md) 提供内核级文件系统隔离。显式启用
   `host` 模式后，命令执行会退出这层边界，以满足完整本机开发需要。
-- **模型与厂商中立。** 固定且如实标注的工具目录——没有 profile 切换，
-  没有注解把戏。随意更换模型或客户端，运行时行为保持不变。
+- **模型与厂商中立。** 如实标注的默认目录及可选工作流扩展。随意更换模型
+  或客户端，运行时行为保持不变。
 - **为上下文窗口精打细算。** 工具结果按设计做摘要、分页与封顶；在确定性
   dogfood 工作负载上，序列化结果字节数相比上一版本下降 37%，任务完成率不变。
 
@@ -61,6 +61,11 @@ Gemini CLI 或 Cline——各家的 JSON 配置完全相同（偏好 Node 的话
 ```
 
 然后对你的客户端说一句：*"跑一下测试，把第一个失败修了。"*
+
+增加 `--enable-workflow-tools` 可启用项目概览、Repo Map、工作区 Skills、
+检查与证据、持久任务、带冲突保护的 Checkpoint、LSP 语义查询、结构化 Git、
+受管 worktree、Review、桌面审批和完整浏览器动作。桌面 App 启动的运行时会
+自动启用这组扩展。
 
 想用 HTTP？去掉 `--stdio`，服务器就在
 `http://127.0.0.1:8765/mcp` 上讲 Streamable HTTP。两代协议在两种 transport

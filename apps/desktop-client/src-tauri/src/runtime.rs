@@ -248,7 +248,13 @@ impl RuntimeManager {
             return Err(format!("Local port {} is already in use. Stop the existing process or choose another port.", profile.runtime.local_port));
         }
         fs::create_dir_all(log_dir).map_err(|error| error.to_string())?;
-        let mut runtime = spawn_runtime(profile, log_dir, resolved, &self.resource_dir)?;
+        let mut runtime = spawn_runtime(
+            profile,
+            log_dir,
+            resolved,
+            &self.resource_dir,
+            &self.data_dir.join("workflow"),
+        )?;
         if let Err(error) = wait_for_port(profile.runtime.local_port, &mut runtime, START_TIMEOUT) {
             runtime.terminate();
             return Err(error);
@@ -362,6 +368,10 @@ impl RuntimeManager {
             }
             session.runtime.terminate();
         }
+    }
+
+    pub fn workflow_state_root(&self) -> PathBuf {
+        self.data_dir.join("workflow")
     }
 }
 
@@ -543,21 +553,27 @@ fn spawn_runtime(
     log_dir: &Path,
     resolved: (PathBuf, Vec<String>),
     resource_dir: &Path,
+    workflow_state_root: &Path,
 ) -> Result<ManagedChild, String> {
     let (program, prefix) = resolved;
     let mut command = Command::new(program);
-    command.args(prefix).args([
-        "--workspace",
-        &profile.path,
-        "--host",
-        "127.0.0.1",
-        "--port",
-        &profile.runtime.local_port.to_string(),
-        "--permission-mode",
-        &profile.runtime.permission_mode,
-        "--shell-env-inherit",
-        "all",
-    ]);
+    command
+        .args(prefix)
+        .args([
+            "--workspace",
+            &profile.path,
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &profile.runtime.local_port.to_string(),
+            "--permission-mode",
+            &profile.runtime.permission_mode,
+            "--shell-env-inherit",
+            "all",
+            "--enable-workflow-tools",
+        ])
+        .arg("--state-root")
+        .arg(workflow_state_root);
     command
         .current_dir(&profile.path)
         .env("PATH", effective_path());

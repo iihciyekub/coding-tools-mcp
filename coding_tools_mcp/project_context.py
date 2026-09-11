@@ -68,9 +68,10 @@ class ProjectContext:
 def load_project_context(root: Path) -> ProjectContext:
     resolved_root = root.expanduser().resolve(strict=True)
     loaded: list[LoadedContextFile] = []
+    loaded_file_ids: set[tuple[int, int]] = set()
     warnings: list[str] = []
     remaining = MAX_ROOT_CONTEXT_BYTES
-    for name in sorted(CONTEXT_FILE_NAMES):
+    for name in ("AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"):
         path = resolved_root / name
         if not path.is_file():
             continue
@@ -79,6 +80,13 @@ def load_project_context(root: Path) -> ProjectContext:
             resolved.relative_to(resolved_root)
         except (OSError, ValueError):
             warnings.append(f"Skipped unsafe root instruction path: {name}")
+            continue
+        try:
+            file_id = (resolved.stat().st_dev, resolved.stat().st_ino)
+        except OSError as exc:
+            warnings.append(f"Could not stat {name}: {exc}")
+            continue
+        if file_id in loaded_file_ids:
             continue
         if remaining <= 0:
             warnings.append("Root instruction byte limit reached.")
@@ -96,10 +104,21 @@ def load_project_context(root: Path) -> ProjectContext:
             continue
         truncated = len(data) > budget
         loaded.append(LoadedContextFile(name, content, truncated))
+        loaded_file_ids.add(file_id)
         remaining -= len(content.encode("utf-8"))
 
     loaded_names = {item.path for item in loaded}
-    nested = [path for path in _discover_context_files(resolved_root, warnings) if path not in loaded_names]
+    nested: list[str] = []
+    for candidate in _discover_context_files(resolved_root, warnings):
+        if candidate in loaded_names:
+            continue
+        try:
+            candidate_stat = (resolved_root / candidate).stat()
+        except OSError:
+            continue
+        if (candidate_stat.st_dev, candidate_stat.st_ino) in loaded_file_ids:
+            continue
+        nested.append(candidate)
     if len(nested) > MAX_NESTED_CONTEXT_FILES:
         nested = nested[:MAX_NESTED_CONTEXT_FILES]
         warnings.append(f"Nested instruction list truncated to {MAX_NESTED_CONTEXT_FILES} files.")

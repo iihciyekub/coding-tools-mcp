@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import socket
 import subprocess
 import tempfile
@@ -16,7 +17,60 @@ from coding_tools_mcp import browser, chrome_bridge, chrome_native_host
 from coding_tools_mcp.tool_results import render_tool_text
 
 
+class _DownloadHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:  # noqa: N802
+        if self.path in {"/", "/test"}:
+            payload = b'''<!doctype html><meta charset="utf-8">
+              <button name="action" onclick="window.clicked='first'">First</button>
+              <button name="action" onclick="window.clicked='second'">Second</button>
+              <label for="secret">Password</label><input id="secret" type="password" value="synthetic-secret">
+              <label for="customer">Customer name</label><input id="customer">
+              <div role="checkbox" aria-checked="true" tabindex="0">Agree</div>
+              <select id="choice"><option value="one">One</option><option value="two">Two</option></select>
+              <input id="upload" type="file">
+              <a id="download-link" href="/captured.txt">Download</a>
+              <button id="dialog" onclick="window.dialogValue=prompt('Name?','')">Dialog</button>
+              <button id="event-source" onclick="
+                console.log('captured-event');
+                setTimeout(() => { throw new Error('captured-page-error'); }, 0);
+                fetch('http://127.0.0.1:65534/captured-request-failure').catch(() => {});
+                window.open('about:blank?captured-popup', '_blank');
+                const link = document.createElement('a');
+                link.href = '/captured.txt';
+                link.download = 'captured.txt';
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+                alert('captured-dialog');
+              ">Events</button>'''
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        if self.path == "/captured.txt":
+            payload = b"captured-download"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Disposition", 'attachment; filename="captured.txt"')
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        self.send_error(404)
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+
 class BridgeRegressionTests(unittest.TestCase):
+    def test_wait_requires_a_condition_and_navigation_rejects_non_http_urls(self) -> None:
+        with self.assertRaisesRegex(Exception, "selector, url, text"):
+            browser.wait({})
+        with self.assertRaisesRegex(Exception, "http"):
+            browser.navigate({"url": "file:///etc/passwd"})
+
     def test_late_reply_does_not_break_other_requests(self) -> None:
         bridge = chrome_native_host.NativeBridge()
         abandoned, peer = socket.socketpair()
@@ -88,8 +142,15 @@ class ChromeRegressionTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.directory = tempfile.TemporaryDirectory(prefix="cmt-browser-regression-")
         cls.addClassCleanup(cls.directory.cleanup)
+        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), _DownloadHandler)
+        cls.http_thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.http_thread.start()
+        cls.addClassCleanup(cls.httpd.server_close)
+        cls.addClassCleanup(cls.httpd.shutdown)
+        cls.page_url = f"http://127.0.0.1:{cls.httpd.server_port}/test"
         cls.process = subprocess.Popen([
             os.environ["CODING_TOOLS_MCP_TEST_CHROME"], "--headless=new", "--disable-gpu",
+            "--window-size=1280,800",
             "--no-first-run", "--no-default-browser-check", "--disable-background-networking",
             "--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1",
             "--user-data-dir=" + cls.directory.name, "about:blank",
@@ -114,13 +175,11 @@ class ChromeRegressionTests(unittest.TestCase):
 
     def setUp(self) -> None:
         with browser._browser_connection(self.args) as connection:
-            connection.contexts[0].pages[0].set_content('''
-              <button name="action" onclick="window.clicked='first'">First</button>
-              <button name="action" onclick="window.clicked='second'">Second</button>
-              <label for="secret">Password</label><input id="secret" type="password" value="synthetic-secret">
-              <label for="customer">Customer name</label><input id="customer">
-              <div role="checkbox" aria-checked="true" tabindex="0">Agree</div>
-            ''')
+            pages = connection.contexts[0].pages
+            for popup in pages[1:]:
+                popup.close()
+            page = pages[0]
+            page.goto(self.page_url, wait_until="domcontentloaded")
 
     def test_snapshot_target_clicks_the_correct_same_name_button(self) -> None:
         elements = browser.snapshot(self.args)["elements"]
@@ -140,8 +199,113 @@ class ChromeRegressionTests(unittest.TestCase):
     def test_element_truncation_and_inspect_count_are_truthful(self) -> None:
         snapshot = browser.snapshot({**self.args, "max_elements": 1})
         self.assertTrue(snapshot["elements_truncated"])
-        self.assertEqual(snapshot["element_count"], 5)
-        self.assertEqual(browser.inspect({**self.args, "selector": "button"})["matched"], 2)
+        self.assertEqual(snapshot["element_count"], 10)
+        self.assertEqual(browser.inspect({**self.args, "selector": "button"})["matched"], 4)
+
+    def test_extended_actions_cover_select_press_upload_wait_and_dialog(self) -> None:
+        browser.hover({**self.args, "selector": "#customer"})
+        browser.press({**self.args, "selector": "#customer", "key": "A"})
+        self.assertEqual(browser.evaluate({**self.args, "script": "document.querySelector('#customer').value"})["result"], "A")
+        selected = browser.select_option({**self.args, "selector": "#choice", "values": ["two"]})
+        self.assertEqual(selected["values"], ["two"])
+        upload = Path(self.directory.name) / "upload.txt"
+        upload.write_text("upload", encoding="utf-8")
+        result = browser.upload({**self.args, "selector": "#upload", "_resolved_files": [str(upload)]})
+        self.assertEqual(result["file_count"], 1)
+        browser.wait({**self.args, "selector": "#choice", "state": "visible"})
+        clicked = browser.click(
+            {**self.args, "selector": "#dialog", "dialog_action": "accept", "dialog_text": "Ada"}
+        )
+        self.assertEqual(clicked["dialog"]["type"], "prompt")
+        self.assertEqual(browser.evaluate({**self.args, "script": "window.dialogValue"})["result"], "Ada")
+
+    def test_browser_event_capture_covers_console_error_network_dialog_and_popup(self) -> None:
+        self.addCleanup(self._close_extra_pages)
+        captured = browser.events(
+            {
+                **self.args,
+                "trigger_selector": "#event-source",
+                "wait_ms": 1000,
+                "dialog_action": "dismiss",
+            }
+        )
+        kinds = {item["kind"] for item in captured["events"]}
+        self.assertTrue(
+            {"console", "pageerror", "requestfailed", "dialog", "popup"}.issubset(kinds),
+            captured["events"],
+        )
+        self.assertEqual(captured["trigger_selector"], "#event-source")
+
+    def test_controlled_download_streams_to_managed_storage_and_enforces_size_limit(self) -> None:
+        root = Path(self.directory.name) / "managed-downloads"
+        downloaded = browser.download(
+            {
+                **self.args,
+                "selector": "#download-link",
+                "_download_root": str(root),
+                "max_bytes": 1024,
+            }
+        )
+        self.assertEqual(downloaded["filename"], "captured.txt")
+        self.assertEqual(downloaded["bytes"], len(b"captured-download"))
+        self.assertEqual(Path(downloaded["managed_path"]).read_bytes(), b"captured-download")
+        self.assertRegex(downloaded["download_id"], r"^[0-9a-f]{24}$")
+
+        with self.assertRaisesRegex(Exception, "larger than|exceeded"):
+            browser.download(
+                {
+                    **self.args,
+                    "selector": "#download-link",
+                    "_download_root": str(root),
+                    "max_bytes": 4,
+                }
+            )
+        self.assertFalse(any(path.name == ".partial" for path in root.rglob(".partial")))
+
+    def test_runtime_browser_watch_survives_across_calls_and_stops_cleanly(self) -> None:
+        manager = browser.BrowserWatchManager()
+        self.addCleanup(manager.close)
+        started = manager.start({**self.args, "max_entries": 20, "dialog_action": "dismiss"})
+        watch_id = started["watch_id"]
+        self.assertEqual(started["status"], "running")
+
+        browser.evaluate(
+            {
+                **self.args,
+                "script": "setTimeout(() => { console.log('persistent-watch'); alert('watch-dialog'); }, 100)",
+            }
+        )
+        polled = manager.poll({"watch_id": watch_id, "after_seq": 0, "max_entries": 20, "wait_ms": 1500})
+        kinds = {item["kind"] for item in polled["events"]}
+        self.assertIn("console", kinds, polled)
+        self.assertGreater(polled["next_after_seq"], 0)
+
+        followup = manager.poll(
+            {
+                "watch_id": watch_id,
+                "after_seq": polled["next_after_seq"],
+                "max_entries": 20,
+                "wait_ms": 1500,
+            }
+        )
+        self.assertIn("dialog", {item["kind"] for item in followup["events"]}, followup)
+
+        empty = manager.poll(
+            {
+                "watch_id": watch_id,
+                "after_seq": followup["next_after_seq"],
+                "max_entries": 20,
+                "wait_ms": 50,
+            }
+        )
+        self.assertEqual(empty["events"], [])
+        stopped = manager.stop({"watch_id": watch_id})
+        self.assertEqual(stopped["status"], "stopped")
+
+    def _close_extra_pages(self) -> None:
+        with browser._browser_connection(self.args) as connection:
+            for popup in connection.contexts[0].pages[1:]:
+                popup.close()
 
 
 if __name__ == "__main__":

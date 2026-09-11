@@ -33,6 +33,7 @@ The documentation keeps stable file paths for existing links, while this index p
 - [CI and tests](ci-and-tests.md)
 - [Boundary findings](boundary-findings.md)
 - [Competitive analysis](competitive-analysis.md)
+- [Coding runtime upgrade proposal (简体中文)](coding-runtime-upgrade-plan.zh-CN.md)
 - [Dogfood](dogfood.md)
 - [SWE-bench](swe-bench.md)
 - [SWE-bench supporting material](swebench/README.md)

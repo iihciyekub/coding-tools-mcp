@@ -56,6 +56,7 @@ if (process.platform === "darwin") {
     const signed = spawnSync("/usr/bin/codesign", [
       "--force",
       "--sign", signingIdentity,
+      "--identifier", "com.codingtoolsmcp.app-helper",
       "--options", "runtime",
       "--timestamp",
       helperOutput,
