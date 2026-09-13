@@ -87,8 +87,8 @@ class WorkflowToolTests(unittest.TestCase):
         try:
             self.assertNotIn("workspace_overview", default.exposed_tool_names())
             self.assertIn("workspace_overview", enhanced.exposed_tool_names())
-            self.assertEqual(len(default.exposed_tool_names()), 51)
-            self.assertEqual(len(enhanced.exposed_tool_names()), 104)
+            self.assertEqual(len(default.exposed_tool_names()), 28)
+            self.assertEqual(len(enhanced.exposed_tool_names()), 68)
         finally:
             default.close()
             enhanced.close()
@@ -105,8 +105,30 @@ class WorkflowToolTests(unittest.TestCase):
         )
         runtime = build_runtime(args, runtime_policy_from_args(args), emit_warning=False)
         try:
-            self.assertEqual(len(runtime.exposed_tool_names()), 104)
+            self.assertEqual(len(runtime.exposed_tool_names()), 68)
             self.assertEqual(runtime.workflow_store.root.parent.parent, self.state_root)
+        finally:
+            runtime.close()
+
+    def test_cli_can_defer_workflow_tools_behind_static_gateway(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "--workspace",
+                str(self.workspace),
+                "--state-root",
+                str(self.state_root),
+                "--enable-workflow-tools",
+                "--defer-workflow-tools",
+            ]
+        )
+        runtime = build_runtime(args, runtime_policy_from_args(args), emit_warning=False)
+        try:
+            names = set(runtime.exposed_tool_names())
+            self.assertEqual(len(names), 29)
+            self.assertIn("tool_invoke", names)
+            self.assertNotIn("workspace_overview", names)
+            self.assertEqual(len(runtime._deferred_tool_names), 40)
+            self.assertEqual(len(runtime._available_tool_names), 69)
         finally:
             runtime.close()
 
@@ -210,25 +232,6 @@ class WorkflowToolTests(unittest.TestCase):
 
             missing = self.modern_rpc(runtime, 5, "tasks/get", {"taskId": "0" * 32})
             self.assertEqual(missing["error"]["code"], -32602)
-        finally:
-            runtime.close()
-
-    def test_browser_upload_can_reuse_a_runtime_managed_download(self) -> None:
-        runtime = self.runtime()
-        try:
-            download_id = "a" * 24
-            managed = runtime._browser_download_root() / download_id
-            managed.mkdir()
-            payload = managed / "payload.txt"
-            payload.write_text("managed", encoding="utf-8")
-            with mock.patch("coding_tools_mcp.server.browser_tools.upload") as upload:
-                upload.return_value = {"ok": True, "file_count": 1, "tab": {"index": 0, "url": "about:blank"}}
-                result = runtime.call_tool(
-                    "browser_upload",
-                    {"selector": "#file", "download_ids": [download_id]},
-                )
-            self.assertFalse(result["isError"], result)
-            self.assertEqual(upload.call_args.args[0]["_resolved_files"], [str(payload)])
         finally:
             runtime.close()
 

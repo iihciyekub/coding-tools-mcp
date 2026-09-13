@@ -95,6 +95,39 @@ def _render_exec_environment(payload: dict[str, Any]) -> str:
     return f"Execution environment checked. Landlock: {state}.{suffix}"
 
 
+def _render_runtime_doctor(payload: dict[str, Any]) -> str:
+    summary = str(payload.get("summary") or "Runtime doctor completed.")
+    lines = [summary]
+    network = payload.get("network")
+    if isinstance(network, dict):
+        allow_domains = network.get("allow_domains")
+        domain_count = len(allow_domains) if isinstance(allow_domains, list) else 0
+        lines.append(f"Network: {network.get('mode', 'unknown')} ({domain_count} allowlisted domains).")
+    python = payload.get("python")
+    if isinstance(python, dict):
+        lines.append(
+            "Python commands: "
+            f"python={python.get('python') or 'missing'}; "
+            f"python3={python.get('python3') or 'missing'}."
+        )
+    snapshot = payload.get("shell_snapshot")
+    if isinstance(snapshot, dict):
+        lines.append(f"Shell snapshot: {'active' if snapshot.get('active') else 'not captured'}.")
+    issues = payload.get("issues")
+    if not isinstance(issues, list) or not issues:
+        return "\n".join(lines)
+    for item in issues:
+        if not isinstance(item, dict):
+            continue
+        code = item.get("code", "RUNTIME_WARNING")
+        message = item.get("message", "")
+        fix = item.get("suggested_fix", "")
+        lines.append(f"{code}: {message}")
+        if fix:
+            lines.append(f"Suggested action: {fix}")
+    return "\n".join(lines)
+
+
 def _render_read_file(payload: dict[str, Any]) -> str:
     content = payload.get("content")
     if not isinstance(content, str):
@@ -117,6 +150,62 @@ def _render_read_file(payload: dict[str, Any]) -> str:
     else:
         hint = "; content truncated; raise max_bytes or request a narrower range"
     return f"[{shown}{hint}]\n{content}"
+
+
+def _render_read_files(payload: dict[str, Any]) -> str:
+    files = payload.get("files")
+    if not isinstance(files, list) or not files:
+        return "No files read."
+    sections: list[str] = []
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        sections.append(f"### {item.get('path', 'file')}\n{_render_read_file(item)}")
+    next_call = _render_next_action(payload)
+    if next_call:
+        sections.append(f"Batch budget reached; continue with {next_call}")
+    return "\n\n".join(sections)
+
+
+def _render_tool_search(payload: dict[str, Any]) -> str:
+    matches = payload.get("matches")
+    if not isinstance(matches, list) or not matches:
+        return "No matching tools found."
+    lines: list[str] = []
+    for item in matches:
+        if not isinstance(item, dict):
+            continue
+        suffix = " [deferred via tool_invoke]" if item.get("deferred") else ""
+        lines.append(f"{item.get('name', 'unknown')}{suffix}: {item.get('description', '')}")
+    return "\n".join(lines)
+
+
+def _render_hooks_status(payload: dict[str, Any]) -> str:
+    state = "enabled" if payload.get("enabled") else "disabled"
+    return f"Hooks {state}; {payload.get('rule_count', 0)} rule(s) loaded."
+
+
+def _render_shell_snapshot(payload: dict[str, Any]) -> str:
+    tools = payload.get("tools")
+    resolved = 0
+    total = 0
+    if isinstance(tools, dict):
+        total = len(tools)
+        resolved = sum(1 for value in tools.values() if value)
+    cache_label = "cached" if payload.get("cached") else "captured"
+    return (
+        f"Shell snapshot {payload.get('snapshot_id', 'unknown')} {cache_label}. "
+        f"Resolved {resolved}/{total} requested tools."
+    )
+
+
+def _render_tool_invoke(payload: dict[str, Any]) -> str:
+    name = str(payload.get("tool") or "deferred tool")
+    nested = payload.get("result")
+    if not isinstance(nested, dict):
+        return f"Deferred tool {name} completed."
+    text = render_tool_text(name, nested, is_error=nested.get("ok") is False)
+    return f"Deferred tool {name}:\n{text}" if text else f"Deferred tool {name} completed."
 
 
 def _render_list(payload: dict[str, Any]) -> str:
@@ -315,60 +404,6 @@ def _render_code_results(payload: dict[str, Any]) -> str:
     return text
 
 
-def _tab_summary(tab: Any) -> str:
-    if not isinstance(tab, dict):
-        return ""
-    tab_id = tab.get("tab_id") or tab.get("target_id")
-    identity = f" id={tab_id}" if tab_id else ""
-    return (
-        f"tab[{tab.get('index', '?')}]{identity} "
-        f"{str(tab.get('title') or '').strip()} {str(tab.get('url') or '').strip()}"
-    ).strip()
-
-
-def _render_browser_status(payload: dict[str, Any]) -> str:
-    return (
-        f"Chrome connected: {bool(payload.get('connected'))}. "
-        f"Tabs: {payload.get('tabs', 0)}; contexts: {payload.get('contexts', 0)}; "
-        f"version: {payload.get('browser_version', 'unknown')}."
-    )
-
-
-def _render_browser_tabs(payload: dict[str, Any]) -> str:
-    tabs = payload.get("tabs")
-    if not isinstance(tabs, list) or not tabs:
-        return "No inspectable browser tabs found."
-    return "\n".join(_tab_summary(tab) for tab in tabs if isinstance(tab, dict))
-
-
-def _render_browser_tab(payload: dict[str, Any]) -> str:
-    return _tab_summary(payload.get("tab")) or "Browser action completed."
-
-
-def _render_browser_snapshot(payload: dict[str, Any]) -> str:
-    sections = [_render_browser_tab(payload)]
-    text = payload.get("text")
-    if isinstance(text, str) and text:
-        sections.append(text)
-    elements = payload.get("elements")
-    if isinstance(elements, list) and elements:
-        rendered: list[str] = []
-        for item in elements:
-            if not isinstance(item, dict):
-                continue
-            rendered.append(
-                f"[{item.get('index', '?')}] {item.get('tag') or item.get('role') or 'element'} "
-                f"{str(item.get('text') or '').strip()} selector={item.get('selector', '')}"
-            )
-        if rendered:
-            sections.append("Interactive elements:\n" + "\n".join(rendered))
-    if payload.get("text_truncated"):
-        sections.append("… page text truncated; raise max_chars if more context is required.")
-    if payload.get("elements_truncated"):
-        sections.append("… interactive elements truncated; raise max_elements for more controls.")
-    return "\n".join(section for section in sections if section)
-
-
 def _bounded_json(value: Any, limit: int = 8000) -> str:
     try:
         text = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
@@ -377,68 +412,6 @@ def _bounded_json(value: Any, limit: int = 8000) -> str:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 20)] + "… [truncated]"
-
-
-def _render_browser_evaluate(payload: dict[str, Any]) -> str:
-    tab = _render_browser_tab(payload)
-    return f"{tab}\nJavaScript result: {_bounded_json(payload.get('result'))}"
-
-
-def _render_browser_download(payload: dict[str, Any]) -> str:
-    tab = _render_browser_tab(payload)
-    filename = payload.get("filename") or "download"
-    size = payload.get("bytes", 0)
-    download_id = payload.get("download_id", "unknown")
-    digest = payload.get("sha256", "")
-    return f"{tab}\nDownloaded {filename} ({size} bytes); download_id={download_id}; sha256={digest}."
-
-
-def _render_browser_watch(payload: dict[str, Any]) -> str:
-    watch_id = payload.get("watch_id", "unknown")
-    status = payload.get("status", "unknown")
-    sections = [f"Browser watch {watch_id}: {status}."]
-    tab = _tab_summary(payload.get("tab"))
-    if tab:
-        sections.append(tab)
-    events = payload.get("events")
-    if isinstance(events, list):
-        if events:
-            sections.extend(_bounded_json(item, 1200) for item in events[:200])
-        else:
-            sections.append("No new watch events.")
-        if payload.get("truncated") or len(events) > 200:
-            sections.append("… watch events truncated; continue from next_after_seq.")
-    if payload.get("dropped_since_cursor"):
-        sections.append(f"Dropped before cursor: {payload['dropped_since_cursor']} event(s).")
-    return "\n".join(sections)
-
-
-def _render_event_list(payload: dict[str, Any]) -> str:
-    if isinstance(payload.get("events"), list) and isinstance(payload.get("resources"), list):
-        prefix = _render_browser_tab(payload)
-        sections = [prefix] if prefix else []
-        for key in ("events", "resources"):
-            entries = payload[key]
-            sections.append(f"{key}: {len(entries)}")
-            sections.extend(_bounded_json(item, 1200) for item in entries[:200])
-            if len(entries) > 200:
-                sections.append(f"… {key} truncated.")
-        return "\n".join(sections)
-    items: list[Any] = []
-    chosen_key = ""
-    for key in ("entries", "messages", "requests", "events", "resources"):
-        value = payload.get(key)
-        if isinstance(value, list):
-            items = value
-            chosen_key = key
-            break
-    prefix = _render_browser_tab(payload)
-    if not items:
-        return f"{prefix}\nNo {chosen_key or 'events'} captured." if prefix else "No events captured."
-    lines = [_bounded_json(item, 1200) for item in items[:200]]
-    if payload.get("truncated") or len(items) > 200:
-        lines.append("… event list truncated.")
-    return (prefix + "\n" if prefix else "") + "\n".join(lines)
 
 
 def _render_generic_items(payload: dict[str, Any]) -> str:
@@ -824,10 +797,16 @@ def _render_checkpoint(payload: dict[str, Any]) -> str:
 _RENDERERS = {
     "server_info": _render_server_info,
     "check_exec_environment": _render_exec_environment,
+    "runtime_doctor": _render_runtime_doctor,
+    "hooks_status": _render_hooks_status,
+    "shell_snapshot": _render_shell_snapshot,
     "read_file": _render_read_file,
+    "read_files": _render_read_files,
     "list_dir": _render_list,
     "list_files": _render_list,
     "search_text": _render_search,
+    "tool_search": _render_tool_search,
+    "tool_invoke": _render_tool_invoke,
     "apply_patch": _render_patch,
     "exec_command": _render_exec,
     "get_command": _render_command_status,
@@ -880,48 +859,7 @@ _RENDERERS = {
     "checkpoint_diff": _render_checkpoint,
     "checkpoint_restore": _render_checkpoint,
     "view_image": _render_image,
-    "browser_status": _render_browser_status,
-    "browser_tabs": _render_browser_tabs,
-    "browser_active_tab": _render_browser_tab,
-    "browser_snapshot": _render_browser_snapshot,
-    "browser_screenshot": _render_browser_tab,
-    "browser_evaluate": _render_browser_evaluate,
-    "browser_click": _render_browser_tab,
-    "browser_type": _render_browser_tab,
-    "browser_navigate": _render_browser_tab,
-    "browser_back": _render_browser_tab,
-    "browser_reload": _render_browser_tab,
-    "browser_hover": _render_browser_tab,
-    "browser_select": _render_browser_tab,
-    "browser_press": _render_browser_tab,
-    "browser_upload": _render_browser_tab,
-    "browser_download": _render_browser_download,
-    "browser_watch_start": _render_browser_watch,
-    "browser_watch_poll": _render_browser_watch,
-    "browser_watch_stop": _render_browser_watch,
-    "browser_wait": _render_browser_tab,
-    "browser_events": _render_event_list,
-    "browser_console": _render_event_list,
-    "browser_network": _render_event_list,
-    "browser_inspect": _render_generic_items,
     "code_symbols": _render_code_results,
     "code_definition": _render_code_results,
     "code_references": _render_code_results,
-    "chrome_extension_install": _render_generic_items,
-    "chrome_extension_status": _render_generic_items,
-    "chrome_extensions": _render_generic_items,
-    "chrome_extension_tabs": _render_generic_items,
-    "chrome_extension_execute": _render_generic_items,
-    "chrome_extension_send": _render_generic_items,
-    "app_accessibility": _render_generic_items,
-    "app_list": _render_generic_items,
-    "app_launch": _render_generic_items,
-    "app_activate": _render_generic_items,
-    "app_windows": _render_generic_items,
-    "app_snapshot": _render_generic_items,
-    "app_click": _render_generic_items,
-    "app_type": _render_generic_items,
-    "app_press": _render_generic_items,
-    "app_menu": _render_generic_items,
-    "app_screenshot": _render_generic_items,
 }

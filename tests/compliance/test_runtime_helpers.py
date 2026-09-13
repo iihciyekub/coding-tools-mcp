@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import json
 import os
 import signal
 import shutil
@@ -16,7 +17,6 @@ from tempfile import TemporaryDirectory
 from typing import Any
 from unittest.mock import patch
 
-from coding_tools_mcp import browser as browser_tools
 from coding_tools_mcp import server as server_module
 from coding_tools_mcp import processes as processes_module
 from coding_tools_mcp import telemetry as telemetry_module
@@ -165,113 +165,6 @@ class RuntimeHelperTests(unittest.TestCase):
 
         self.assertEqual(graceful.calls, [("send_signal", 999), ("wait", 1)])
         self.assertEqual(forced.calls, ["kill", ("wait", 1)])
-
-    def test_browser_evaluate_uses_cdp_operation_deadline(self) -> None:
-        captured: dict[str, Any] = {}
-
-        class FakeSession:
-            def send(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-                captured["method"] = method
-                captured["params"] = params
-                return {"result": {"type": "number", "value": 2}}
-
-            def detach(self) -> None:
-                captured["detached"] = True
-
-        class FakeContext:
-            pages: list[Any] = []
-
-            def new_cdp_session(self, page: Any) -> FakeSession:
-                return FakeSession()
-
-        class FakePage:
-            def __init__(self, context: FakeContext) -> None:
-                self.context = context
-                self.url = "about:blank"
-
-            def is_closed(self) -> bool:
-                return False
-
-            def title(self) -> str:
-                return "Blank"
-
-            def evaluate(self, script: str) -> str:
-                self.assert_visibility_script(script)
-                return "visible"
-
-            @staticmethod
-            def assert_visibility_script(script: str) -> None:
-                if script != "document.visibilityState":
-                    raise AssertionError(script)
-
-        context = FakeContext()
-        page = FakePage(context)
-        context.pages = [page]
-
-        class FakeBrowser:
-            contexts = [context]
-
-        @contextmanager
-        def fake_connection(args: dict[str, Any]) -> Iterator[FakeBrowser]:
-            yield FakeBrowser()
-
-        with patch.object(browser_tools, "_browser_connection", fake_connection):
-            result = browser_tools.evaluate(
-                {"script": "1+1", "tab_index": 0, "timeout_ms": 1234}
-            )
-
-        self.assertEqual(result["result"], 2)
-        self.assertEqual(captured["method"], "Runtime.evaluate")
-        self.assertEqual(captured["params"]["timeout"], 1234)
-        self.assertTrue(captured["params"]["awaitPromise"])
-        self.assertTrue(captured["detached"])
-
-    def test_browser_evaluate_maps_cdp_execution_timeout(self) -> None:
-        class TimeoutSession:
-            def send(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-                raise RuntimeError("Protocol error (Runtime.evaluate): Execution was terminated")
-
-            def detach(self) -> None:
-                pass
-
-        class FakeContext:
-            pages: list[Any] = []
-
-            def new_cdp_session(self, page: Any) -> TimeoutSession:
-                return TimeoutSession()
-
-        class FakePage:
-            def __init__(self, context: FakeContext) -> None:
-                self.context = context
-                self.url = "about:blank"
-
-            def is_closed(self) -> bool:
-                return False
-
-            def title(self) -> str:
-                return "Blank"
-
-            def evaluate(self, script: str) -> str:
-                return "visible"
-
-        context = FakeContext()
-        page = FakePage(context)
-        context.pages = [page]
-
-        class FakeBrowser:
-            contexts = [context]
-
-        @contextmanager
-        def fake_connection(args: dict[str, Any]) -> Iterator[FakeBrowser]:
-            yield FakeBrowser()
-
-        with patch.object(browser_tools, "_browser_connection", fake_connection):
-            with self.assertRaises(ToolFailure) as raised:
-                browser_tools.evaluate(
-                    {"script": "while(true){}", "tab_index": 0, "timeout_ms": 50}
-                )
-        self.assertEqual(raised.exception.code, "BROWSER_TIMEOUT")
-        self.assertTrue(raised.exception.retryable)
 
     def test_atomic_patch_commit_rolls_back_all_files_after_mid_commit_failure(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -549,6 +442,89 @@ class RuntimeHelperTests(unittest.TestCase):
                     with self.assertRaises(ToolFailure) as cm:
                         runtime._check_command_policy(command, {})
                     self.assertEqual(cm.exception.code, "PERMISSION_REQUIRED")
+
+    def test_network_allowlist_allows_known_hosts_and_blocks_unknown_or_unresolved_targets(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(
+                Path(tmp),
+                network_policy="allowlist",
+                network_allow_domains=("github.com", "*.npmjs.org"),
+            )
+            runtime._check_command_policy("curl https://github.com/openai/codex", {})
+            runtime._check_command_policy("curl https://registry.npmjs.org/typescript", {})
+
+            with self.assertRaises(ToolFailure) as blocked:
+                runtime._check_command_policy("curl https://example.com/private", {})
+            self.assertEqual(blocked.exception.code, "PERMISSION_REQUIRED")
+            self.assertEqual(blocked.exception.details.get("blocked_hosts"), ["example.com"])
+
+            with self.assertRaises(ToolFailure) as unresolved:
+                runtime._check_command_policy("npm install typescript", {})
+            self.assertEqual(unresolved.exception.details.get("network_policy"), "allowlist")
+            self.assertIs(unresolved.exception.details.get("unresolved_target"), True)
+
+    def test_explicit_network_policy_still_applies_in_dangerous_mode(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp), permission_mode="dangerous", network_policy="deny")
+            runtime._check_command_policy("git status", {})
+            with self.assertRaises(ToolFailure) as cm:
+                runtime._check_command_policy("curl https://example.com", {})
+            self.assertEqual(cm.exception.details.get("permission"), "network")
+
+    def test_network_policy_cli_and_allow_network_alias(self) -> None:
+        parser = server_module.build_parser()
+        args = parser.parse_args(
+            [
+                "--network-policy",
+                "allowlist",
+                "--network-allow-domain",
+                "github.com",
+                "--network-allow-domain",
+                "*.npmjs.org",
+            ]
+        )
+        policy = server_module.runtime_policy_from_args(args)
+        self.assertEqual(policy.network_policy, "allowlist")
+        self.assertEqual(policy.network_allow_domains, ("github.com", "*.npmjs.org"))
+        self.assertFalse(policy.allow_network)
+
+        alias_args = parser.parse_args(["--allow-network"])
+        alias_policy = server_module.runtime_policy_from_args(alias_args)
+        self.assertEqual(alias_policy.network_policy, "unrestricted")
+        self.assertTrue(alias_policy.allow_network)
+
+        explicit_args = parser.parse_args(["--network-policy", "deny", "--allow-network"])
+        explicit_policy = server_module.runtime_policy_from_args(explicit_args)
+        self.assertEqual(explicit_policy.network_policy, "deny")
+        self.assertFalse(explicit_policy.allow_network)
+
+    def test_runtime_doctor_reports_python_alias_and_network_policy(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(
+                Path(tmp),
+                network_policy="allowlist",
+                network_allow_domains=("github.com",),
+            )
+            real_which = server_module.shutil.which
+
+            def fake_which(name: str, *args: object, **kwargs: object) -> str | None:
+                if name == "python":
+                    return None
+                if name == "python3":
+                    return "/usr/bin/python3"
+                return real_which(name, *args, **kwargs)
+
+            with patch.object(server_module.shutil, "which", side_effect=fake_which):
+                result = runtime.call_tool("runtime_doctor", {})
+
+            payload = result["structuredContent"]
+            codes = {item["code"] for item in payload["issues"]}
+            self.assertIn("PYTHON_ALIAS_MISSING", codes)
+            self.assertEqual(payload["network"]["mode"], "allowlist")
+            self.assertEqual(payload["network"]["allow_domains"], ["github.com"])
+            self.assertEqual(payload["network"]["enforcement"], "command-policy")
+            self.assertIn("PYTHON_ALIAS_MISSING", self.agent_text(result))
+            runtime.close()
 
     def test_command_env_core_is_not_windows_toolchain_specific(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1067,10 +1043,188 @@ Maven home: /usr/share/maven
             self.assertIn("apply_patch", names)
             self.assertIn("exec_command", names)
             self.assertIn("read_file", names)
+            self.assertIn("read_files", names)
+            self.assertIn("tool_search", names)
+            self.assertFalse(any(name.startswith("browser_") for name in names))
+            self.assertFalse(any(name.startswith("chrome_") for name in names))
+            self.assertFalse(any(name.startswith("app_") for name in names))
             self.assertNotIn("edit_file", names)
             apply_patch_tool = next(tool for tool in first if tool["name"] == "apply_patch")
             self.assertIs(apply_patch_tool["annotations"].get("destructiveHint"), True)
             self.assertIs(apply_patch_tool["annotations"].get("readOnlyHint"), False)
+
+    def test_tool_search_only_returns_tools_exposed_by_the_runtime(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            core = Runtime(workspace)
+            core_result = core.call_tool("tool_search", {"query": "workspace overview", "limit": 8})
+            core_names = [item["name"] for item in core_result["structuredContent"]["matches"]]
+            self.assertNotIn("workspace_overview", core_names)
+
+            workflow = Runtime(workspace, enable_workflow_tools=True)
+            workflow_result = workflow.call_tool(
+                "tool_search",
+                {"query": "workspace overview", "limit": 8, "include_schema": True},
+            )
+            matches = workflow_result["structuredContent"]["matches"]
+            self.assertEqual(matches[0]["name"], "workspace_overview")
+            self.assertIn("input_schema", matches[0])
+            core.close()
+            workflow.close()
+
+    def test_deferred_workflow_tools_are_searched_and_invoked_through_gateway(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            runtime = Runtime(
+                workspace,
+                enable_workflow_tools=True,
+                defer_workflow_tools=True,
+            )
+            try:
+                direct_names = set(runtime.exposed_tool_names())
+                self.assertIn("tool_invoke", direct_names)
+                self.assertNotIn("workspace_overview", direct_names)
+
+                search = runtime.call_tool("tool_search", {"query": "workspace overview"})
+                matches = search["structuredContent"]["matches"]
+                self.assertEqual(matches[0]["name"], "workspace_overview")
+                self.assertIs(matches[0]["deferred"], True)
+                self.assertEqual(matches[0]["invoke_via"], "tool_invoke")
+                self.assertIn("input_schema", matches[0])
+
+                invoked = runtime.call_tool(
+                    "tool_invoke",
+                    {"name": "workspace_overview", "arguments": {}},
+                )
+                payload = invoked["structuredContent"]
+                self.assertIs(payload["ok"], True)
+                self.assertEqual(payload["tool"], "workspace_overview")
+                self.assertIs(payload["result"]["ok"], True)
+                with self.assertRaises(server_module.JsonRpcError):
+                    runtime.call_tool("workspace_overview", {})
+            finally:
+                runtime.close()
+
+    def test_shell_snapshot_freezes_environment_until_refresh(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp), shell_env_policy=ShellEnvPolicy(inherit="all"))
+            try:
+                with patch.dict(
+                    server_module.os.environ,
+                    {"PATH": "/first/bin", "KEEP": "one"},
+                    clear=True,
+                ):
+                    first = runtime.shell_snapshot({"tools": ["definitely-not-installed"]})
+                with patch.dict(
+                    server_module.os.environ,
+                    {"PATH": "/second/bin", "KEEP": "two"},
+                    clear=True,
+                ):
+                    frozen = runtime._command_env({})
+                    second = runtime.shell_snapshot(
+                        {"refresh": True, "tools": ["definitely-not-installed"]}
+                    )
+                    refreshed = runtime._command_env({})
+
+                self.assertEqual(frozen.get("KEEP"), "one")
+                self.assertEqual(frozen.get("PATH"), "/first/bin")
+                self.assertEqual(refreshed.get("KEEP"), "two")
+                self.assertEqual(refreshed.get("PATH"), "/second/bin")
+                self.assertNotEqual(first["snapshot_id"], second["snapshot_id"])
+            finally:
+                runtime.close()
+
+    def test_blocking_before_tool_hook_can_reject_a_tool_call(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "sample.txt").write_text("hello\n", encoding="utf-8")
+            hooks_dir = workspace / ".agents"
+            hooks_dir.mkdir()
+            command = f'"{sys.executable}" -c "raise SystemExit(7)"'
+            (hooks_dir / "hooks.json").write_text(
+                json.dumps(
+                    {
+                        "hooks": [
+                            {
+                                "event": "before_tool",
+                                "match": "read_file",
+                                "command": command,
+                                "blocking": True,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            runtime = Runtime(workspace, enable_hooks=True, permission_mode="dangerous")
+            try:
+                status = runtime.call_tool("hooks_status", {})["structuredContent"]
+                self.assertTrue(status["enabled"])
+                self.assertEqual(status["rule_count"], 1)
+                result = runtime.call_tool("read_file", {"path": "sample.txt"})
+                payload = result["structuredContent"]
+                self.assertIs(result["isError"], True)
+                self.assertEqual(payload["error"]["code"], "HOOK_BLOCKED")
+            finally:
+                runtime.close()
+
+    def test_nonblocking_before_tool_hook_failure_is_returned_as_warning(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "sample.txt").write_text("hello\n", encoding="utf-8")
+            hooks_dir = workspace / ".agents"
+            hooks_dir.mkdir()
+            command = f'"{sys.executable}" -c "raise SystemExit(7)"'
+            (hooks_dir / "hooks.json").write_text(
+                json.dumps(
+                    {
+                        "hooks": [
+                            {
+                                "event": "before_tool",
+                                "match": "read_file",
+                                "command": command,
+                                "blocking": False,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            runtime = Runtime(workspace, enable_hooks=True, permission_mode="dangerous")
+            try:
+                result = runtime.call_tool("read_file", {"path": "sample.txt"})
+                payload = result["structuredContent"]
+                self.assertIs(result["isError"], False)
+                self.assertEqual(payload["content"], "hello\n")
+                self.assertTrue(any("Hook 0" in warning for warning in payload.get("warnings", [])))
+            finally:
+                runtime.close()
+
+    def test_read_files_batches_reads_and_returns_a_budget_continuation(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "first.txt").write_text("aaaaa", encoding="utf-8")
+            (workspace / "second.txt").write_text("bbbbb", encoding="utf-8")
+            runtime = Runtime(workspace)
+            first = runtime.call_tool(
+                "read_files",
+                {
+                    "requests": [{"path": "first.txt"}, {"path": "second.txt"}],
+                    "max_total_bytes": 5,
+                },
+            )
+            payload = first["structuredContent"]
+            self.assertEqual(payload["processed_count"], 1)
+            self.assertEqual(payload["remaining_request_count"], 1)
+            self.assertIs(payload["truncated"], True)
+            self.assertEqual(payload["files"][0]["content"], "aaaaa")
+            action = payload["next_action"]
+            self.assertEqual(action["tool"], "read_files")
+            self.assertEqual(action["arguments"]["requests"], [{"path": "second.txt"}])
+            second = runtime.call_tool(action["tool"], action["arguments"])
+            self.assertEqual(second["structuredContent"]["files"][0]["content"], "bbbbb")
+            self.assertIn("### first.txt", self.agent_text(first))
+            runtime.close()
 
     def test_agent_text_matches_per_tool_limits_without_renderer_truncation(self) -> None:
         # Per-call tool limits (here read_file max_bytes) are the only budget:
@@ -2266,12 +2420,6 @@ class FakeReadonlyAnnotationTests(unittest.TestCase):
                 ]
                 args = parser.parse_args(argv)
                 self.assertEqual(server_module.run_http(args), 2)
-
-    def test_install_chrome_bridge_flag_is_hidden_and_parseable(self) -> None:
-        parser = server_module.build_parser()
-        args = parser.parse_args(["--install-chrome-bridge"])
-        self.assertTrue(args.install_chrome_bridge)
-
 
 def file_path(name: str):
     return Path(name)

@@ -8,13 +8,15 @@ The boundary is:
 - `exec_command` starts in a workspace cwd
 - safe/trusted modes filter secrets and loader/startup env
 - safe/trusted modes block destructive commands
-- safe mode blocks network-looking commands, shell expansion, and inline scripts
+- safe mode defaults network-intent commands to the `deny` network policy and blocks shell expansion and inline scripts
+- an explicit network policy can require approval or allow only literal allowlisted domains independently of the permission mode
 - Landlock confines filesystem access when available
 
-`host` mode is an explicit opt-out from the command boundary. It preserves the
-server process's host environment and disables command gates and Landlock so
+`host` mode is an explicit opt-out from the ordinary command boundary. It preserves the
+server process's host environment and disables ordinary command gates and Landlock so
 `exec_command` can use local SSH/Git credentials and operate outside the
-workspace. Direct file tools remain workspace-confined. Treat a host-mode MCP
+workspace. An explicitly selected `deny` or `allowlist` network policy still
+applies. Direct file tools remain workspace-confined. Treat a host-mode MCP
 endpoint as remote command execution with the authority of the server user.
 
 The boundary is not:

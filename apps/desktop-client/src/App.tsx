@@ -44,17 +44,8 @@ function App() {
   const [dependencies, setDependencies] = useState<DependencyStatus>({
     uv: false,
     cloudflared: false,
-    app_helper: false,
     runtime_ready: false,
     runtime_version: null,
-    playwright_ready: false,
-    playwright_version: null,
-    chrome_installed: false,
-    chrome_cdp_ready: false,
-    chrome_manifest: false,
-    chrome_bridge_connected: false,
-    accessibility_trusted: null,
-    screen_recording_trusted: null,
   });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
@@ -199,28 +190,6 @@ function App() {
     setError("");
     try {
       await api.prepareRuntime(repair);
-      await refresh();
-    } catch (reason) {
-      setError(String(reason));
-    }
-  };
-
-  const openPermissionSettings = async (permission: "accessibility" | "screen_recording") => {
-    setMoreOpen(false);
-    setError("");
-    try {
-      await api.openPermissionSettings(permission);
-      await refresh();
-    } catch (reason) {
-      setError(String(reason));
-    }
-  };
-
-  const prepareChromeBridge = async () => {
-    setMoreOpen(false);
-    setError("");
-    try {
-      await api.prepareChromeBridge();
       await refresh();
     } catch (reason) {
       setError(String(reason));
@@ -606,21 +575,11 @@ function App() {
             <div className="dependency-summary">
               <span>{t("Dependencies")}</span>
               <small>{dependencies.runtime_ready ? "✓" : "○"} {t("MCP Runtime")}{dependencies.runtime_version ? ` ${dependencies.runtime_version}` : ""}</small>
-              <small>{dependencies.playwright_ready ? "✓" : "○"} Playwright{dependencies.playwright_version ? ` ${dependencies.playwright_version}` : ""}</small>
               <small>{dependencies.uv ? "✓" : "○"} uv</small>
               <small>{dependencies.cloudflared ? "✓" : "○"} cloudflared</small>
-              <small>{dependencies.app_helper ? "✓" : "○"} {t("App Helper")}</small>
-              <small>{dependencies.chrome_installed ? "✓" : "○"} Chrome</small>
-              <small>{dependencies.chrome_cdp_ready ? "✓" : "○"} Chrome CDP</small>
-              <small>{dependencies.chrome_bridge_connected ? "✓" : dependencies.chrome_manifest ? "◐" : "○"} {t("Chrome bridge")}{dependencies.chrome_bridge_connected ? ` · ${t("Connected")}` : dependencies.chrome_manifest ? ` · ${t("Installed")}` : ""}</small>
-              <small>{dependencies.accessibility_trusted ? "✓" : "○"} {t("Accessibility")}</small>
-              <small>{dependencies.screen_recording_trusted ? "✓" : "○"} {t("Screen Recording")}</small>
             </div>
             <button type="button" onClick={() => void prepareRuntime(false)}><DownloadIcon /><span>{t("Prepare runtime")}</span></button>
             <button type="button" onClick={() => void prepareRuntime(true)}><DownloadIcon /><span>{t("Repair runtime")}</span></button>
-            <button type="button" onClick={() => void prepareChromeBridge()}><DownloadIcon /><span>{t("Prepare Chrome bridge")}</span></button>
-            <button type="button" onClick={() => void openPermissionSettings("accessibility")}><DownloadIcon /><span>{t("Accessibility settings")}</span></button>
-            <button type="button" onClick={() => void openPermissionSettings("screen_recording")}><DownloadIcon /><span>{t("Screen Recording settings")}</span></button>
             <button type="button" onClick={() => void repairDependencies()}><DownloadIcon /><span>{t("Repair uv & cloudflared")}</span></button>
             <button type="button" onClick={() => void installResource("uv")}><DownloadIcon /><span>{t("Install uv")}</span></button>
             <button type="button" onClick={() => void installResource("cloudflared")}><DownloadIcon /><span>{t("Install cloudflared")}</span></button>

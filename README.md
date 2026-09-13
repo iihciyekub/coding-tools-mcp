@@ -145,8 +145,10 @@ speak MCP to this server and inherit the whole safety boundary. →
 
 ## The tool catalog
 
-One stable, truthfully annotated set — permission modes change command
-*policy*, never which tools the model sees. `apply_patch` is the sole direct
+One stable, truthfully annotated default set — permission modes change command
+*policy*, never which tools the model sees. Startup flags may opt into workflow
+tools or place them behind the static deferred gateway described below.
+`apply_patch` is the sole direct
 text/source-editing primitive: staged, baseline-checked, atomic across files,
 with rollback. Workflow Git operations, checkpoint restore, and workflow-state
 updates have their own explicit guarded mutation semantics rather than acting as
@@ -154,14 +156,29 @@ alternate general-purpose source editors.
 
 | Group | Tools |
 | --- | --- |
-| Files & search | `read_file` · `list_dir` · `list_files` · `search_text` · `apply_patch` · `view_image` |
-| Execution | `exec_command` · `write_stdin` · `read_output` · `kill_command` · `request_permissions` |
+| Files & search | `read_file` · `read_files` · `list_dir` · `list_files` · `search_text` · `tool_search` · `apply_patch` · `view_image` |
+| Execution | `exec_command` · `get_command` · `list_commands` · `write_stdin` · `read_output` · `kill_command` · `request_permissions` |
 | Git | `git_status` · `git_diff` · `git_log` · `git_show` · `git_blame` |
-| Runtime | `server_info` · `check_exec_environment` |
-| Browser | `browser_status` · `browser_tabs` · `browser_active_tab` · `browser_snapshot` · `browser_screenshot` · `browser_evaluate` · `browser_click` · `browser_type` · `browser_console` · `browser_network` · `browser_inspect` |
-| Chrome extensions | `chrome_extension_install` · `chrome_extension_status` · `chrome_extensions` · `chrome_extension_tabs` · `chrome_extension_execute` · `chrome_extension_send` |
-| macOS apps | `app_accessibility` · `app_list` · `app_launch` · `app_activate` · `app_windows` · `app_snapshot` · `app_click` · `app_type` · `app_press` · `app_menu` · `app_screenshot` |
+| Runtime | `server_info` · `check_exec_environment` · `runtime_doctor` · `hooks_status` · `shell_snapshot` |
 | Code intelligence | `code_symbols` · `code_definition` · `code_references` |
+
+`--enable-hooks` activates workspace-confined `before_tool`, `after_tool`, and
+`tool_error` hooks from `.agents/hooks.json`. `shell_snapshot` freezes the
+filtered command environment for later executions until explicitly refreshed.
+`runtime_doctor` gives an agent a non-destructive preflight with actionable
+warnings about missing command aliases/tools, workspace access, hooks, LSP,
+sandbox state, and network policy.
+With `--enable-workflow-tools --defer-workflow-tools`, the 40 workflow tools are
+found by `tool_search` and called through `tool_invoke` instead of being placed
+in the initial `tools/list` payload.
+
+Network command policy can be selected independently with
+`--network-policy deny|allowlist|unrestricted`. In allowlist mode, repeat
+`--network-allow-domain github.com` (or use `*.example.com` for subdomains).
+Targets outside the list, and network-intent commands whose destination cannot
+be resolved statically, require explicit permission. This is a command-policy
+gate rather than an OS-level egress firewall. The legacy `--allow-network`
+switch remains an alias for `--network-policy unrestricted`.
 
 Root `AGENTS.md`/`CLAUDE.md` files load automatically and come back in the
 `instructions` of `initialize`, or of `server/discover` for a client that
@@ -176,8 +193,8 @@ envelopes: [docs/tools-and-schemas.md](docs/tools-and-schemas.md) ·
 | --- | --- | --- |
 | `safe` (default) | day-to-day agent work | file tools and vetted commands; network-looking commands, shell expansion, inline scripts, and destructive commands all require explicit permission |
 | `trusted` | local development | opens network, shell expansion, and inline scripts; keeps secret filtering and destructive-command checks |
-| `dangerous` | isolated containers/VMs only | disables `exec_command` permission gates; workspace path boundaries still apply |
-| `host` | explicit full-host development | disables command gates and Landlock, inherits the server process's real home, temporary directories, SSH agent, Git credentials, and complete environment |
+| `dangerous` | isolated containers/VMs only | disables ordinary `exec_command` permission gates; workspace path boundaries still apply, and an explicit `deny`/`allowlist` network policy still applies |
+| `host` | explicit full-host development | disables ordinary command gates and Landlock, inherits the server process's real home, temporary directories, SSH agent, Git credentials, and complete environment; an explicit `deny`/`allowlist` network policy still applies |
 
 Recursive listing and search exclude `.git`, `node_modules`, build outputs,
 virtualenvs, and caches. Commands run with workspace-bound cwd, timeouts, and

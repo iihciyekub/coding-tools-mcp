@@ -77,82 +77,8 @@ pub struct RuntimeManager {
 pub struct DependencyStatus {
     pub uv: bool,
     pub cloudflared: bool,
-    pub app_helper: bool,
     pub runtime_ready: bool,
     pub runtime_version: Option<String>,
-    pub playwright_ready: bool,
-    pub playwright_version: Option<String>,
-    pub chrome_installed: bool,
-    pub chrome_cdp_ready: bool,
-    pub chrome_manifest: bool,
-    pub chrome_bridge_connected: bool,
-    pub accessibility_trusted: Option<bool>,
-    pub screen_recording_trusted: Option<bool>,
-}
-
-fn app_helper_path(resource_dir: &Path) -> PathBuf {
-    resource_dir
-        .join("helpers")
-        .join("coding-tools-mcp-app-helper")
-}
-
-fn helper_request(
-    resource_dir: &Path,
-    action: &str,
-    open_settings: bool,
-) -> Option<serde_json::Value> {
-    let helper = app_helper_path(resource_dir);
-    if !helper.is_file() {
-        return None;
-    }
-    let mut child = Command::new(helper)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let request = serde_json::json!({
-        "action": action,
-        "args": { "open_settings": open_settings }
-    });
-    child
-        .stdin
-        .take()?
-        .write_all(request.to_string().as_bytes())
-        .ok()?;
-    let output = child.wait_with_output().ok()?;
-    serde_json::from_slice(&output.stdout).ok()
-}
-
-fn helper_permission_status(resource_dir: &Path) -> (Option<bool>, Option<bool>) {
-    let Some(value) = helper_request(resource_dir, "permissions", false) else {
-        return (None, None);
-    };
-    (
-        value.get("accessibility_trusted").and_then(|v| v.as_bool()),
-        value
-            .get("screen_recording_trusted")
-            .and_then(|v| v.as_bool()),
-    )
-}
-
-fn chrome_installed() -> bool {
-    if cfg!(target_os = "macos") {
-        [
-            "/Applications/Google Chrome.app",
-            "/Applications/Google Chrome Beta.app",
-            "/Applications/Google Chrome Canary.app",
-        ]
-        .iter()
-        .any(|path| Path::new(path).exists())
-            || std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .is_some_and(|home| home.join("Applications/Google Chrome.app").exists())
-    } else {
-        which::which("google-chrome")
-            .or_else(|_| which::which("chrome"))
-            .is_ok()
-    }
 }
 
 impl RuntimeManager {
@@ -173,60 +99,16 @@ impl RuntimeManager {
 
     pub fn dependency_status(&self) -> DependencyStatus {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let (managed_runtime_ready, runtime_version, playwright_version) =
+        let (managed_runtime_ready, runtime_version) =
             environment::readiness(&self.resource_dir, &self.data_dir, &effective_path());
         let runtime_ready =
             managed_runtime_ready || self.runtime_ready_hint || !self.sessions.is_empty();
-        let app_helper = app_helper_path(&self.resource_dir).is_file();
-        let (accessibility_trusted, screen_recording_trusted) = if app_helper {
-            helper_permission_status(&self.resource_dir)
-        } else {
-            (None, None)
-        };
-        let chrome_manifest = if cfg!(target_os = "macos") {
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .map(|home| {
-                    home.join("Library")
-                        .join("Application Support")
-                        .join("Google")
-                        .join("Chrome")
-                        .join("NativeMessagingHosts")
-                        .join("com.codingtoolsmcp.chrome_bridge.json")
-                        .is_file()
-                })
-                .unwrap_or(false)
-        } else {
-            false
-        };
-        let chrome_bridge_connected = if cfg!(target_os = "macos") {
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .is_some_and(|home| {
-                    home.join("Library")
-                        .join("Application Support")
-                        .join("Coding Tools MCP")
-                        .join("chrome-native.sock")
-                        .exists()
-                })
-        } else {
-            false
-        };
         DependencyStatus {
             uv: resource_installer::is_managed_installed("uv", &self.data_dir)
                 || which::which_in("uv", Some(effective_path()), &cwd).is_ok(),
             cloudflared: resolve_cloudflared(&self.data_dir).is_ok(),
-            app_helper,
             runtime_ready,
             runtime_version,
-            playwright_ready: runtime_ready,
-            playwright_version,
-            chrome_installed: chrome_installed(),
-            chrome_cdp_ready: port_is_listening(9222),
-            chrome_manifest,
-            chrome_bridge_connected,
-            accessibility_trusted,
-            screen_recording_trusted,
         }
     }
 
@@ -248,13 +130,8 @@ impl RuntimeManager {
             return Err(format!("Local port {} is already in use. Stop the existing process or choose another port.", profile.runtime.local_port));
         }
         fs::create_dir_all(log_dir).map_err(|error| error.to_string())?;
-        let mut runtime = spawn_runtime(
-            profile,
-            log_dir,
-            resolved,
-            &self.resource_dir,
-            &self.data_dir.join("workflow"),
-        )?;
+        let mut runtime =
+            spawn_runtime(profile, log_dir, resolved, &self.data_dir.join("workflow"))?;
         if let Err(error) = wait_for_port(profile.runtime.local_port, &mut runtime, START_TIMEOUT) {
             runtime.terminate();
             return Err(error);
@@ -418,61 +295,7 @@ pub fn start_workspace(
     let resolved = resolved?;
     state.runtime_ready_hint = true;
     tunnel_setup?;
-    if cfg!(target_os = "macos") {
-        if let Err(error) = install_chrome_bridge(&resolved, Path::new(&profile.path), false) {
-            let _ = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(log_dir.join("setup.log"))
-                .and_then(|mut log| writeln!(log, "Chrome bridge setup warning: {error}"));
-        }
-    }
     state.start(profile, log_dir, resolved)
-}
-
-fn install_chrome_bridge(
-    resolved: &(PathBuf, Vec<String>),
-    current_dir: &Path,
-    open_extensions_page: bool,
-) -> Result<String, String> {
-    let mut command = Command::new(&resolved.0);
-    command
-        .args(&resolved.1)
-        .arg("--install-chrome-bridge")
-        .current_dir(current_dir)
-        .env("PATH", effective_path())
-        .stdin(Stdio::null());
-    if !open_extensions_page {
-        command.arg("--chrome-bridge-no-open");
-    }
-    let output = command
-        .output()
-        .map_err(|error| format!("Could not prepare Chrome bridge: {error}"))?;
-    if !output.status.success() {
-        let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if message.is_empty() {
-            "Chrome bridge preparation failed.".into()
-        } else {
-            message
-        });
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-pub fn prepare_chrome_bridge(
-    manager: &Arc<Mutex<RuntimeManager>>,
-    profile: &WorkspaceProfile,
-    log_dir: &Path,
-) -> Result<String, String> {
-    let cancelled = AtomicBool::new(false);
-    let (resources, data) = {
-        let state = manager
-            .lock()
-            .map_err(|_| "Runtime manager is unavailable")?;
-        (state.resource_dir.clone(), state.data_dir.clone())
-    };
-    let resolved = environment::resolve(&resources, &data, log_dir, &effective_path(), &cancelled)?;
-    install_chrome_bridge(&resolved, Path::new(&profile.path), true)
 }
 
 pub fn prepare_runtime(
@@ -507,36 +330,10 @@ pub fn prepare_runtime(
         .lock()
         .map_err(|_| "Runtime manager is unavailable")?
         .runtime_ready_hint = true;
-    let (_, version, playwright) = environment::readiness(&resources, &data, &effective_path());
+    let (_, version) = environment::readiness(&resources, &data, &effective_path());
     Ok(format!(
-        "Runtime {} ready with Playwright {}.",
-        version.as_deref().unwrap_or("managed"),
-        playwright.as_deref().unwrap_or("installed")
-    ))
-}
-
-pub fn open_app_permission(
-    manager: &Arc<Mutex<RuntimeManager>>,
-    permission: &str,
-) -> Result<String, String> {
-    let resources = manager
-        .lock()
-        .map_err(|_| "Runtime manager is unavailable")?
-        .resource_dir
-        .clone();
-    let action = match permission {
-        "accessibility" => "accessibility",
-        "screen_recording" => "screen_recording",
-        _ => return Err("Unknown macOS permission target.".into()),
-    };
-    let response = helper_request(&resources, action, true)
-        .ok_or_else(|| "Coding Tools MCP App Helper is unavailable.".to_string())?;
-    if response.get("ok").and_then(|value| value.as_bool()) != Some(true) {
-        return Err("Could not open the requested macOS permission settings.".into());
-    }
-    Ok(format!(
-        "Opened {} permission settings.",
-        permission.replace('_', " ")
+        "Runtime {} ready.",
+        version.as_deref().unwrap_or("managed")
     ))
 }
 
@@ -552,7 +349,6 @@ fn spawn_runtime(
     profile: &WorkspaceProfile,
     log_dir: &Path,
     resolved: (PathBuf, Vec<String>),
-    resource_dir: &Path,
     workflow_state_root: &Path,
 ) -> Result<ManagedChild, String> {
     let (program, prefix) = resolved;
@@ -577,12 +373,6 @@ fn spawn_runtime(
     command
         .current_dir(&profile.path)
         .env("PATH", effective_path());
-    let app_helper = resource_dir
-        .join("helpers")
-        .join("coding-tools-mcp-app-helper");
-    if app_helper.is_file() {
-        command.env("CODING_TOOLS_MCP_APP_HELPER", app_helper);
-    }
     for name in [
         "CODING_TOOLS_MCP_AUTH_MODE",
         "CODING_TOOLS_MCP_AUTH_TOKEN",

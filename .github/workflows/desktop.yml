@@ -7,9 +7,6 @@ on:
       - "coding_tools_mcp/**"
       - "pyproject.toml"
       - "uv.lock"
-      - "tests/test_browser_control.py"
-      - "tests/browser_bridge.test.cjs"
-      - "tests/test_macos_app_helper.py"
       - ".github/workflows/desktop.yml"
       - "Makefile"
   push:
@@ -19,9 +16,6 @@ on:
       - "coding_tools_mcp/**"
       - "pyproject.toml"
       - "uv.lock"
-      - "tests/test_browser_control.py"
-      - "tests/browser_bridge.test.cjs"
-      - "tests/test_macos_app_helper.py"
       - ".github/workflows/desktop.yml"
       - "Makefile"
 
@@ -104,15 +98,3 @@ jobs:
         if: runner.os != 'Windows'
         working-directory: apps/desktop-client/src-tauri
         run: cargo test prepare_external_runtime_without_uv -- --ignored
-
-      - name: Check Chrome bridge regressions
-        working-directory: .
-        run: uv run python -m unittest tests.test_browser_control
-
-      - name: Check macOS app helper delegation
-        working-directory: .
-        run: uv run python -m unittest tests.test_macos_app_helper
-
-      - name: Check extension execution and deadlines
-        working-directory: .
-        run: node --test tests/browser_bridge.test.cjs

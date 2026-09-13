@@ -16,7 +16,5 @@ export const api = {
   installResource: (target: "uv" | "cloudflared") => invoke<string>("install_resource", { target }),
   repairDependencies: () => invoke<string>("repair_dependencies"),
   prepareRuntime: (repair = false) => invoke<string>("prepare_runtime", { repair }),
-  prepareChromeBridge: () => invoke<string>("prepare_chrome_bridge"),
-  openPermissionSettings: (permission: "accessibility" | "screen_recording") => invoke<string>("open_permission_settings", { permission }),
   quit: () => invoke<void>("quit_app"),
 };

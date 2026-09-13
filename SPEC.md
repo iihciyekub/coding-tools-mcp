@@ -14,37 +14,48 @@ routing, plugin installation, image generation, or subagent orchestration.
 ## Fixed tool model
 
 There is one stable default catalog and one opt-in workflow extension selected
-at process startup. The runtime has no dynamic `tools/list_changed`, no
+at process startup. Workflow tools may also be placed behind a static deferred
+gateway selected at startup. The runtime has no dynamic `tools/list_changed`, no
 `edit_file`, and no required `open_workspace` call.
 `apply_patch` is the only direct text/source file-editing tool. Workflow Git
 operations, checkpoint restore, and workflow-state updates have separately
 specified guarded mutation semantics. `safe`, `trusted`, `dangerous`, and
 `host` are command permission policies and never alter `tools/list`.
 
-The default catalog contains 51 tools:
+The default catalog contains 28 tools when `view_image` is enabled:
 
-- runtime/context: `server_info`, `check_exec_environment`
-- workspace inspection: `read_file`, `list_dir`, `list_files`, `search_text`
+- runtime/context: `server_info`, `check_exec_environment`, `runtime_doctor`, `hooks_status`,
+  `shell_snapshot`
+- workspace inspection: `read_file`, `read_files`, `list_dir`, `list_files`,
+  `search_text`, `tool_search`
 - mutation: `apply_patch`
 - processes: `exec_command`, `get_command`, `list_commands`, `write_stdin`,
   `read_output`, `kill_command`
 - Git: `git_status`, `git_diff`, `git_log`, `git_show`, `git_blame`
 - policy/image: `request_permissions`, `view_image`
-- browser: `browser_status`, `browser_tabs`, `browser_active_tab`,
-  `browser_snapshot`, `browser_screenshot`, `browser_evaluate`, `browser_click`,
-  `browser_type`, `browser_console`, `browser_network`, `browser_inspect`
 - code intelligence: `code_symbols`, `code_definition`, `code_references`
-- Chrome extension bridge: `chrome_extension_install`, `chrome_extension_status`,
-  `chrome_extensions`, `chrome_extension_tabs`, `chrome_extension_execute`,
-  `chrome_extension_send`
-- macOS app control: `app_accessibility`, `app_list`, `app_launch`, `app_activate`,
-  `app_windows`, `app_snapshot`, `app_click`, `app_type`, `app_press`, `app_menu`,
-  `app_screenshot`
 
 `view_image` can be disabled as an installation capability. All other tools are
-fixed by the selected startup configuration. `--enable-workflow-tools` adds 53
+fixed by the selected startup configuration. `--enable-workflow-tools` adds 40
 project insight, Skills, checks, task, and checkpoint tools; see
 [tools and schemas](docs/tools-and-schemas.md) for their authoritative inventory.
+With `--defer-workflow-tools`, those 40 workflow tools are omitted from the
+direct catalog and are discovered through `tool_search` and invoked through the
+additional `tool_invoke` gateway. This yields 29 directly exposed tools while
+retaining all 69 runtime capabilities.
+
+`--enable-hooks` loads workspace-confined hook rules from `.agents/hooks.json`
+by default. Hooks run under the same command policy/sandbox as normal command
+execution and may observe `before_tool`, `after_tool`, and `tool_error` events.
+`shell_snapshot` explicitly freezes the filtered command environment and PATH
+tool resolution for subsequent commands until refreshed.
+
+Network policy is selected at startup as `deny`, `allowlist`, or
+`unrestricted`. `allowlist` accepts exact domains and `*.example.com` patterns;
+network-intent commands with a statically detected target outside that set, or
+with a target that cannot be resolved from the command line, require explicit
+permission. This layer is command-policy enforcement rather than an OS-level
+egress firewall.
 
 ## Protocol
 

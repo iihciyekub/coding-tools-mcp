@@ -116,17 +116,8 @@ export interface WorkflowSnapshot {
 export interface DependencyStatus {
   uv: boolean;
   cloudflared: boolean;
-  app_helper: boolean;
   runtime_ready: boolean;
   runtime_version: string | null;
-  playwright_ready: boolean;
-  playwright_version: string | null;
-  chrome_installed: boolean;
-  chrome_cdp_ready: boolean;
-  chrome_manifest: boolean;
-  chrome_bridge_connected: boolean;
-  accessibility_trusted: boolean | null;
-  screen_recording_trusted: boolean | null;
 }
 
 export interface LogBundle {

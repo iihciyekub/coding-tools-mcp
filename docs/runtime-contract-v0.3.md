@@ -129,7 +129,7 @@ instructions:
     "io.modelcontextprotocol/serverInfo": {
       "name": "coding-tools-mcp",
       "title": "Coding Tools MCP",
-      "version": "0.3.8"
+      "version": "0.3.9"
     }
   }
 }
@@ -350,7 +350,7 @@ Retry: This command_id has expired or never existed; …
 Known tool error codes include:
 
 ```json
-["ABSOLUTE_PATH_DENIED", "ACCESSIBILITY_PERMISSION_REQUIRED", "APPROVAL_EXPIRED", "APPROVAL_NOT_FOUND", "APPROVAL_NOT_USABLE", "APPROVAL_SCOPE_MISMATCH", "APP_CONTROL_ERROR", "APP_HELPER_ERROR", "BINARY_FILE", "BROWSER_DOWNLOAD_NOT_FOUND", "BROWSER_DOWNLOAD_TOO_LARGE", "BROWSER_DOWNLOAD_UNAVAILABLE", "BROWSER_ERROR", "BROWSER_TIMEOUT", "BROWSER_WATCH_NOT_FOUND", "CHECKPOINT_CONFLICT", "CHECKPOINT_NOT_FOUND", "CHECKPOINT_SCOPE_INVALID", "CHECKPOINT_TOO_LARGE", "CHECK_NOT_FOUND", "CHECK_RUN_NOT_FOUND", "CHROME_EXTENSION_ERROR", "CHROME_EXTENSION_UNAVAILABLE", "COMMAND_CLOSED", "COMMAND_LIMIT_REACHED", "COMMAND_NOT_FOUND", "ELICITATION_UNSUPPORTED", "GIT_COMMIT_SCOPE_MISMATCH", "GIT_ERROR", "GIT_NOT_REPOSITORY", "GIT_PATH_SCOPE_REQUIRED", "GIT_STATE_CONFLICT", "GIT_WORKTREE_DIRTY", "GIT_WORKTREE_EXISTS", "GIT_WORKTREE_NOT_FOUND", "INTERNAL_ERROR", "INVALID_ARGUMENT", "INVALID_GIT_BRANCH", "INVALID_TASK_TRANSITION", "IS_DIRECTORY", "LSP_EDIT_TOO_LARGE", "LSP_EDIT_UNSUPPORTED", "LSP_ERROR", "LSP_EXITED", "LSP_LANGUAGE_UNSUPPORTED", "LSP_PATH_OUTSIDE_WORKSPACE", "LSP_TIMEOUT", "LSP_UNAVAILABLE", "NOT_A_DIRECTORY", "NOT_FOUND", "OPERATION_CONFLICT", "OPERATION_NOT_FOUND", "OPERATION_PENDING", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "PROTOCOL_TASK_NOT_FOUND", "REVIEW_CONFLICT", "REVIEW_NOT_FOUND", "REVIEW_TOO_LARGE", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_UNAVAILABLE", "SCREEN_RECORDING_PERMISSION_REQUIRED", "SYMLINK_ESCAPE", "TASK_CONFLICT", "TASK_NOT_FOUND", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING", "UNSUPPORTED_PLATFORM", "WORKFLOW_STORE_ERROR"]
+["ABSOLUTE_PATH_DENIED", "ACCESSIBILITY_PERMISSION_REQUIRED", "APPROVAL_EXPIRED", "APPROVAL_NOT_FOUND", "APPROVAL_NOT_USABLE", "APPROVAL_SCOPE_MISMATCH", "APP_CONTROL_ERROR", "APP_HELPER_ERROR", "BINARY_FILE", "BROWSER_DOWNLOAD_NOT_FOUND", "BROWSER_DOWNLOAD_TOO_LARGE", "BROWSER_DOWNLOAD_UNAVAILABLE", "BROWSER_ERROR", "BROWSER_TIMEOUT", "BROWSER_WATCH_NOT_FOUND", "CHECKPOINT_CONFLICT", "CHECKPOINT_NOT_FOUND", "CHECKPOINT_SCOPE_INVALID", "CHECKPOINT_TOO_LARGE", "CHECK_NOT_FOUND", "CHECK_RUN_NOT_FOUND", "CHROME_EXTENSION_ERROR", "CHROME_EXTENSION_UNAVAILABLE", "COMMAND_CLOSED", "COMMAND_LIMIT_REACHED", "COMMAND_NOT_FOUND", "ELICITATION_UNSUPPORTED", "GIT_COMMIT_SCOPE_MISMATCH", "GIT_ERROR", "GIT_NOT_REPOSITORY", "GIT_PATH_SCOPE_REQUIRED", "GIT_STATE_CONFLICT", "GIT_WORKTREE_DIRTY", "GIT_WORKTREE_EXISTS", "GIT_WORKTREE_NOT_FOUND", "HOOK_BLOCKED", "INTERNAL_ERROR", "INVALID_ARGUMENT", "INVALID_GIT_BRANCH", "INVALID_HOOK_CONFIG", "INVALID_TASK_TRANSITION", "IS_DIRECTORY", "LSP_EDIT_TOO_LARGE", "LSP_EDIT_UNSUPPORTED", "LSP_ERROR", "LSP_EXITED", "LSP_LANGUAGE_UNSUPPORTED", "LSP_PATH_OUTSIDE_WORKSPACE", "LSP_TIMEOUT", "LSP_UNAVAILABLE", "NOT_A_DIRECTORY", "NOT_FOUND", "OPERATION_CONFLICT", "OPERATION_NOT_FOUND", "OPERATION_PENDING", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "PROTOCOL_TASK_NOT_FOUND", "REVIEW_CONFLICT", "REVIEW_NOT_FOUND", "REVIEW_TOO_LARGE", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_UNAVAILABLE", "SCREEN_RECORDING_PERMISSION_REQUIRED", "SYMLINK_ESCAPE", "TASK_CONFLICT", "TASK_NOT_FOUND", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING", "UNSUPPORTED_PLATFORM", "WORKFLOW_STORE_ERROR"]
 ```
 
 Error categories are `validation`, `security`, `permission`, `runtime`,
@@ -429,11 +429,15 @@ remain short-lived and process-local. Forwarded headers are ignored unless
 
 ## Stable tool inventory
 
-The default catalog has 51 tools, including `view_image`. Setting
+The default catalog has 28 tools, including `view_image`. Setting
 `CODING_TOOLS_MCP_ENABLE_VIEW_IMAGE=0` removes that optional binary-content
-tool. `--enable-workflow-tools` adds the 53 tools specified in the opt-in
-workflow section. Both selections are fixed at startup; the runtime does not
-emit dynamic tool-list changes.
+tool. `--enable-workflow-tools` adds the 40 tools specified in the opt-in
+workflow section for 68 directly exposed tools. Adding
+`--defer-workflow-tools` instead hides those 40 workflow tools from the direct
+catalog, exposes `tool_invoke`, and leaves them searchable through
+`tool_search`: 29 tools are direct and 40 are deferred, while all 69 registered
+runtime capabilities remain available. These selections are fixed at startup;
+the runtime does not emit dynamic tool-list changes.
 
 Each definition below lists the live input property names and annotations. The
 authoritative JSON Schemas are returned by `tools/list` and checked for drift in
@@ -450,7 +454,9 @@ Annotations: `{"title":"Server info","readOnlyHint":true,"destructiveHint":false
 Returns server version, `supported_protocol_versions`, workspace, fixed tool
 count, auth state, permission mode, environment scope, runtime directories,
 boolean host SSH/Git integration availability, project-context
-metadata, exec policy, and the static retained-output budget. It reports no
+metadata, exec policy, network policy metadata, and the static retained-output
+budget. The compatibility `network_allowed` boolean is true only for
+`unrestricted`; allowlist details live under `network_policy`. It reports no
 per-session value and no runtime counter: there is no session, and how often a
 budget was hit is a property of the process rather than an answer to whichever
 client asked. Those counters travel with telemetry.
@@ -463,6 +469,54 @@ Annotations: `{"title":"Check exec environment","readOnlyHint":true,"destructive
 
 Returns lightweight policy and Landlock status without running active probes.
 
+### runtime_doctor
+
+Inputs: none.
+
+Annotations: `{"title":"Runtime doctor","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+Returns a non-destructive health report intended for agent planning before it
+starts trial-and-error execution. It resolves common command names from the
+current command PATH, distinguishes `python` from `python3`, reports workspace
+read/write access, shell-snapshot state, hook warnings, workflow/deferred-tool
+state, optional LSP status, Landlock availability/enforcement, and the active
+network policy. Actionable findings are returned as bounded `issues` entries
+with a code, message, and suggested fix. The doctor does not make network
+requests and does not mutate the workspace.
+
+### hooks_status
+
+Inputs: none.
+
+Annotations: `{"title":"Hooks status","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+Reports whether opt-in workspace hooks are enabled, their workspace-relative
+configuration path, supported event names, loaded rule metadata, and config
+warnings. It never returns hook command text. Hooks are disabled by default;
+`--enable-hooks` reads `.agents/hooks.json` unless `--hooks-file` or
+`CODING_TOOLS_MCP_HOOKS_FILE` selects another workspace-confined JSON file.
+
+Supported hook events are `before_tool`, `after_tool`, and `tool_error`.
+Commands receive one redacted JSON event on stdin and run under the same command
+policy and filesystem sandbox as normal commands. A failing blocking
+`before_tool` hook rejects the target call with `HOOK_BLOCKED`; failures in
+non-blocking/post/error hooks are returned as warnings. Hook output is bounded
+and timed-out hook process groups are terminated.
+
+### shell_snapshot
+
+Inputs: `"refresh"`, `"tools"`.
+
+Annotations: `{"title":"Shell snapshot","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+Captures the runtime's already-filtered command environment without returning
+raw environment values. The result includes a stable snapshot id, environment
+fingerprint, shell, PATH entries, environment count, and resolved executable
+paths for a bounded requested tool-name list. Once captured, subsequent
+`exec_command` environment construction starts from the frozen snapshot until
+`shell_snapshot(refresh=true)` replaces it. Per-call `exec_command.env` values
+are still merged afterward and remain subject to the normal secret filtering.
+
 ### read_file
 
 Inputs: `"path"`, `"start_line"`, `"end_line"`, `"max_lines"`, `"max_bytes"`, `"encoding"`.
@@ -472,6 +526,17 @@ Annotations: `{"title":"Read file","readOnlyHint":true,"destructiveHint":false,"
 Reads UTF-8 ranges as a stream, reports full file line/byte metadata, rejects
 binary content, and returns continuation metadata when bounded. The
 continuation repeats the workspace-relative path it was given.
+
+### read_files
+
+Inputs: `"requests"`, `"max_total_bytes"`.
+
+Annotations: `{"title":"Read files","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+Reads up to 32 bounded UTF-8 file slices in one call. Each request accepts
+`path`, `start_line`, `end_line`, `max_lines`, `max_bytes`, and `encoding`.
+`max_total_bytes` bounds the complete batch and the result includes a
+`read_files` continuation when later requests do not fit in that budget.
 
 ### list_dir
 
@@ -495,6 +560,33 @@ Annotations: `{"title":"Search text","readOnlyHint":true,"destructiveHint":false
 
 Ripgrep output is consumed incrementally and the process stops once the result
 cap is known to be exceeded. `context_lines=0` does not reread matching files.
+
+### tool_search
+
+Inputs: `"query"`, `"limit"`, `"include_schema"`.
+
+Annotations: `{"title":"Search tools","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+Ranks all tools available to the current Runtime. Results include tool name,
+title, description, annotations, score, and whether the match is deferred;
+`include_schema=true` returns direct-tool schemas. Deferred matches always
+include their schema plus `invoke_via: "tool_invoke"`, so a host can call the
+gateway without a dynamic `tools/list` refresh. The default result limit is
+eight.
+
+### tool_invoke
+
+Inputs: `"name"`, `"arguments"`.
+
+Annotations: `{"title":"Invoke deferred tool","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Exposed only when both `--enable-workflow-tools` and
+`--defer-workflow-tools` are active. It accepts only names in that runtime's
+40-tool deferred workflow set; direct tools and the gateway itself are rejected.
+The nested tool receives its normal schema validation, permission checks, hook
+events, telemetry, and structured result. `tool_invoke` therefore acts as a
+static MCP-compatible deferred dispatch gateway rather than changing the live
+tool catalog.
 
 ### apply_patch
 
@@ -528,6 +620,17 @@ exits use `terminated`. Ordinary non-zero exit codes still use `exited`.
 identical execution idempotent for the retained-command lifetime: a duplicate
 returns the existing `command_id`; different execution parameters under the
 same id return `OPERATION_CONFLICT`.
+
+Network intent is evaluated independently from the other command gates. The
+startup-selected network policy is `deny`, `allowlist`, or `unrestricted`.
+`deny` requires explicit permission for detected network-intent commands.
+`allowlist` permits a command without a network approval only when every
+statically resolved target host matches an exact allowlist entry or a
+`*.example.com` subdomain rule; a blocked host or unresolved destination still
+requires permission. `unrestricted` skips the network gate. `--allow-network`
+is retained as a compatibility alias for `--network-policy unrestricted`.
+The allowlist is command-policy enforcement and does not claim kernel-level
+egress isolation.
 
 Example: `{"cmd":"pytest -q","workdir":".","yield_time_ms":30000}`.
 
@@ -648,6 +751,12 @@ Annotations: `{"title":"View image","readOnlyHint":true,"destructiveHint":false,
 The base64 data appears exactly once, in one MCP image content block. Stable
 `structuredContent` contains metadata only; it has no duplicate base64 or data
 URL. Pillow is optional and used only for requested auto-resize.
+
+> Historical note: the `browser_*`, `chrome_extension_*`, and `app_*` sections
+> below document GUI-automation tools removed from the live v0.3 catalog. They
+> are not registered, returned by `tools/list`, or callable by current runtimes.
+> They remain here only to make older v0.3 deployments and migration records
+> interpretable.
 
 ### browser_status
 

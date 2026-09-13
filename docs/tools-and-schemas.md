@@ -6,17 +6,22 @@ properties, annotations, and error codes with the contract.
 
 ## Fixed inventory
 
-The implementation declares exactly 104 tools. The default catalog remains the
-51 tools below:
+The implementation declares exactly 69 tools. With the default `view_image`
+capability enabled, the default catalog exposes 28 tools:
 
 - `server_info`: server, workspace, automatic project context, policy, runtime,
   auth, protocol, and fixed-catalog metadata.
 - `check_exec_environment`: lightweight execution policy and Landlock status.
+- `runtime_doctor`: non-destructive runtime health report with actionable warnings for common toolchain commands, workspace access, shell snapshot, hooks, LSP, sandbox state, and network policy.
+- `hooks_status`: report whether opt-in workspace hooks are enabled and summarize loaded rules.
+- `shell_snapshot`: capture or refresh the stable command environment reused by later `exec_command` calls.
 - `read_file`: stream a bounded UTF-8 range without loading the whole file.
+- `read_files`: batch several bounded UTF-8 file reads under one total byte budget.
 - `list_dir`: list immediate or bounded-recursive directory entries.
 - `list_files`: iterate files with glob, ignore, hidden-file, sort, and cap
   controls.
 - `search_text`: literal or regex search; ripgrep stops after the result cap.
+- `tool_search`: rank all tools available to the current runtime; deferred matches include their invocation metadata and schema.
 - `apply_patch`: stage and atomically commit add/update/delete/move envelopes.
 - `exec_command`: run a bounded command and optionally deduplicate retries with `operation_id`.
 - `get_command`: read one command's status by `command_id` or `operation_id` without consuming output.
@@ -31,39 +36,16 @@ The implementation declares exactly 104 tools. The default catalog remains the
 - `git_blame`: structured bounded line attribution.
 - `request_permissions`: request an exact, expiring one-shot desktop approval when workflow tools are enabled.
 - `view_image`: one MCP image content block plus structured metadata.
-- `browser_status`: connect to a loopback Chrome CDP endpoint through Playwright.
-- `browser_tabs`: list inspectable Chrome tabs.
-- `browser_active_tab`: return the currently visible Chrome tab when detectable.
-- `browser_snapshot`: return bounded visible text and simplified interactive DOM elements.
-- `browser_screenshot`: capture the selected tab as one MCP PNG image content block.
-- `browser_evaluate`: evaluate JavaScript in the selected tab.
-- `browser_click`: click an element using a Playwright selector.
-- `browser_type`: fill or type into an element using a Playwright selector.
-- `browser_console`: capture bounded console messages and page errors.
-- `browser_network`: inspect current resource timing and bounded network events.
-- `browser_inspect`: inspect one element's geometry, style, HTML, parents, and animations.
 - `code_symbols`: list bounded language-aware symbol definitions.
 - `code_definition`: find definitions for one symbol.
 - `code_references`: find exact identifier references for one symbol.
-- `chrome_extension_install`: install the local Native Messaging manifest and unpacked bridge extension files.
-- `chrome_extension_status`: report bridge install/connectivity state.
-- `chrome_extensions`: list installed Chrome extensions through the bridge.
-- `chrome_extension_tabs`: list Chrome tabs through extension APIs.
-- `chrome_extension_execute`: evaluate JavaScript through Chrome's debugger API.
-- `chrome_extension_send`: send an external message to an extension that permits it.
-- `app_accessibility`: report Accessibility trust and optionally open System Settings.
-- `app_list`: list running macOS applications.
-- `app_launch`: launch an application by name or bundle identifier.
-- `app_activate`: bring an application to the foreground.
-- `app_windows`: list Accessibility window metadata.
-- `app_snapshot`: return a bounded Accessibility UI hierarchy.
-- `app_click`: press or click a matched Accessibility element.
-- `app_type`: set/type text using Accessibility and keyboard events.
-- `app_press`: send a key plus modifiers.
-- `app_menu`: choose a hierarchical app menu item.
-- `app_screenshot`: capture an app window as one MCP PNG image block.
 
-Starting the server with `--enable-workflow-tools` adds these 53 tools. The
+When deferred workflow exposure is selected, one additional registered gateway
+is directly exposed:
+
+- `tool_invoke`: validate and dispatch one workflow tool returned by `tool_search` while keeping that workflow tool out of `tools/list`.
+
+Starting the server with `--enable-workflow-tools` adds these 40 tools. The
 selection is fixed for that runtime; it does not change during a connection:
 
 - `workspace_overview`: summarize manifests, languages, entry points, top-level areas, and instruction files.
@@ -102,80 +84,37 @@ selection is fixed for that runtime; it does not change during a connection:
 - `review_get`: read a review and report whether its code snapshot is stale.
 - `approval_get`: read one persistent approval request and its current state.
 - `approval_list`: list bounded approval requests, optionally filtered by state.
-- `browser_navigate`: navigate the selected tab to an HTTP(S) URL.
-- `browser_back`: navigate the selected tab back in history.
-- `browser_reload`: reload the selected tab.
-- `browser_hover`: hover a selected element.
-- `browser_select`: select values in a native select control.
-- `browser_press`: send a key chord to the page or a selected element.
-- `browser_upload`: attach explicit workspace files or runtime-managed downloads to a file input.
-- `browser_download`: stream one HTTP(S) resource through the selected tab's CDP network context into bounded runtime-managed storage.
-- `browser_watch_start`: start a process-local bounded event watch for one selected browser tab.
-- `browser_watch_poll`: read watch events after a sequence cursor with optional bounded long-polling.
-- `browser_watch_stop`: stop one runtime-local browser watch without closing the user's Chrome.
-- `browser_wait`: wait for bounded selector, URL, text, or time conditions.
-- `browser_events`: sample bounded console, page-error, failed-request, dialog, and popup events, optionally around one observed click.
 - `checkpoint_create`: snapshot an explicit bounded set of UTF-8 files outside Git state.
 - `checkpoint_list`: list persistent workspace checkpoints.
 - `checkpoint_diff`: compare a checkpoint to current files and issue a state-bound restore token.
 - `checkpoint_restore`: atomically restore checkpoint files when the preview token is still current.
 
 `view_image` may be disabled when an installation cannot accept binary image
-content. The workflow toolset is opt-in. Both selections are startup-time
-capability gates; `listChanged` remains `false`.
+content. The workflow toolset is opt-in. With normal workflow exposure the
+direct catalog contains 68 tools. Adding `--defer-workflow-tools` keeps those 40
+workflow capabilities available to `tool_search` but removes them from the
+direct `tools/list`; `tool_invoke` is exposed instead, producing a 29-tool
+direct catalog and 40 deferred tools. A deferred search result always includes
+its input schema and `invoke_via: "tool_invoke"`. This is a static gateway
+selected at startup, not a dynamic tool-list mutation, so `listChanged` remains
+`false`.
 
-## Chrome extension bridge
+Network command gating has three startup-selected modes: `deny`, `allowlist`,
+and `unrestricted`. `--network-allow-domain` may be repeated and
+`CODING_TOOLS_MCP_NETWORK_ALLOW_DOMAINS` accepts a comma-separated list.
+Allowlist rules are exact domains or `*.example.com` subdomain patterns.
+This is command-policy enforcement: statically detected targets outside the
+allowlist, plus network-intent commands whose target cannot be resolved from
+the command line, require explicit permission. It is deliberately not described
+as an OS-level egress firewall; that belongs to a future sandbox layer.
 
-`chrome_extension_install` writes a per-user Chrome Native Messaging host
-manifest and copies the bundled Manifest V3 bridge extension to the user's
-application-support directory. Google Chrome requires the user to enable
-Developer mode and choose **Load unpacked** once; official Chrome builds no
-longer accept command-line unpacked-extension loading. By default the install
-tool opens `chrome://extensions` after staging the files. The bridge has a stable
-extension id and uses a local user-only Unix socket between the Native Messaging
-host and MCP runtimes. Desktop releases use an external Python environment;
-the native host runs through its installed console entry point or a small launcher
-pinned to that interpreter. Run `chrome_extension_install` again after switching
-Python environments. See the [desktop runtime setup](../apps/desktop-client/README.md)
-for dependency downloads, reuse, and macOS permission implications.
-
-`chrome_extension_send` can message another extension only when that target
-extension explicitly permits external messaging. Chrome's extension isolation
-is not bypassed.
-
-## macOS application control
-
-The `app_*` tools use macOS Accessibility/CGEvent APIs. Desktop 0.3.19 routes
-these calls through a bundled native App Helper so Accessibility permission is
-associated with a stable signed executable rather than the external Python
-runtime. UI inspection and input require Accessibility permission for that
-helper; `app_screenshot` may also require Screen Recording permission. Source/CLI
-launches without a configured helper retain the direct Python implementation as
-a compatibility fallback. Unsupported platforms return a structured
-`UNSUPPORTED_PLATFORM` failure instead of emulating GUI control.
-
-## Local Chrome connection
-
-The browser tools require Python Playwright 1.60+ and attach to an already-running
-Chromium CDP endpoint. The default is `http://127.0.0.1:9222`; set
-`CODING_TOOLS_MCP_BROWSER_CDP_URL` or pass `endpoint` to override it. Remote
-hosts are rejected: the endpoint must be loopback (`127.0.0.1`, `localhost`, or
-`::1`).
-
-On macOS, a simple development launch is:
-
-```bash
-/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
-  --remote-debugging-address=127.0.0.1 \
-  --remote-debugging-port=9222 \
-  --user-data-dir=/tmp/coding-tools-mcp-chrome
-```
-
-Recent Chrome releases may ignore remote debugging against the normal default
-profile, so a non-default `--user-data-dir` is the reliable configuration. The
-MCP server never launches a browser and never calls `browser.close()` on an
-attached Chrome instance; each tool call opens a short-lived Playwright CDP
-client connection and drops only that connection when the call finishes.
+Workspace hooks are separately opt-in with `--enable-hooks`. The default config
+path is `.agents/hooks.json` (override with `--hooks-file` or
+`CODING_TOOLS_MCP_HOOKS_FILE`). Supported events are `before_tool`,
+`after_tool`, and `tool_error`. Hooks execute under the same command policy and
+filesystem sandbox as `exec_command`; a failing blocking `before_tool` hook
+rejects the target call. Hook arguments/results are redacted before being sent
+to hook stdin, and hook stdout/stderr is bounded.
 
 ## Result envelope
 

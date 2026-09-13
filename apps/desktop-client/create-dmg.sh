@@ -12,6 +12,7 @@ esac
 APP_PATH="${1:-src-tauri/target/release/bundle/macos/Coding Tools MCP.app}"
 OUTPUT_PATH="${2:-src-tauri/target/release/bundle/dmg/Coding Tools MCP_${VERSION}_${BUNDLE_ARCH}.dmg}"
 VOLNAME="Coding Tools MCP"
+DMG_ICON_SIZE="112"
 
 if [[ ! -d "$APP_PATH" ]]; then
   echo "App bundle not found: $APP_PATH" >&2
@@ -65,7 +66,7 @@ tell application "Finder"
     set bounds of container window to {120, 120, 720, 470}
     set theViewOptions to icon view options of container window
     set arrangement of theViewOptions to not arranged
-    set icon size of theViewOptions to 112
+    set icon size of theViewOptions to $DMG_ICON_SIZE
     set text size of theViewOptions to 13
     set position of item "Coding Tools MCP.app" to {165, 185}
     set position of item "Applications" to {435, 185}

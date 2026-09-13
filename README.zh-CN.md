@@ -133,21 +133,33 @@ Linux：按工作区管理配置、一键启停服务器与隧道、凭证写入
 
 ## 工具目录
 
-一套稳定且如实标注的目录——权限模式改变的是命令*策略*，而不是模型看到哪些
-工具。`apply_patch` 是唯一的直接文本/源码编辑原语：分阶段、基线校验、跨文件
+默认提供一套稳定且如实标注的目录——权限模式改变的是命令*策略*，而不是模型
+看到哪些工具。启动参数可以额外启用 workflow 工具，或把它们放到静态 deferred
+网关后面。`apply_patch` 是唯一的直接文本/源码编辑原语：分阶段、基线校验、跨文件
 原子提交并支持回滚。工作流中的 Git 写操作、Checkpoint 恢复和工作流状态更新
 具有各自明确且受保护的写语义，不是绕过 Patch 引擎的通用源码编辑器。
 
 | 分组 | 工具 |
 | --- | --- |
-| 文件与搜索 | `read_file` · `list_dir` · `list_files` · `search_text` · `apply_patch` · `view_image` |
-| 执行 | `exec_command` · `write_stdin` · `read_output` · `kill_command` · `request_permissions` |
+| 文件与搜索 | `read_file` · `read_files` · `list_dir` · `list_files` · `search_text` · `tool_search` · `apply_patch` · `view_image` |
+| 执行 | `exec_command` · `get_command` · `list_commands` · `write_stdin` · `read_output` · `kill_command` · `request_permissions` |
 | Git | `git_status` · `git_diff` · `git_log` · `git_show` · `git_blame` |
-| 运行时 | `server_info` · `check_exec_environment` |
-| 浏览器 | `browser_status` · `browser_tabs` · `browser_active_tab` · `browser_snapshot` · `browser_screenshot` · `browser_evaluate` · `browser_click` · `browser_type` · `browser_console` · `browser_network` · `browser_inspect` |
-| Chrome 扩展 | `chrome_extension_install` · `chrome_extension_status` · `chrome_extensions` · `chrome_extension_tabs` · `chrome_extension_execute` · `chrome_extension_send` |
-| macOS App | `app_accessibility` · `app_list` · `app_launch` · `app_activate` · `app_windows` · `app_snapshot` · `app_click` · `app_type` · `app_press` · `app_menu` · `app_screenshot` |
+| 运行时 | `server_info` · `check_exec_environment` · `runtime_doctor` · `hooks_status` · `shell_snapshot` |
 | 代码智能 | `code_symbols` · `code_definition` · `code_references` |
+
+`--enable-hooks` 会从 `.agents/hooks.json` 启用工作区范围内的
+`before_tool`、`after_tool`、`tool_error` hooks。`shell_snapshot` 会冻结过滤后的
+命令环境，后续执行持续复用，直到显式刷新。`runtime_doctor` 会进行非破坏性
+运行时体检，并直接给 agent 返回缺失命令/别名、工作区访问、Hook、LSP、沙箱状态
+与网络策略方面的可执行修复建议。使用
+`--enable-workflow-tools --defer-workflow-tools` 时，40 个 workflow 工具不再进入
+初始 `tools/list`，而是由 `tool_search` 搜索并通过 `tool_invoke` 调用。
+
+网络命令策略可独立选择 `--network-policy deny|allowlist|unrestricted`。
+allowlist 模式下可重复使用 `--network-allow-domain github.com`，子域可写成
+`*.example.com`。不在列表中的目标，以及无法从命令行静态确定目标的联网命令，
+都需要显式授权。这里是命令策略层的门控，并不是操作系统级出站防火墙；旧的
+`--allow-network` 仍兼容，并等价于 `--network-policy unrestricted`。
 
 仓库根部的 `AGENTS.md`/`CLAUDE.md` 会自动载入，并随 `initialize` 的
 `instructions` 下发；不握手的客户端则通过 `server/discover` 拿到同一份内容。
@@ -162,8 +174,8 @@ Linux：按工作区管理配置、一键启停服务器与隧道、凭证写入
 | --- | --- | --- |
 | `safe`（默认） | 日常 agent 工作 | 文件工具与常规命令；疑似联网命令、shell 展开、内联脚本、破坏性命令均需显式授权 |
 | `trusted` | 本地开发 | 放开网络、shell 展开与内联脚本；保留敏感值过滤与破坏性命令检查 |
-| `dangerous` | 仅限隔离容器/虚拟机 | 关闭 `exec_command` 权限门；工作区路径边界依然生效 |
-| `host` | 显式的本机完全开发 | 关闭命令权限门与 Landlock，继承服务进程真实的 HOME、临时目录、SSH agent、Git 凭据和完整环境 |
+| `dangerous` | 仅限隔离容器/虚拟机 | 关闭普通 `exec_command` 权限门；工作区路径边界依然生效，显式设置的 `deny`/`allowlist` 网络策略仍然生效 |
+| `host` | 显式的本机完全开发 | 关闭普通命令权限门与 Landlock，继承服务进程真实的 HOME、临时目录、SSH agent、Git 凭据和完整环境；显式设置的 `deny`/`allowlist` 网络策略仍然生效 |
 
 递归列举与搜索默认排除 `.git`、`node_modules`、构建产物、虚拟环境和常见
 缓存。命令在工作区限定的 cwd 下运行，带超时与输出上限；除显式启用的

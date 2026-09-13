@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+## 0.3.9 - 2026-09-14
+
+- Desktop 0.3.21 ships the 0.3.9 runtime, removes the retired Browser/Chrome/App control stack from the packaged desktop path, and keeps the lightweight external-runtime bootstrap model.
+- Desktop runtime packaging now removes stale setuptools `build/` and egg-info caches before creating the bundled wheel, preventing deleted modules from being silently repackaged into a release artifact.
+
+- Removed the macOS `app_*` control tools, Playwright/CDP `browser_*` tools, and Chrome Native Messaging `chrome_extension_*` tools from the live MCP catalog and desktop runtime integration. The corresponding browser/app implementations, helper, bridge extension, CLI bridge modes, and Playwright production dependency are no longer part of the product path.
+- Added `read_files` for bounded multi-file reads in one MCP call and expanded `tool_search` into the discovery surface for every capability available to the current runtime.
+- Added opt-in deferred workflow exposure: `--defer-workflow-tools` keeps the 40 workflow capabilities out of the initial `tools/list`, returns their schemas from `tool_search`, and dispatches them through the static `tool_invoke` gateway without dynamic tool-list mutation.
+- Added explicit `shell_snapshot` capture/refresh so later command calls can reuse a stable filtered environment and PATH tool resolution instead of rediscovering the host environment on every execution.
+- Added opt-in workspace hooks from `.agents/hooks.json` with `before_tool`, `after_tool`, and `tool_error` events. Hooks share normal command policy/sandboxing, receive redacted event JSON, have bounded output/timeouts, reclaim timed-out process groups, and can block a call only through a failing blocking `before_tool` rule.
+- Added `runtime_doctor`, a non-destructive agent preflight that reports actionable toolchain, Python alias, workspace access, shell snapshot, hook, LSP, sandbox, and network-policy issues before an agent starts trial-and-error execution.
+- Added command-level network policy with `deny`, `allowlist`, and `unrestricted` modes plus exact/wildcard domain allowlists. The legacy `--allow-network` flag remains an unrestricted-network compatibility alias; allowlist enforcement is intentionally described as command-policy gating rather than an OS egress firewall.
+
 ## 0.3.8 - 2026-09-11
 
 - Desktop 0.3.20 simplifies the agent-facing permission UI to **Standard** (workspace-confined trusted mode) and **Full Access** (host mode), while preserving the four underlying runtime modes for compatibility. Pending approvals are shown only when user action is required, and routine workflow internals are removed from the tray menu.

@@ -9,7 +9,7 @@ Default mode. Commands run with:
 - workspace read/write
 - system toolchain and DNS resolver paths read-only
 - `HOME`, `TMPDIR`, and `cache_dir` under an external server-owned runtime directory
-- network-looking commands blocked
+- network-intent commands use the default `deny` network policy
 - shell expansion and inline interpreter snippets blocked
 - secret-looking and loader/startup env filtered
 - Landlock enabled when available
@@ -32,7 +32,7 @@ coding-tools-mcp --permission-mode trusted --workspace /path/to/repo
 
 ## dangerous
 
-Dangerous mode disables `exec_command` permission gates and Landlock. Use it only inside an isolated container or VM.
+Dangerous mode disables the ordinary `exec_command` permission gates and Landlock. An explicitly selected `deny` or `allowlist` network policy still applies. Use it only inside an isolated container or VM.
 
 ```bash
 coding-tools-mcp --permission-mode dangerous --workspace /path/to/repo
@@ -44,7 +44,7 @@ container or VM.
 
 ## host
 
-Host mode is the explicit full-host development mode. It disables command
+Host mode is the explicit full-host development mode. It disables ordinary command
 permission gates and Landlock like dangerous mode, defaults environment
 inheritance to `all`, and does not replace `HOME`, `TMPDIR`, or ecosystem cache
 locations. Commands can therefore use the server process's SSH agent, SSH/Git
@@ -60,6 +60,9 @@ workspace-confined; unrestricted host access is available through
 `exec_command`. The server's own transport authentication secrets are always
 removed from child command environments.
 
+As with dangerous mode, an explicitly configured `deny` or `allowlist` network
+policy still applies even though the other command gates are disabled.
+
 Host mode gives an authenticated MCP client the same command authority as the
 user running the server. Use it only with trusted repositories and clients.
 Prefer stdio or loopback. If it is exposed through an HTTPS tunnel, keep OAuth
@@ -69,8 +72,44 @@ safe.
 
 Compatibility aliases:
 
-- `--allow-network`: opens only the network-looking command gate.
+- `--allow-network`: compatibility alias for `--network-policy unrestricted`.
 - `--dangerously-skip-all-permissions`: alias for `--permission-mode dangerous`.
+
+## Network Policy
+
+Network command gating is independent from the four permission modes and can be
+selected explicitly with `--network-policy`:
+
+- `deny`: network-intent commands require explicit permission. This is the
+  default in `safe` mode.
+- `allowlist`: commands whose literal target domains are all allowlisted run
+  without a network prompt. Unknown domains and network-intent commands whose
+  target cannot be determined statically require permission.
+- `unrestricted`: disables the network command gate. This remains the default
+  for permission modes that historically allowed networking (`trusted`,
+  `dangerous`, and `host`) unless an explicit network policy overrides it.
+
+Allowlist entries are exact host names or `*.example.com` patterns:
+
+```bash
+coding-tools-mcp --permission-mode safe \
+  --network-policy allowlist \
+  --network-allow-domain github.com \
+  --network-allow-domain '*.npmjs.org' \
+  --workspace /path/to/repo
+```
+
+`CODING_TOOLS_MCP_NETWORK_POLICY` selects the mode and
+`CODING_TOOLS_MCP_NETWORK_ALLOW_DOMAINS` accepts a comma-separated domain list.
+This layer recognizes common network commands and package-manager operations and
+extracts literal URL/SSH/SCP-style hosts when possible. It is deliberately
+conservative: for example, `npm install package` has an unresolved destination
+because registry configuration may live outside the command line, so allowlist
+mode asks for permission rather than assuming the public npm registry.
+
+This is **command-policy enforcement, not an OS-level egress firewall**. A
+future sandbox/network-namespace layer is required to guarantee that an already
+running process cannot reach arbitrary destinations.
 
 ## Client-Side Annotation Gates
 

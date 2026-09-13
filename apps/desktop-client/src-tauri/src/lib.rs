@@ -7,8 +7,6 @@ mod workflow;
 use models::{LogBundle, RuntimeStatus, WorkspaceProfile};
 use resource_installer::managed_version;
 use runtime::{
-    open_app_permission as open_app_permission_runtime,
-    prepare_chrome_bridge as prepare_chrome_bridge_runtime,
     prepare_runtime as prepare_runtime_environment, read_logs, start_workspace, DependencyStatus,
     RuntimeManager,
 };
@@ -302,39 +300,6 @@ async fn prepare_runtime(
     tauri::async_runtime::spawn_blocking(move || prepare_runtime_environment(&runtime, repair))
         .await
         .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-async fn open_permission_settings(
-    permission: String,
-    state: tauri::State<'_, DesktopState>,
-) -> Result<String, String> {
-    let runtime = Arc::clone(&state.runtime);
-    tauri::async_runtime::spawn_blocking(move || open_app_permission_runtime(&runtime, &permission))
-        .await
-        .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-async fn prepare_chrome_bridge(state: tauri::State<'_, DesktopState>) -> Result<String, String> {
-    let store = Arc::clone(&state.store);
-    let runtime = Arc::clone(&state.runtime);
-    tauri::async_runtime::spawn_blocking(move || {
-        let (profile, log_dir) = {
-            let store = store
-                .lock()
-                .map_err(|_| "Profile store is unavailable.".to_string())?;
-            let profile =
-                store.profiles().into_iter().next().ok_or_else(|| {
-                    "Add a workspace before preparing the Chrome bridge.".to_string()
-                })?;
-            let log_dir = store.log_dir(&profile.id)?;
-            (profile, log_dir)
-        };
-        prepare_chrome_bridge_runtime(&runtime, &profile, &log_dir)
-    })
-    .await
-    .map_err(|e| e.to_string())?
 }
 
 #[cfg(target_os = "macos")]
@@ -909,41 +874,20 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
         true,
     )
     .map_err(menu_error)?;
-    let runtime_ready =
-        dependencies.runtime_ready && dependencies.playwright_ready && dependencies.cloudflared;
-    let browser_ready = dependencies.chrome_installed
-        && (dependencies.chrome_cdp_ready || dependencies.chrome_bridge_connected);
-    let app_control_ready =
-        dependencies.app_helper && dependencies.accessibility_trusted == Some(true);
-    for (id, label) in [
-        (
-            "resource-summary:runtime",
-            format!(
-                "{} · {}",
-                menu_text(&language, "Runtime", "运行环境"),
-                readiness_label(runtime_ready, &language)
-            ),
+    let runtime_ready = dependencies.runtime_ready && dependencies.cloudflared;
+    let runtime_summary = MenuItem::with_id(
+        app,
+        "resource-summary:runtime",
+        format!(
+            "{} · {}",
+            menu_text(&language, "Runtime", "运行环境"),
+            readiness_label(runtime_ready, &language)
         ),
-        (
-            "resource-summary:browser",
-            format!(
-                "{} · {}",
-                menu_text(&language, "Browser", "浏览器"),
-                readiness_label(browser_ready, &language)
-            ),
-        ),
-        (
-            "resource-summary:app-control",
-            format!(
-                "{} · {}",
-                menu_text(&language, "App Control", "应用控制"),
-                readiness_label(app_control_ready, &language)
-            ),
-        ),
-    ] {
-        let item = MenuItem::with_id(app, id, label, false, None::<&str>).map_err(menu_error)?;
-        resources.append(&item).map_err(menu_error)?;
-    }
+        false,
+        None::<&str>,
+    )
+    .map_err(menu_error)?;
+    resources.append(&runtime_summary).map_err(menu_error)?;
     let separator = PredefinedMenuItem::separator(app).map_err(menu_error)?;
     resources.append(&separator).map_err(menu_error)?;
     let runtime_action_id = if dependencies.runtime_ready {
@@ -965,45 +909,6 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
     )
     .map_err(menu_error)?;
     resources.append(&runtime_action).map_err(menu_error)?;
-    let chrome_bridge = MenuItem::with_id(
-        app,
-        "resource:chrome-bridge",
-        menu_text(
-            &language,
-            "Prepare Chrome integration…",
-            "准备 Chrome 集成…",
-        ),
-        true,
-        None::<&str>,
-    )
-    .map_err(menu_error)?;
-    resources.append(&chrome_bridge).map_err(menu_error)?;
-    let permissions = Submenu::with_id(
-        app,
-        "resource:permissions-menu",
-        menu_text(&language, "macOS Permissions", "macOS 权限"),
-        true,
-    )
-    .map_err(menu_error)?;
-    let accessibility = MenuItem::with_id(
-        app,
-        "resource:accessibility",
-        menu_text(&language, "Accessibility…", "辅助功能…"),
-        true,
-        None::<&str>,
-    )
-    .map_err(menu_error)?;
-    permissions.append(&accessibility).map_err(menu_error)?;
-    let screen_recording = MenuItem::with_id(
-        app,
-        "resource:screen-recording",
-        menu_text(&language, "Screen Recording…", "屏幕录制…"),
-        true,
-        None::<&str>,
-    )
-    .map_err(menu_error)?;
-    permissions.append(&screen_recording).map_err(menu_error)?;
-    resources.append(&permissions).map_err(menu_error)?;
 
     let separator = PredefinedMenuItem::separator(app).map_err(menu_error)?;
     resources.append(&separator).map_err(menu_error)?;
@@ -1032,22 +937,6 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
             ),
         ),
         (
-            "resource-status:playwright",
-            format!(
-                "Playwright · {}{}",
-                if dependencies.playwright_ready {
-                    menu_text(&language, "Ready", "就绪")
-                } else {
-                    menu_text(&language, "Not prepared", "未准备")
-                },
-                dependencies
-                    .playwright_version
-                    .as_deref()
-                    .map(|version| format!(" · {version}"))
-                    .unwrap_or_default()
-            ),
-        ),
-        (
             "resource-status:uv",
             format!("uv · {}", readiness_label(dependencies.uv, &language)),
         ),
@@ -1056,70 +945,6 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
             format!(
                 "cloudflared · {}",
                 readiness_label(dependencies.cloudflared, &language)
-            ),
-        ),
-        (
-            "resource-status:app-helper",
-            format!(
-                "App Helper · {}",
-                readiness_label(dependencies.app_helper, &language)
-            ),
-        ),
-        (
-            "resource-status:chrome",
-            format!(
-                "Chrome · {}",
-                if dependencies.chrome_installed {
-                    menu_text(&language, "Installed", "已安装")
-                } else {
-                    menu_text(&language, "Not found", "未找到")
-                }
-            ),
-        ),
-        (
-            "resource-status:cdp",
-            format!(
-                "Chrome CDP · {}",
-                if dependencies.chrome_cdp_ready {
-                    menu_text(&language, "Connected", "已连接")
-                } else {
-                    menu_text(&language, "Not connected", "未连接")
-                }
-            ),
-        ),
-        (
-            "resource-status:bridge",
-            format!(
-                "Chrome Bridge · {}",
-                if dependencies.chrome_bridge_connected {
-                    menu_text(&language, "Connected", "已连接")
-                } else if dependencies.chrome_manifest {
-                    menu_text(&language, "Installed", "已安装")
-                } else {
-                    menu_text(&language, "Not installed", "未安装")
-                }
-            ),
-        ),
-        (
-            "resource-status:accessibility",
-            format!(
-                "Accessibility · {}",
-                match dependencies.accessibility_trusted {
-                    Some(true) => menu_text(&language, "Allowed", "已允许"),
-                    Some(false) => menu_text(&language, "Permission required", "需要权限"),
-                    None => menu_text(&language, "Unavailable", "不可用"),
-                }
-            ),
-        ),
-        (
-            "resource-status:screen-recording",
-            format!(
-                "Screen Recording · {}",
-                match dependencies.screen_recording_trusted {
-                    Some(true) => menu_text(&language, "Allowed", "已允许"),
-                    Some(false) => menu_text(&language, "Permission required", "需要权限"),
-                    None => menu_text(&language, "Unavailable", "不可用"),
-                }
             ),
         ),
     ] {
@@ -1599,59 +1424,6 @@ fn handle_tray_menu_event(app: &AppHandle, id: &str) {
             }
             refresh_tray_menu_on_main(callback_app);
         });
-    } else if id == "resource:chrome-bridge" {
-        let state = app.state::<DesktopState>();
-        let runtime = Arc::clone(&state.runtime);
-        let profile_and_log = state
-            .store
-            .lock()
-            .map_err(|_| "Profile store is unavailable.".to_string())
-            .and_then(|store| {
-                let profile = store.profiles().into_iter().next().ok_or_else(|| {
-                    "Add a workspace before preparing the Chrome bridge.".to_string()
-                })?;
-                let log_dir = store.log_dir(&profile.id)?;
-                Ok((profile, log_dir))
-            });
-        match profile_and_log {
-            Ok((profile, log_dir)) => {
-                let callback_app = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    let result = tauri::async_runtime::spawn_blocking(move || {
-                        prepare_chrome_bridge_runtime(&runtime, &profile, &log_dir)
-                    })
-                    .await
-                    .map_err(|error| error.to_string())
-                    .and_then(|result| result);
-                    if let Err(error) = result {
-                        show_error(&callback_app, error);
-                    }
-                    refresh_tray_menu_on_main(callback_app);
-                });
-            }
-            Err(error) => show_error(app, error),
-        }
-    } else if id == "resource:accessibility" || id == "resource:screen-recording" {
-        let permission = if id == "resource:accessibility" {
-            "accessibility"
-        } else {
-            "screen_recording"
-        }
-        .to_string();
-        let runtime = Arc::clone(&app.state::<DesktopState>().runtime);
-        let callback_app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            let result = tauri::async_runtime::spawn_blocking(move || {
-                open_app_permission_runtime(&runtime, &permission)
-            })
-            .await
-            .map_err(|error| error.to_string())
-            .and_then(|result| result);
-            if let Err(error) = result {
-                show_error(&callback_app, error);
-            }
-            refresh_tray_menu_on_main(callback_app);
-        });
     } else if id == "resource:repair-dependencies" {
         let callback_app = app.clone();
         tauri::async_runtime::spawn(async move {
@@ -1799,8 +1571,6 @@ pub fn run() {
             install_resource,
             repair_dependencies,
             prepare_runtime,
-            prepare_chrome_bridge,
-            open_permission_settings,
             quit_app
         ])
         .build(tauri::generate_context!())

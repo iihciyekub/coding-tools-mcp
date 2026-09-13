@@ -1537,7 +1537,7 @@ class MCPContractTests(ComplianceTestCase):
 
             tools = result.get("tools")
             self.assertIsInstance(tools, list)
-            self.assertEqual(len(tools), 51)
+            self.assertEqual(len(tools), 28)
             self.assertTrue({tool.get("name") for tool in tools} >= set(REQUIRED_TOOLS))
             for tool in tools:
                 # The cache hints describe the catalog, not the entries in it;

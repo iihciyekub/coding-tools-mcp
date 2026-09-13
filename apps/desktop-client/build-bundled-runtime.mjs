@@ -8,11 +8,12 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const output = join(root, "apps/desktop-client/src-tauri/resources/runtime");
-const helpers = join(root, "apps/desktop-client/src-tauri/resources/helpers");
+// setuptools may otherwise reuse stale build/lib or egg-info entries from an
+// earlier source tree and silently repackage files that have since been deleted.
+rmSync(join(root, "build"), { recursive: true, force: true });
+rmSync(join(root, "coding_tools_mcp.egg-info"), { recursive: true, force: true });
 rmSync(output, { recursive: true, force: true });
-rmSync(helpers, { recursive: true, force: true });
 mkdirSync(output, { recursive: true });
-mkdirSync(helpers, { recursive: true });
 function uv(args) {
   const result = spawnSync("uv", args, {
     cwd: root, stdio: "inherit",
@@ -39,33 +40,4 @@ writeFileSync(join(output, "manifest.json"), JSON.stringify({
 }, null, 2) + "\n");
 const bytes = readdirSync(output).reduce((sum, name) => sum + statSync(join(output, name)).size, 0);
 if (bytes > 2 * 1024 * 1024) throw new Error(`Runtime source payload exceeded 2 MiB: ${bytes}`);
-if (process.platform === "darwin") {
-  const helperSource = join(root, "apps/desktop-client/macos-app-helper.swift");
-  const helperOutput = join(helpers, "coding-tools-mcp-app-helper");
-  const result = spawnSync("xcrun", [
-    "swiftc", "-O", helperSource,
-    "-framework", "AppKit",
-    "-framework", "ApplicationServices",
-    "-framework", "CoreGraphics",
-    "-o", helperOutput,
-  ], { cwd: root, stdio: "inherit" });
-  if (result.error) throw result.error;
-  if (result.status !== 0) process.exit(result.status ?? 1);
-  const signingIdentity = process.env.CODING_TOOLS_MCP_SIGNING_IDENTITY?.trim();
-  if (signingIdentity) {
-    const signed = spawnSync("/usr/bin/codesign", [
-      "--force",
-      "--sign", signingIdentity,
-      "--identifier", "com.codingtoolsmcp.app-helper",
-      "--options", "runtime",
-      "--timestamp",
-      helperOutput,
-    ], { cwd: root, stdio: "inherit" });
-    if (signed.error) throw signed.error;
-    if (signed.status !== 0) process.exit(signed.status ?? 1);
-  }
-  const helperBytes = statSync(helperOutput).size;
-  if (helperBytes > 2 * 1024 * 1024) throw new Error(`macOS app helper exceeded 2 MiB: ${helperBytes}`);
-  console.log(`macOS app helper: ${helperBytes} bytes.`);
-}
-console.log(`Runtime source payload: ${bytes} bytes; no Python, Node or browser binaries.`);
+console.log(`Runtime source payload: ${bytes} bytes; no Python or Node binaries.`);

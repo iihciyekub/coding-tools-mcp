@@ -32,10 +32,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
 from . import __version__
-from . import browser as browser_tools
-from . import chrome_bridge
 from . import code_intel
-from . import macos_apps
 from . import lsp as lsp_tools
 from . import skills as skill_tools
 from . import workspace_insight
@@ -148,6 +145,24 @@ SERVER_INTERNAL_SECRET_ENV_NAMES = {
     f"{ENV_PREFIX}_OAUTH_TOKEN_SECRET",
 }
 SHELL_ENV_INHERIT_CHOICES = ("core", "all", "none")
+HOOK_EVENTS = ("before_tool", "after_tool", "tool_error")
+DEFAULT_HOOK_CONFIG_PATH = ".agents/hooks.json"
+HOOK_OUTPUT_BYTES = 16 * 1024
+DEFAULT_SHELL_SNAPSHOT_TOOLS = (
+    "git",
+    "rg",
+    "python3",
+    "python",
+    "node",
+    "npm",
+    "pnpm",
+    "yarn",
+    "bun",
+    "cargo",
+    "rustc",
+    "go",
+    "java",
+)
 
 
 @dataclass(frozen=True)
@@ -218,6 +233,21 @@ NETWORK_RE = re.compile(
     r"(https?://|urllib\.request|urllib3|requests\.|http\.client|\bHTTPConnection\b|\bHTTPSConnection\b|socket\.|aiohttp|httpx|\bcurl\b|\bwget\b|\bnc\b|\bnetcat\b|\bssh\b|\bscp\b|\bftp\b)",
     re.I,
 )
+NETWORK_URL_RE = re.compile(r"\b(?:https?|ssh|git|ftp)://[^\s'\"<>]+", re.I)
+SCP_TARGET_RE = re.compile(r"^(?:[^@\s:]+@)?(?P<host>\[[^\]]+\]|[^\s:/]+):.+$")
+NETWORK_POLICY_CHOICES = ("deny", "allowlist", "unrestricted")
+NETWORK_PACKAGE_SUBCOMMANDS: dict[str, frozenset[str]] = {
+    "git": frozenset({"clone", "fetch", "pull", "push", "ls-remote", "submodule"}),
+    "npm": frozenset({"install", "i", "add", "update", "audit", "publish", "view", "info"}),
+    "pnpm": frozenset({"install", "i", "add", "update", "audit", "publish", "view", "info"}),
+    "yarn": frozenset({"install", "add", "up", "upgrade", "audit", "publish", "info"}),
+    "bun": frozenset({"install", "add", "update", "publish", "x"}),
+    "pip": frozenset({"install", "download", "wheel", "index"}),
+    "pip3": frozenset({"install", "download", "wheel", "index"}),
+    "cargo": frozenset({"install", "fetch", "update", "search", "publish"}),
+    "go": frozenset({"get", "install"}),
+    "brew": frozenset({"install", "update", "upgrade", "fetch"}),
+}
 SHELL_EXPANSION_RE = re.compile(r"(`|\$\(|\$\{)")
 DESTRUCTIVE_RE = re.compile(
     r"(^|\s)(sudo|su|chmod\s+-R|chown\s+-R|mkfs|mount|umount|find\b[^;&|]*\s-delete\b|git\b[^;&|]*\breset\s+--hard\b|git\b[^;&|]*\bclean\s+-[^\s]*[fx][^\s]*|rm\s+-[^\s]*r[^\s]*f|rm\s+-[^\s]*f[^\s]*r)\b",
@@ -372,6 +402,8 @@ class RuntimePolicy:
     permission_mode: str
     shell_env_policy: ShellEnvPolicy
     allow_network: bool
+    network_policy: str = "deny"
+    network_allow_domains: tuple[str, ...] = ()
     fake_readonly_annotations: bool = False
 
 
@@ -560,17 +592,65 @@ def fake_readonly_annotations_from_args(args: argparse.Namespace, permission_mod
     return requested
 
 
+def normalize_network_domain(value: str) -> str:
+    raw = value.strip().lower().rstrip(".")
+    wildcard = raw.startswith("*.")
+    candidate = raw[2:] if wildcard else raw
+    if (
+        not candidate
+        or "*" in candidate
+        or any(ch.isspace() for ch in candidate)
+        or any(ch in "/\\@?#" for ch in candidate)
+    ):
+        raise ValueError(f"invalid network allowlist domain: {value!r}")
+    try:
+        parsed = urllib.parse.urlsplit(f"//{candidate}")
+        _ = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"invalid network allowlist domain: {value!r}") from exc
+    if not parsed.hostname or parsed.username is not None or parsed.password is not None:
+        raise ValueError(f"invalid network allowlist domain: {value!r}")
+    host = parsed.hostname.lower().rstrip(".")
+    return f"*.{host}" if wildcard else host
+
+
+def network_policy_from_args(args: argparse.Namespace, permission_mode: str) -> tuple[str, tuple[str, ...]]:
+    cli_policy = str(getattr(args, "network_policy", None) or "").strip().lower()
+    env_policy = (os.environ.get(f"{ENV_PREFIX}_NETWORK_POLICY") or "").strip().lower()
+    cli_allow_alias = bool(getattr(args, "allow_network", False))
+    env_allow_alias = truthy_env(os.environ.get(f"{ENV_PREFIX}_ALLOW_NETWORK"))
+    if cli_policy:
+        policy = cli_policy
+    elif cli_allow_alias:
+        policy = "unrestricted"
+    elif env_policy:
+        policy = env_policy
+    elif env_allow_alias:
+        policy = "unrestricted"
+    else:
+        policy = "unrestricted" if PERMISSION_MODE_CAPABILITIES[permission_mode].network else "deny"
+    if policy not in NETWORK_POLICY_CHOICES:
+        supported = ", ".join(NETWORK_POLICY_CHOICES)
+        raise ValueError(f"network policy must be one of: {supported}")
+
+    raw_domains: list[str] = []
+    cli_domains = getattr(args, "network_allow_domain", None)
+    if isinstance(cli_domains, list):
+        raw_domains.extend(str(item) for item in cli_domains)
+    raw_domains.extend(split_env_patterns(os.environ.get(f"{ENV_PREFIX}_NETWORK_ALLOW_DOMAINS")))
+    domains = tuple(dict.fromkeys(normalize_network_domain(item) for item in raw_domains if item.strip()))
+    return policy, domains
+
+
 def runtime_policy_from_args(args: argparse.Namespace) -> RuntimePolicy:
     permission_mode = permission_mode_from_args(args)
-    allow_network = (
-        PERMISSION_MODE_CAPABILITIES[permission_mode].network
-        or bool(getattr(args, "allow_network", False))
-        or truthy_env(os.environ.get(f"{ENV_PREFIX}_ALLOW_NETWORK"))
-    )
+    network_policy, network_allow_domains = network_policy_from_args(args, permission_mode)
     return RuntimePolicy(
         permission_mode=permission_mode,
         shell_env_policy=shell_env_policy_from_args(args, permission_mode),
-        allow_network=allow_network,
+        allow_network=network_policy == "unrestricted",
+        network_policy=network_policy,
+        network_allow_domains=network_allow_domains,
         fake_readonly_annotations=fake_readonly_annotations_from_args(args, permission_mode),
     )
 
@@ -597,6 +677,15 @@ class ToolSpec:
     """Name of a Runtime attribute that must be truthy for the tool to be exposed."""
 
 
+@dataclass(frozen=True)
+class HookRule:
+    event: str
+    match: str
+    command: str
+    timeout_ms: int = 5000
+    blocking: bool = True
+
+
 def _image_content(payload: dict[str, Any]) -> list[dict[str, Any]]:
     encoded = str(payload.pop("_mcp_image_data", ""))
     return [
@@ -621,9 +710,39 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         read_only=True,
         idempotent=True,
     ),
+    "runtime_doctor": ToolSpec(
+        title="Runtime doctor",
+        description=(
+            "Run a non-destructive runtime health check covering common toolchain commands, workspace access, "
+            "shell snapshot, hooks, LSP availability, sandbox status, and network policy."
+        ),
+        read_only=True,
+        idempotent=True,
+    ),
+    "hooks_status": ToolSpec(
+        title="Hooks status",
+        description="Report whether workspace hooks are enabled and summarize the loaded hook rules.",
+        read_only=True,
+        idempotent=True,
+    ),
+    "shell_snapshot": ToolSpec(
+        title="Shell snapshot",
+        description=(
+            "Capture or reuse a stable execution-environment snapshot, including PATH tool resolution, "
+            "for subsequent exec_command calls."
+        ),
+        read_only=True,
+        idempotent=True,
+    ),
     "read_file": ToolSpec(
         title="Read file",
         description="Read a UTF-8 text file slice inside the configured workspace.",
+        read_only=True,
+        idempotent=True,
+    ),
+    "read_files": ToolSpec(
+        title="Read files",
+        description="Read bounded UTF-8 slices from multiple workspace files in one call.",
         read_only=True,
         idempotent=True,
     ),
@@ -644,6 +763,22 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         description="Search UTF-8 workspace files for text or regex matches.",
         read_only=True,
         idempotent=True,
+    ),
+    "tool_search": ToolSpec(
+        title="Search tools",
+        description=(
+            "Search the tools available to this runtime and return the best matching tool metadata. "
+            "When deferred tools are enabled, deferred matches include the schema and can be called through tool_invoke."
+        ),
+        read_only=True,
+        idempotent=True,
+    ),
+    "tool_invoke": ToolSpec(
+        title="Invoke deferred tool",
+        description="Invoke one deferred workflow tool discovered through tool_search.",
+        destructive=True,
+        open_world=True,
+        gated_by="enable_deferred_tools",
     ),
     "apply_patch": ToolSpec(
         title="Apply patch",
@@ -1021,173 +1156,6 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         content_builder=_image_content,
         gated_by="enable_view_image",
     ),
-    "browser_status": ToolSpec(
-        title="Browser status",
-        description="Connect to the local Chrome CDP endpoint with Playwright and report connection status.",
-        read_only=True,
-        idempotent=True,
-        open_world=True,
-    ),
-    "browser_tabs": ToolSpec(
-        title="Browser tabs",
-        description="List inspectable tabs in the connected local Chrome instance.",
-        read_only=True,
-        idempotent=True,
-        open_world=True,
-    ),
-    "browser_active_tab": ToolSpec(
-        title="Browser active tab",
-        description="Return the currently visible Chrome tab, falling back to the last inspectable tab.",
-        read_only=True,
-        idempotent=True,
-        open_world=True,
-    ),
-    "browser_snapshot": ToolSpec(
-        title="Browser snapshot",
-        description="Return bounded visible page text and simplified interactive DOM elements from Chrome.",
-        read_only=True,
-        idempotent=True,
-        open_world=True,
-    ),
-    "browser_screenshot": ToolSpec(
-        title="Browser screenshot",
-        description="Capture the selected Chrome tab as one MCP PNG image content block.",
-        read_only=True,
-        idempotent=True,
-        open_world=True,
-        content_builder=_image_content,
-    ),
-    "browser_evaluate": ToolSpec(
-        title="Browser evaluate",
-        description="Evaluate JavaScript in the selected Chrome tab through Playwright.",
-        destructive=True,
-        open_world=True,
-    ),
-    "browser_click": ToolSpec(
-        title="Browser click",
-        description="Click the first element matching a Playwright selector in the selected Chrome tab.",
-        destructive=True,
-        open_world=True,
-    ),
-    "browser_type": ToolSpec(
-        title="Browser type",
-        description="Fill or type text into the first element matching a Playwright selector.",
-        destructive=True,
-        open_world=True,
-    ),
-    "browser_navigate": ToolSpec(
-        title="Browser navigate",
-        description="Navigate the selected Chrome tab to an HTTP(S) URL and wait for a bounded load state.",
-        destructive=True,
-        open_world=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "browser_back": ToolSpec(
-        title="Browser back",
-        description="Navigate the selected Chrome tab back in history.",
-        destructive=True,
-        open_world=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "browser_reload": ToolSpec(
-        title="Browser reload",
-        description="Reload the selected Chrome tab and wait for a bounded load state.",
-        destructive=True,
-        open_world=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "browser_hover": ToolSpec(
-        title="Browser hover",
-        description="Hover the first element matching a Playwright selector.",
-        destructive=True,
-        open_world=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "browser_select": ToolSpec(
-        title="Browser select",
-        description="Select one or more values in the first matching select element.",
-        destructive=True,
-        open_world=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "browser_press": ToolSpec(
-        title="Browser press",
-        description="Send a Playwright key chord to the page or first matching element.",
-        destructive=True,
-        open_world=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "browser_upload": ToolSpec(
-        title="Browser upload",
-        description="Set explicit workspace files or runtime-managed browser downloads on the first matching file input.",
-        destructive=True,
-        open_world=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "browser_download": ToolSpec(
-        title="Browser download",
-        description="Fetch one HTTP(S) resource through the selected tab's CDP network context into managed runtime storage.",
-        destructive=True,
-        open_world=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "browser_watch_start": ToolSpec(
-        title="Start browser watch",
-        description="Start a runtime-local bounded event watch for the selected Chrome tab.",
-        destructive=True,
-        open_world=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "browser_watch_poll": ToolSpec(
-        title="Poll browser watch",
-        description="Read bounded browser watch events after a sequence cursor.",
-        read_only=True,
-        idempotent=True,
-        open_world=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "browser_watch_stop": ToolSpec(
-        title="Stop browser watch",
-        description="Stop one runtime-local browser event watch.",
-        destructive=True,
-        idempotent=True,
-        open_world=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "browser_wait": ToolSpec(
-        title="Browser wait",
-        description="Wait for bounded selector, URL, text, or time conditions in the selected tab.",
-        read_only=True,
-        idempotent=True,
-        open_world=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "browser_events": ToolSpec(
-        title="Capture browser events",
-        description="Capture bounded console, error, failed-request, dialog, and popup events.",
-        destructive=True,
-        open_world=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "browser_console": ToolSpec(
-        title="Browser console",
-        description="Capture console messages and page errors from the selected Chrome tab for a bounded interval.",
-        destructive=True,
-        open_world=True,
-    ),
-    "browser_network": ToolSpec(
-        title="Browser network",
-        description="Inspect current resource timing and capture bounded network events from the selected Chrome tab.",
-        destructive=True,
-        open_world=True,
-    ),
-    "browser_inspect": ToolSpec(
-        title="Browser inspect",
-        description="Inspect one DOM element including geometry, computed style, parent chain, HTML, and animations.",
-        read_only=True,
-        idempotent=True,
-        open_world=True,
-    ),
     "code_symbols": ToolSpec(
         title="Code symbols",
         description="List bounded language-aware symbol definitions under a workspace path.",
@@ -1205,115 +1173,6 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         description="Find bounded exact identifier references for a symbol under a workspace path.",
         read_only=True,
         idempotent=True,
-    ),
-    "chrome_extension_install": ToolSpec(
-        title="Install Chrome extension bridge",
-        description="Install the local Chrome Native Messaging host manifest and unpacked bridge extension files.",
-        destructive=True,
-        open_world=True,
-    ),
-    "chrome_extension_status": ToolSpec(
-        title="Chrome extension status",
-        description="Report Native Messaging bridge installation and connection status.",
-        read_only=True,
-        idempotent=True,
-        open_world=True,
-    ),
-    "chrome_extensions": ToolSpec(
-        title="Chrome extensions",
-        description="List installed Chrome extensions visible to the local bridge extension.",
-        read_only=True,
-        idempotent=True,
-        open_world=True,
-    ),
-    "chrome_extension_tabs": ToolSpec(
-        title="Chrome extension tabs",
-        description="List Chrome tabs through the Native Messaging bridge extension.",
-        read_only=True,
-        idempotent=True,
-        open_world=True,
-    ),
-    "chrome_extension_execute": ToolSpec(
-        title="Chrome extension execute",
-        description="Evaluate JavaScript in a Chrome tab through the bridge extension debugger API.",
-        destructive=True,
-        open_world=True,
-    ),
-    "chrome_extension_send": ToolSpec(
-        title="Chrome extension send",
-        description="Send an external runtime message to a target Chrome extension that permits external messaging.",
-        destructive=True,
-        open_world=True,
-    ),
-    "app_accessibility": ToolSpec(
-        title="App accessibility",
-        description="Report macOS Accessibility trust and optionally open the Accessibility settings pane.",
-        open_world=True,
-    ),
-    "app_list": ToolSpec(
-        title="App list",
-        description="List running macOS applications with bundle identifiers, pids, and foreground state.",
-        read_only=True,
-        idempotent=True,
-        open_world=True,
-    ),
-    "app_launch": ToolSpec(
-        title="App launch",
-        description="Launch a macOS application by name or bundle identifier.",
-        destructive=True,
-        open_world=True,
-    ),
-    "app_activate": ToolSpec(
-        title="App activate",
-        description="Bring a macOS application to the foreground.",
-        destructive=True,
-        open_world=True,
-    ),
-    "app_windows": ToolSpec(
-        title="App windows",
-        description="List Accessibility window metadata for a running macOS application.",
-        read_only=True,
-        idempotent=True,
-        open_world=True,
-    ),
-    "app_snapshot": ToolSpec(
-        title="App snapshot",
-        description="Return a bounded macOS Accessibility UI hierarchy for a running application.",
-        read_only=True,
-        idempotent=True,
-        open_world=True,
-    ),
-    "app_click": ToolSpec(
-        title="App click",
-        description="Click a macOS Accessibility element matched by role, title, or identifier.",
-        destructive=True,
-        open_world=True,
-    ),
-    "app_type": ToolSpec(
-        title="App type",
-        description="Set or type text into a macOS application using Accessibility and keyboard events.",
-        destructive=True,
-        open_world=True,
-    ),
-    "app_press": ToolSpec(
-        title="App press",
-        description="Send a keyboard key and optional modifiers to a macOS application.",
-        destructive=True,
-        open_world=True,
-    ),
-    "app_menu": ToolSpec(
-        title="App menu",
-        description="Select a macOS application menu item by hierarchical menu path.",
-        destructive=True,
-        open_world=True,
-    ),
-    "app_screenshot": ToolSpec(
-        title="App screenshot",
-        description="Capture a macOS application window as one MCP PNG image content block.",
-        read_only=True,
-        idempotent=True,
-        open_world=True,
-        content_builder=_image_content,
     ),
 }
 
@@ -1609,8 +1468,8 @@ def diagnostic(
 PERMISSION_FAILURE_DIAGNOSTICS: dict[str, dict[str, str]] = {
     "network": {
         "code": "NETWORK_PERMISSION_REQUIRED",
-        "suggested_fix": "Restart the server with --permission-mode trusted or --allow-network.",
-        "suggested_server_flag": "--permission-mode trusted",
+        "suggested_fix": "Use an approved network target, add the domain to the network allowlist, or explicitly select unrestricted networking.",
+        "suggested_server_flag": "--network-policy unrestricted",
     },
     "shell_expansion": {
         "code": "SHELL_EXPANSION_PERMISSION_REQUIRED",
@@ -1963,10 +1822,15 @@ class Runtime:
         *,
         enable_view_image: bool = True,
         enable_workflow_tools: bool = False,
+        defer_workflow_tools: bool = False,
+        enable_hooks: bool = False,
+        hooks_file: str | None = None,
         state_root: Path | None = None,
         permission_mode: str = "safe",
         shell_env_policy: ShellEnvPolicy | None = None,
         allow_network: bool = False,
+        network_policy: str | None = None,
+        network_allow_domains: tuple[str, ...] = (),
         auth_token: str | None = None,
         oauth_config: OAuthConfig | None = None,
         project_context: ProjectContext | None = None,
@@ -1977,15 +1841,28 @@ class Runtime:
         self.workspace = Workspace(workspace)
         self.enable_view_image = enable_view_image
         self.enable_workflow_tools = enable_workflow_tools
+        self.defer_workflow_tools = bool(defer_workflow_tools and enable_workflow_tools)
+        self.enable_deferred_tools = self.defer_workflow_tools
+        self.enable_hooks = enable_hooks
+        self.hooks_file = hooks_file or DEFAULT_HOOK_CONFIG_PATH
         self.workflow_store = (
             WorkflowStore(self.workspace.root, state_root=state_root) if enable_workflow_tools else None
         )
-        self._exposed_tool_names = [
+        self._available_tool_names = [
             name
             for name, spec in TOOL_REGISTRY.items()
             if spec.gated_by is None or getattr(self, spec.gated_by)
         ]
+        self._deferred_tool_names = [
+            name
+            for name in self._available_tool_names
+            if self.defer_workflow_tools and TOOL_REGISTRY[name].gated_by == "enable_workflow_tools"
+        ]
+        deferred_set = frozenset(self._deferred_tool_names)
+        self._exposed_tool_names = [name for name in self._available_tool_names if name not in deferred_set]
+        self._available_tool_name_set = frozenset(self._available_tool_names)
         self._exposed_tool_name_set = frozenset(self._exposed_tool_names)
+        self._deferred_tool_name_set = deferred_set
         if permission_mode not in PERMISSION_MODE_CHOICES:
             raise ToolFailure(
                 "INVALID_ARGUMENT",
@@ -2017,7 +1894,33 @@ class Runtime:
                 category="validation",
                 details={"supported": list(SHELL_ENV_INHERIT_CHOICES)},
             )
-        self.allow_network = allow_network or self.capabilities.network
+        resolved_network_policy = network_policy
+        if resolved_network_policy is None:
+            resolved_network_policy = (
+                "unrestricted" if allow_network or self.capabilities.network else "deny"
+            )
+        if resolved_network_policy not in NETWORK_POLICY_CHOICES:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"Unknown network policy: {resolved_network_policy}",
+                category="validation",
+                details={"supported": list(NETWORK_POLICY_CHOICES)},
+            )
+        try:
+            normalized_domains = tuple(
+                dict.fromkeys(normalize_network_domain(item) for item in network_allow_domains)
+            )
+        except ValueError as exc:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                str(exc),
+                category="validation",
+            ) from exc
+        self.network_policy = resolved_network_policy
+        self.network_allow_domains = normalized_domains
+        # Compatibility field: true only when the runtime has unrestricted
+        # network access. Allowlist mode is intentionally not collapsed to true.
+        self.allow_network = self.network_policy == "unrestricted"
         self.auth_token = auth_token or None
         self.oauth_config = oauth_config
         self.command_manager = command_manager or WorkspaceCommandManager(self.workspace.root)
@@ -2034,10 +1937,12 @@ class Runtime:
         self._runtime_dir_lock = threading.Lock()
         self._runtime_dir_resolved = False
         self._closed = False
+        self._shell_snapshot_lock = threading.Lock()
+        self._shell_snapshot_env: dict[str, str] | None = None
+        self._shell_snapshot_payload: dict[str, Any] | None = None
         self.lsp_manager = (
             lsp_tools.LSPManager(self.workspace.root, self._command_env({})) if enable_workflow_tools else None
         )
-        self.browser_watch_manager = browser_tools.BrowserWatchManager() if enable_workflow_tools else None
         self.patch_baselines: dict[str, str | None] = {}
         self.patch_lock = threading.Lock()
         self.patch_committer = AtomicPatchCommitter()
@@ -2047,6 +1952,7 @@ class Runtime:
         self.project_context: ProjectContext = (
             project_context if project_context is not None else load_project_context(self.workspace.root)
         )
+        self._hook_rules, self._hook_warnings = self._load_hook_rules()
         self.telemetry = SessionTelemetry(permission_mode=self.permission_mode, transport=transport)
         self._tool_handlers = {name: getattr(self, name) for name in TOOL_REGISTRY}
 
@@ -2062,8 +1968,6 @@ class Runtime:
         self._closed = True
         if self.lsp_manager is not None:
             self.lsp_manager.close()
-        if self.browser_watch_manager is not None:
-            self.browser_watch_manager.close()
         if self._owns_command_manager:
             self.command_manager.close()
         self.telemetry.finish(output_retention=self.command_manager.retention_stats_snapshot())
@@ -2276,6 +2180,256 @@ class Runtime:
             raise ToolFailure("INTERNAL_ERROR", "Workflow toolset is not enabled.", category="internal")
         return self.lsp_manager
 
+    def _load_hook_rules(self) -> tuple[list[HookRule], list[str]]:
+        if not self.enable_hooks:
+            return [], []
+        try:
+            resolved = self.resolve_existing(self.hooks_file)
+        except ToolFailure as exc:
+            if exc.code == "NOT_FOUND":
+                return [], [f"Hook config not found: {self.hooks_file}"]
+            raise
+        if resolved.path.is_dir():
+            raise ToolFailure(
+                "INVALID_HOOK_CONFIG",
+                "Hook config path must be a JSON file.",
+                category="validation",
+                details={"path": resolved.display},
+            )
+        try:
+            raw = resolved.path.read_text(encoding="utf-8")
+            parsed = json.loads(raw)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ToolFailure(
+                "INVALID_HOOK_CONFIG",
+                f"Could not read hook config: {exc}",
+                category="validation",
+                details={"path": resolved.display},
+            ) from exc
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("hooks", []), list):
+            raise ToolFailure(
+                "INVALID_HOOK_CONFIG",
+                "Hook config must be an object with a hooks array.",
+                category="validation",
+                details={"path": resolved.display},
+            )
+        raw_rules = parsed.get("hooks", [])
+        if len(raw_rules) > 64:
+            raise ToolFailure(
+                "INVALID_HOOK_CONFIG",
+                "Hook config may contain at most 64 rules.",
+                category="validation",
+                details={"path": resolved.display},
+            )
+        rules: list[HookRule] = []
+        for index, item in enumerate(raw_rules):
+            if not isinstance(item, dict):
+                raise ToolFailure(
+                    "INVALID_HOOK_CONFIG",
+                    f"Hook rule {index} must be an object.",
+                    category="validation",
+                    details={"path": resolved.display, "index": index},
+                )
+            raw_event = item.get("event", "")
+            raw_match = item.get("match", "*")
+            raw_command = item.get("command", "")
+            raw_timeout_ms = item.get("timeout_ms", 5000)
+            raw_blocking = item.get("blocking", True)
+            if not isinstance(raw_event, str) or not isinstance(raw_match, str) or not isinstance(raw_command, str):
+                raise ToolFailure(
+                    "INVALID_HOOK_CONFIG",
+                    f"Hook rule {index} event, match, and command must be strings.",
+                    category="validation",
+                    details={"index": index},
+                )
+            if isinstance(raw_timeout_ms, bool) or not isinstance(raw_timeout_ms, int):
+                raise ToolFailure(
+                    "INVALID_HOOK_CONFIG",
+                    f"Hook rule {index} timeout_ms must be an integer.",
+                    category="validation",
+                    details={"index": index},
+                )
+            if not isinstance(raw_blocking, bool):
+                raise ToolFailure(
+                    "INVALID_HOOK_CONFIG",
+                    f"Hook rule {index} blocking must be a boolean.",
+                    category="validation",
+                    details={"index": index},
+                )
+            event = raw_event.strip()
+            match = raw_match.strip() or "*"
+            command = raw_command.strip()
+            timeout_ms = raw_timeout_ms
+            blocking = raw_blocking
+            if event not in HOOK_EVENTS:
+                raise ToolFailure(
+                    "INVALID_HOOK_CONFIG",
+                    f"Hook rule {index} has unsupported event: {event}",
+                    category="validation",
+                    details={"supported_events": list(HOOK_EVENTS), "index": index},
+                )
+            if not command:
+                raise ToolFailure(
+                    "INVALID_HOOK_CONFIG",
+                    f"Hook rule {index} requires a command.",
+                    category="validation",
+                    details={"index": index},
+                )
+            if timeout_ms < 100 or timeout_ms > 30000:
+                raise ToolFailure(
+                    "INVALID_HOOK_CONFIG",
+                    f"Hook rule {index} timeout_ms must be between 100 and 30000.",
+                    category="validation",
+                    details={"index": index},
+                )
+            rules.append(
+                HookRule(
+                    event=event,
+                    match=match,
+                    command=command,
+                    timeout_ms=timeout_ms,
+                    blocking=blocking,
+                )
+            )
+        return rules, []
+
+    def _run_hook_command(self, rule: HookRule, event_payload: dict[str, Any]) -> dict[str, Any]:
+        self._check_command_policy(rule.command, {})
+        env = self._command_env(
+            {
+                "CODING_TOOLS_HOOK_EVENT": rule.event,
+                "CODING_TOOLS_HOOK_TOOL": str(event_payload.get("tool", "")),
+            }
+        )
+        input_bytes = json_response_payload(event_payload)
+        landlock_fd: int | None = None
+        landlock_warning: str | None = None
+        popen_cmd: Any = rule.command
+        popen_shell = True
+        popen_kwargs = process_group_popen_kwargs()
+        if self.landlock_enabled():
+            try:
+                landlock_fd = open_landlock_ruleset(
+                    self.workspace.root,
+                    guard_allow_roots(),
+                    write_roots=self.landlock_write_roots(),
+                )
+                popen_cmd = landlock_exec_argv(landlock_fd, rule.command)
+                popen_shell = False
+                popen_kwargs["pass_fds"] = (landlock_fd,)
+            except ToolFailure as exc:
+                if exc.code != "SANDBOX_UNAVAILABLE":
+                    raise
+                landlock_warning = landlock_unavailable_warning(exc)
+        process: subprocess.Popen[bytes] | None = None
+        try:
+            process = subprocess.Popen(
+                popen_cmd,
+                cwd=str(self.workspace.root),
+                shell=popen_shell,
+                env=env,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                **popen_kwargs,
+            )
+            try:
+                stdout_raw, stderr_raw = process.communicate(
+                    input=input_bytes,
+                    timeout=rule.timeout_ms / 1000.0,
+                )
+                timed_out = False
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                terminate_process_group(process, signal.SIGTERM)
+                try:
+                    stdout_raw, stderr_raw = process.communicate(timeout=0.5)
+                except subprocess.TimeoutExpired:
+                    terminate_process_group(process, HARD_KILL_SIGNAL)
+                    stdout_raw, stderr_raw = process.communicate()
+            stdout, stdout_truncated = truncate_bytes(stdout_raw, HOOK_OUTPUT_BYTES)
+            stderr, stderr_truncated = truncate_bytes(stderr_raw, HOOK_OUTPUT_BYTES)
+            return {
+                "returncode": process.returncode,
+                "timed_out": timed_out,
+                "stdout": stdout,
+                "stderr": stderr,
+                "truncated": stdout_truncated or stderr_truncated,
+                "warning": landlock_warning,
+            }
+        finally:
+            if process is not None and process.poll() is None:
+                terminate_process_group(process, signal.SIGTERM)
+            if landlock_fd is not None:
+                try:
+                    os.close(landlock_fd)
+                except OSError:
+                    pass
+
+    def _run_hook_event(
+        self,
+        event: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        payload: dict[str, Any] | None = None,
+    ) -> list[str]:
+        if not self.enable_hooks or not self._hook_rules:
+            return []
+        if tool_name in {"runtime_doctor", "hooks_status", "shell_snapshot", "tool_search", "tool_invoke"}:
+            return []
+        warnings: list[str] = []
+        event_payload: dict[str, Any] = {
+            "event": event,
+            "tool": tool_name,
+            "workspace": str(self.workspace.root),
+            "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "arguments": redact_for_trace(arguments),
+        }
+        if payload is not None:
+            raw_error = payload.get("error")
+            event_payload["result"] = {
+                "ok": bool(payload.get("ok")),
+                "status": payload.get("status"),
+                "error": redact_for_trace(raw_error) if isinstance(raw_error, dict) else None,
+            }
+        for index, rule in enumerate(self._hook_rules):
+            if rule.event != event or not fnmatch.fnmatchcase(tool_name, rule.match):
+                continue
+            try:
+                result = self._run_hook_command(rule, event_payload)
+                failed = bool(result.get("timed_out")) or result.get("returncode") != 0
+                if not failed:
+                    continue
+                reason = "timed out" if result.get("timed_out") else f"exited {result.get('returncode')}"
+                message = f"Hook {index} ({event}, {rule.match}) {reason}."
+                stderr = str(result.get("stderr") or "").strip()
+                if stderr:
+                    message += f" stderr: {stderr[:1000]}"
+            except ToolFailure as exc:
+                message = f"Hook {index} ({event}, {rule.match}) was blocked: {exc.message}"
+                failed = True
+            if event == "before_tool" and rule.blocking and failed:
+                raise ToolFailure(
+                    "HOOK_BLOCKED",
+                    message,
+                    category="permission",
+                    details={"event": event, "tool": tool_name, "hook_index": index},
+                )
+            warnings.append(message)
+        return warnings
+
+    @staticmethod
+    def _merge_hook_warnings(payload: dict[str, Any], warnings: list[str]) -> None:
+        if not warnings:
+            return
+        existing = payload.get("warnings")
+        if isinstance(existing, list):
+            existing.extend(warnings)
+        elif existing is None:
+            payload["warnings"] = list(warnings)
+        else:
+            payload["warnings"] = [str(existing), *warnings]
+
     def resolve_existing(self, raw_path: str = ".") -> ResolvedPath:
         return self.workspace.resolve_existing(raw_path)
 
@@ -2292,6 +2446,11 @@ class Runtime:
             "workspace": str(self.workspace.root),
             "permission_mode": self.permission_mode,
             "network_allowed": self.allow_network,
+            "network_policy": {
+                "mode": self.network_policy,
+                "allow_domains": list(self.network_allow_domains),
+                "enforcement": "command-policy",
+            },
             "runtime_dir": str(self.runtime_dir),
             "home": str(self.command_home_dir()),
             "tmpdir": str(self.command_tmp_dir()),
@@ -2362,6 +2521,26 @@ class Runtime:
                 if self.enable_workflow_tools
                 else {"enabled": False}
             ),
+            "hooks": {
+                "enabled": self.enable_hooks,
+                "config_path": self.hooks_file,
+                "rule_count": len(self._hook_rules),
+                "warnings": list(self._hook_warnings),
+            },
+            "deferred_tools": {
+                "enabled": self.defer_workflow_tools,
+                "direct_count": len(self._exposed_tool_names),
+                "deferred_count": len(self._deferred_tool_names),
+                "available_count": len(self._available_tool_names),
+            },
+            "shell_snapshot": {
+                "active": self._shell_snapshot_env is not None,
+                "snapshot_id": (
+                    self._shell_snapshot_payload.get("snapshot_id")
+                    if self._shell_snapshot_payload is not None
+                    else None
+                ),
+            },
             "tools": tools,
             "tool_count": len(tools),
         }
@@ -2373,19 +2552,39 @@ class Runtime:
         *,
         context: RequestContext | None = None,
     ) -> dict[str, Any]:
-        started_at = time.time()
         args = arguments or {}
-        handler = self._tool_handlers.get(name) if name in self._exposed_tool_name_set else None
+        payload = self._execute_tool_payload(name, args, context=context, allow_deferred=False)
+        spec = TOOL_REGISTRY[name]
+        content = spec.content_builder(payload) if spec.content_builder else None
+        return make_tool_result(name, payload, is_error=payload.get("ok") is False, content=content)
+
+    def _execute_tool_payload(
+        self,
+        name: str,
+        args: dict[str, Any],
+        *,
+        context: RequestContext | None = None,
+        allow_deferred: bool,
+    ) -> dict[str, Any]:
+        started_at = time.time()
+        allowed_names = self._available_tool_name_set if allow_deferred else self._exposed_tool_name_set
+        handler = self._tool_handlers.get(name) if name in allowed_names else None
         if handler is None:
             raise JsonRpcError(-32602, f"Unknown tool: {name}", {"reason": "unknown_tool"})
         spec = TOOL_REGISTRY[name]
         validate_arguments(name, args)
+        before_hook_warnings: list[str] = []
         try:
+            before_hook_warnings = self._run_hook_event("before_tool", name, args)
             payload = handler(args)
             payload.setdefault("ok", True)
+            hook_warnings = [
+                *before_hook_warnings,
+                *self._run_hook_event("after_tool", name, args, payload),
+            ]
+            self._merge_hook_warnings(payload, hook_warnings)
             self.emit_tool_trace(name, args, payload, started_at, context=context)
-            content = spec.content_builder(payload) if spec.content_builder else None
-            return make_tool_result(name, payload, is_error=payload.get("ok") is False, content=content)
+            return payload
         except ToolFailure as exc:
             payload = {
                 "ok": False,
@@ -2412,8 +2611,13 @@ class Runtime:
                 }
             if exc.code == "ELICITATION_UNSUPPORTED":
                 payload["status"] = "unsupported"
+            hook_warnings = [
+                *before_hook_warnings,
+                *self._run_hook_event("tool_error", name, args, payload),
+            ]
+            self._merge_hook_warnings(payload, hook_warnings)
             self.emit_tool_trace(name, args, payload, started_at, context=context)
-            return make_tool_result(name, payload, is_error=True)
+            return payload
         except Exception as exc:  # noqa: BLE001 - tool failures must stay structured
             payload = {
                 "ok": False,
@@ -2427,8 +2631,13 @@ class Runtime:
             }
             if spec.error_status:
                 payload["status"] = spec.error_status
+            hook_warnings = [
+                *before_hook_warnings,
+                *self._run_hook_event("tool_error", name, args, payload),
+            ]
+            self._merge_hook_warnings(payload, hook_warnings)
             self.emit_tool_trace(name, args, payload, started_at, context=context)
-            return make_tool_result(name, payload, is_error=True)
+            return payload
 
     def server_info(self, args: dict[str, Any]) -> dict[str, Any]:
         return self.server_info_payload()
@@ -2445,7 +2654,9 @@ class Runtime:
             if not self._host_integration_summary()["ssh_auth_sock_reachable"]:
                 warnings.append("SSH agent socket is not available to host-mode commands")
         elif self.capabilities.skip_all_permissions:
-            warnings.append("permission_mode=dangerous disables MCP safety gates")
+            warnings.append("permission_mode=dangerous disables ordinary MCP command safety gates")
+            if self.network_policy != "unrestricted":
+                warnings.append(f"explicit network_policy={self.network_policy} remains active")
         if self.fake_readonly_annotations:
             warnings.append(
                 "tools/list annotations are faked as read-only; apply_patch and exec_command still mutate and execute"
@@ -2457,6 +2668,186 @@ class Runtime:
             "landlock_abi": landlock.get("abi_version"),
             "global_tmp_write": self.global_tmp_write_policy(),
             "warnings": warnings,
+        }
+
+    def runtime_doctor(self, args: dict[str, Any]) -> dict[str, Any]:
+        with self._shell_snapshot_lock:
+            snapshot_env = dict(self._shell_snapshot_env) if self._shell_snapshot_env is not None else None
+            snapshot_meta = dict(self._shell_snapshot_payload or {})
+        base_env = snapshot_env if snapshot_env is not None else self._base_command_env()
+        path_value = base_env.get("PATH") or base_env.get("Path") or ""
+        tool_names = tuple(dict.fromkeys((*DEFAULT_SHELL_SNAPSHOT_TOOLS, "uv", "pytest", "make")))
+        tools = {name: shutil.which(name, path=path_value) for name in tool_names}
+        issues: list[dict[str, str]] = []
+
+        def issue(code: str, message: str, suggested_fix: str) -> None:
+            issues.append({"code": code, "severity": "warning", "message": message, "suggested_fix": suggested_fix})
+
+        if not tools["git"]:
+            issue("GIT_NOT_FOUND", "git is not available on the command PATH.", "Install Git or add it to PATH.")
+        if not tools["rg"]:
+            issue(
+                "RIPGREP_NOT_FOUND",
+                "rg (ripgrep) is not available on the command PATH; text search may use slower fallbacks.",
+                "Install ripgrep or add rg to PATH.",
+            )
+        if not tools["python"] and tools["python3"]:
+            issue(
+                "PYTHON_ALIAS_MISSING",
+                "python is not available but python3 is.",
+                "Use python3 in project commands or provide a python alias in the execution environment.",
+            )
+        elif not tools["python"] and not tools["python3"]:
+            issue(
+                "PYTHON_COMMAND_MISSING",
+                "Neither python nor python3 is available on the command PATH.",
+                "Install Python or add the intended interpreter to PATH.",
+            )
+        if self.network_policy == "allowlist" and not self.network_allow_domains:
+            issue(
+                "NETWORK_ALLOWLIST_EMPTY",
+                "Network policy is allowlist but no domains are configured, so network-intent commands require approval.",
+                "Add --network-allow-domain entries or CODING_TOOLS_MCP_NETWORK_ALLOW_DOMAINS.",
+            )
+        for warning in self._hook_warnings:
+            issue("HOOK_CONFIG_WARNING", warning, "Fix the hook configuration or disable hooks for this runtime.")
+
+        landlock = landlock_status_payload()
+        workspace_readable = os.access(self.workspace.root, os.R_OK)
+        workspace_writable = os.access(self.workspace.root, os.W_OK)
+        if not workspace_readable:
+            issue("WORKSPACE_NOT_READABLE", "Workspace is not readable by the runtime process.", "Fix workspace permissions.")
+        if not workspace_writable:
+            issue("WORKSPACE_NOT_WRITABLE", "Workspace is not writable by the runtime process.", "Fix workspace permissions before applying patches.")
+
+        lsp_status: dict[str, Any] | None = None
+        if self.lsp_manager is not None:
+            try:
+                lsp_status = self.lsp_manager.status()
+            except Exception as exc:  # noqa: BLE001 - doctor must report rather than fail
+                lsp_status = {"ok": False, "error": str(exc)}
+                issue("LSP_STATUS_FAILED", f"Could not inspect LSP status: {exc}", "Check language-server installation and configuration.")
+
+        return {
+            "status": "warning" if issues else "ok",
+            "summary": (
+                f"Runtime doctor found {len(issues)} actionable warning{'s' if len(issues) != 1 else ''}."
+                if issues
+                else "Runtime doctor found no actionable warnings."
+            ),
+            "workspace": {
+                "path": str(self.workspace.root),
+                "readable": workspace_readable,
+                "writable": workspace_writable,
+                "git_marker_present": (self.workspace.root / ".git").exists(),
+            },
+            "python": {
+                "runtime_executable": sys.executable,
+                "python": tools["python"],
+                "python3": tools["python3"],
+            },
+            "tools": tools,
+            "shell_snapshot": {
+                "active": snapshot_env is not None,
+                "snapshot_id": snapshot_meta.get("snapshot_id"),
+                "created_at": snapshot_meta.get("created_at"),
+            },
+            "network": {
+                "mode": self.network_policy,
+                "allow_domains": list(self.network_allow_domains),
+                "enforcement": "command-policy",
+                "note": "This policy gates statically detected network-intent commands; it is not an OS-level egress firewall.",
+            },
+            "sandbox": {
+                "landlock_available": bool(landlock.get("available")),
+                "landlock_enabled": self._landlock_enforced(landlock),
+                "permission_mode": self.permission_mode,
+            },
+            "hooks": {
+                "enabled": self.enable_hooks,
+                "rule_count": len(self._hook_rules),
+                "warnings": list(self._hook_warnings),
+            },
+            "workflow": {
+                "enabled": self.enable_workflow_tools,
+                "deferred": self.defer_workflow_tools,
+                "direct_tool_count": len(self._exposed_tool_names),
+                "deferred_tool_count": len(self._deferred_tool_names),
+            },
+            "lsp": lsp_status if lsp_status is not None else {"enabled": False},
+            "issues": issues,
+        }
+
+    def hooks_status(self, args: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "enabled": self.enable_hooks,
+            "config_path": self.hooks_file,
+            "supported_events": list(HOOK_EVENTS),
+            "rule_count": len(self._hook_rules),
+            "rules": [
+                {
+                    "event": rule.event,
+                    "match": rule.match,
+                    "timeout_ms": rule.timeout_ms,
+                    "blocking": rule.blocking,
+                }
+                for rule in self._hook_rules
+            ],
+            "warnings": list(self._hook_warnings),
+        }
+
+    def shell_snapshot(self, args: dict[str, Any]) -> dict[str, Any]:
+        refresh = bool(args.get("refresh", False))
+        raw_tools = args.get("tools")
+        tool_names = (
+            [str(item) for item in raw_tools]
+            if isinstance(raw_tools, list) and raw_tools
+            else list(DEFAULT_SHELL_SNAPSHOT_TOOLS)
+        )
+        with self._shell_snapshot_lock:
+            cached = self._shell_snapshot_env is not None and not refresh
+            if cached:
+                env = dict(self._shell_snapshot_env or {})
+                metadata = dict(self._shell_snapshot_payload or {})
+            else:
+                env = self._fresh_command_env()
+                fingerprint = hashlib.sha256(json_response_payload(sorted(env.items()))).hexdigest()
+                metadata = {
+                    "snapshot_id": fingerprint[:24],
+                    "env_fingerprint": fingerprint,
+                    "created_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
+                        "+00:00", "Z"
+                    ),
+                }
+                self._shell_snapshot_env = dict(env)
+                self._shell_snapshot_payload = dict(metadata)
+        path_value = env.get("PATH") or env.get("Path") or ""
+        resolved_tools = {
+            name: shutil.which(name, path=path_value)
+            for name in dict.fromkeys(tool_names)
+        }
+        shell = (
+            env.get("SHELL")
+            or env.get("COMSPEC")
+            or env.get("ComSpec")
+            or os.environ.get("SHELL")
+            or os.environ.get("COMSPEC")
+            or ("cmd.exe" if os.name == "nt" else "/bin/sh")
+        )
+        return {
+            "snapshot_id": metadata.get("snapshot_id"),
+            "created_at": metadata.get("created_at"),
+            "cached": cached,
+            "refreshed": refresh,
+            "shell": shell,
+            "cwd": str(self.workspace.root),
+            "path_entries": [item for item in path_value.split(os.pathsep) if item][:128],
+            "tools": resolved_tools,
+            "env_count": len(env),
+            "env_fingerprint": metadata.get("env_fingerprint"),
+            "inherit": self.shell_env_policy.inherit,
+            "environment_scope": "host" if self.capabilities.host_environment else "isolated",
+            "note": "Subsequent exec_command calls reuse this environment until shell_snapshot(refresh=true).",
         }
 
     def emit_tool_trace(
@@ -2585,6 +2976,145 @@ class Runtime:
                 },
             }
         return result
+
+    def read_files(self, args: dict[str, Any]) -> dict[str, Any]:
+        requests = cast(list[dict[str, Any]], args.get("requests") or [])
+        if not requests:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "read_files requires at least one file request.",
+                category="validation",
+            )
+        max_total_bytes = int(args.get("max_total_bytes", 262144))
+        remaining_bytes = max_total_bytes
+        results: list[dict[str, Any]] = []
+        processed_count = 0
+        for request in requests:
+            if remaining_bytes <= 0:
+                break
+            nested = dict(request)
+            requested_max = int(nested.get("max_bytes", 65536))
+            nested["max_bytes"] = min(requested_max, remaining_bytes)
+            result = self.read_file(nested)
+            results.append(result)
+            processed_count += 1
+            remaining_bytes -= int(result.get("bytes_read", 0))
+
+        bytes_read = max_total_bytes - remaining_bytes
+        unprocessed = requests[processed_count:]
+        truncated = bool(unprocessed) or any(bool(item.get("truncated")) for item in results)
+        payload: dict[str, Any] = {
+            "files": results,
+            "requested_count": len(requests),
+            "processed_count": processed_count,
+            "bytes_read": bytes_read,
+            "max_total_bytes": max_total_bytes,
+            "remaining_request_count": len(unprocessed),
+            "truncated": truncated,
+        }
+        if unprocessed:
+            payload["next_action"] = {
+                "tool": "read_files",
+                "arguments": {
+                    "requests": unprocessed,
+                    "max_total_bytes": max_total_bytes,
+                },
+            }
+        return payload
+
+    def tool_search(self, args: dict[str, Any]) -> dict[str, Any]:
+        query = str(args.get("query", "")).strip()
+        if not query:
+            raise ToolFailure("INVALID_ARGUMENT", "query must not be empty.", category="validation")
+        limit = int(args.get("limit", 8))
+        include_schema = bool(args.get("include_schema", False))
+        query_normalized = " ".join(re.findall(r"[\w]+", query.lower().replace("_", " ")))
+        query_tokens = set(query_normalized.split())
+        ranked: list[tuple[float, str]] = []
+        for name in self._available_tool_names:
+            spec = TOOL_REGISTRY[name]
+            name_text = name.lower().replace("_", " ")
+            title_text = spec.title.lower()
+            description_text = spec.description.lower()
+            score = 0.0
+            if query_normalized in {name.lower(), name_text, title_text}:
+                score += 100.0
+            if query_normalized and query_normalized in name_text:
+                score += 45.0
+            if query_normalized and query_normalized in title_text:
+                score += 30.0
+            if query_normalized and query_normalized in description_text:
+                score += 12.0
+            name_tokens = set(name_text.split())
+            title_tokens = set(re.findall(r"[\w]+", title_text))
+            description_tokens = set(re.findall(r"[\w]+", description_text))
+            for token in query_tokens:
+                if token in name_tokens:
+                    score += 16.0
+                elif token in title_tokens:
+                    score += 9.0
+                elif token in description_tokens:
+                    score += 3.0
+            similarity = max(
+                difflib.SequenceMatcher(None, query_normalized, name_text).ratio(),
+                difflib.SequenceMatcher(None, query_normalized, title_text).ratio(),
+            )
+            if similarity >= 0.45:
+                score += similarity * 10.0
+            if score > 0:
+                ranked.append((score, name))
+        ranked.sort(key=lambda item: (-item[0], item[1]))
+        selected = ranked[:limit]
+        matches: list[dict[str, Any]] = []
+        for score, name in selected:
+            definition = tool_definition(name, fake_readonly=self.fake_readonly_annotations)
+            item = {
+                "name": name,
+                "title": definition["title"],
+                "description": definition["description"],
+                "annotations": definition["annotations"],
+                "score": round(score, 3),
+                "deferred": name in self._deferred_tool_name_set,
+            }
+            if name in self._deferred_tool_name_set:
+                item["invoke_via"] = "tool_invoke"
+            if include_schema or name in self._deferred_tool_name_set:
+                item["input_schema"] = definition["inputSchema"]
+            matches.append(item)
+        return {
+            "query": query,
+            "matches": matches,
+            "count": len(matches),
+            "searched_tool_count": len(self._available_tool_names),
+            "direct_tool_count": len(self._exposed_tool_names),
+            "deferred_tool_count": len(self._deferred_tool_names),
+            "limit": limit,
+            "truncated": len(ranked) > len(selected),
+        }
+
+    def tool_invoke(self, args: dict[str, Any]) -> dict[str, Any]:
+        name = str(args.get("name", "")).strip()
+        if name not in self._deferred_tool_name_set:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "tool_invoke only accepts a deferred workflow tool returned by tool_search.",
+                category="validation",
+                details={"tool": name, "deferred_tool_count": len(self._deferred_tool_names)},
+            )
+        raw_arguments = args.get("arguments", {})
+        if not isinstance(raw_arguments, dict):
+            raise ToolFailure("INVALID_ARGUMENT", "arguments must be an object.", category="validation")
+        payload = self._execute_tool_payload(
+            name,
+            cast(dict[str, Any], raw_arguments),
+            allow_deferred=True,
+        )
+        return {
+            "ok": payload.get("ok") is not False,
+            "tool": name,
+            "deferred": True,
+            "result": payload,
+        }
 
     def list_dir(self, args: dict[str, Any]) -> dict[str, Any]:
         resolved = self.resolve_existing(str(args.get("path", ".")))
@@ -3398,58 +3928,79 @@ class Runtime:
             time.sleep(0.02)
 
     def _check_command_policy(self, cmd: str, args: dict[str, Any]) -> None:
-        if self.dangerously_skip_all_permissions:
+        if self.dangerously_skip_all_permissions and self.network_policy == "unrestricted":
             return
-        self._check_command_paths(cmd)
         failures: list[ToolFailure] = []
-        env = args.get("env", {})
-        if isinstance(env, dict) and any(
-            is_filtered_env_var(str(key), str(value)) for key, value in env.items()
-        ):
-            failures.append(ToolFailure(
-                "PERMISSION_REQUIRED",
-                "Sensitive or loader/startup environment variables require explicit permission.",
-                category="permission",
-                details={"permission": "sensitive_env", "env_keys": sorted(str(key) for key in env)},
-            ))
-        if not self.capabilities.inline_script:
-            inline_script = inline_script_command(cmd)
-            if inline_script is not None:
+        compact = " ".join(cmd.split()).lower()
+        if not self.dangerously_skip_all_permissions:
+            self._check_command_paths(cmd)
+            env = args.get("env", {})
+            if isinstance(env, dict) and any(
+                is_filtered_env_var(str(key), str(value)) for key, value in env.items()
+            ):
                 failures.append(ToolFailure(
                     "PERMISSION_REQUIRED",
-                    "Inline interpreter or shell code requires explicit permission because network and filesystem effects cannot be verified statically.",
+                    "Sensitive or loader/startup environment variables require explicit permission.",
                     category="permission",
-                    details={"permission": INLINE_SCRIPT_PERMISSION, **inline_script},
+                    details={"permission": "sensitive_env", "env_keys": sorted(str(key) for key in env)},
                 ))
-        compact = " ".join(cmd.split()).lower()
-        if not self.capabilities.shell_expansion and SHELL_EXPANSION_RE.search(cmd):
-            failures.append(ToolFailure(
-                "PERMISSION_REQUIRED",
-                "Shell command substitution and parameter expansion require explicit permission.",
-                category="permission",
-                details={"permission": "shell_expansion", "command": compact},
-            ))
-        if re.search(r"(^|[;&|]\s*)rm\s+(-[^\s]*r[^\s]*f|-?[^\s]*f[^\s]*r)\s+/", compact):
-            failures.append(ToolFailure(
-                "PERMISSION_REQUIRED",
-                "Destructive commands are blocked without explicit permission.",
-                category="permission",
-                details={"permission": "destructive_command", "command": compact},
-            ))
-        elif DESTRUCTIVE_RE.search(cmd):
-            failures.append(ToolFailure(
-                "PERMISSION_REQUIRED",
-                "Destructive commands are blocked without explicit permission.",
-                category="permission",
-                details={"permission": "destructive_command", "command": compact},
-            ))
-        if not self.allow_network and NETWORK_RE.search(cmd) and not is_literal_network_reference_command(cmd):
-            failures.append(ToolFailure(
-                "PERMISSION_REQUIRED",
-                "Network access is denied by default.",
-                category="permission",
-                details={"permission": "network", "command": compact},
-            ))
+            if not self.capabilities.inline_script:
+                inline_script = inline_script_command(cmd)
+                if inline_script is not None:
+                    failures.append(ToolFailure(
+                        "PERMISSION_REQUIRED",
+                        "Inline interpreter or shell code requires explicit permission because network and filesystem effects cannot be verified statically.",
+                        category="permission",
+                        details={"permission": INLINE_SCRIPT_PERMISSION, **inline_script},
+                    ))
+            if not self.capabilities.shell_expansion and SHELL_EXPANSION_RE.search(cmd):
+                failures.append(ToolFailure(
+                    "PERMISSION_REQUIRED",
+                    "Shell command substitution and parameter expansion require explicit permission.",
+                    category="permission",
+                    details={"permission": "shell_expansion", "command": compact},
+                ))
+            if re.search(r"(^|[;&|]\s*)rm\s+(-[^\s]*r[^\s]*f|-?[^\s]*f[^\s]*r)\s+/", compact):
+                failures.append(ToolFailure(
+                    "PERMISSION_REQUIRED",
+                    "Destructive commands are blocked without explicit permission.",
+                    category="permission",
+                    details={"permission": "destructive_command", "command": compact},
+                ))
+            elif DESTRUCTIVE_RE.search(cmd):
+                failures.append(ToolFailure(
+                    "PERMISSION_REQUIRED",
+                    "Destructive commands are blocked without explicit permission.",
+                    category="permission",
+                    details={"permission": "destructive_command", "command": compact},
+                ))
+
+        network = command_network_analysis(cmd)
+        if network["network_intent"] and self.network_policy != "unrestricted":
+            hosts = [str(item) for item in network["hosts"]]
+            blocked_hosts = [
+                host for host in hosts if not network_host_allowed(host, self.network_allow_domains)
+            ]
+            unresolved = bool(network["unresolved_target"])
+            if self.network_policy == "deny" or blocked_hosts or unresolved:
+                if self.network_policy == "allowlist":
+                    message = "Network target is outside the configured allowlist or could not be resolved statically."
+                else:
+                    message = "Network access is denied by the current network policy."
+                failures.append(ToolFailure(
+                    "PERMISSION_REQUIRED",
+                    message,
+                    category="permission",
+                    details={
+                        "permission": "network",
+                        "command": compact,
+                        "network_policy": self.network_policy,
+                        "detected_hosts": hosts,
+                        "blocked_hosts": blocked_hosts,
+                        "unresolved_target": unresolved,
+                        "allow_domains": list(self.network_allow_domains),
+                    },
+                ))
         if not failures:
             return
         approval_ids = args.get("approval_ids")
@@ -3547,7 +4098,7 @@ class Runtime:
                 details={"permission": "privileged_executable", "path": str(executable_path)},
             )
 
-    def _command_env(self, extra: Any) -> dict[str, str]:
+    def _fresh_command_env(self) -> dict[str, str]:
         env = self._base_command_env()
         if not self.dangerously_skip_all_permissions:
             env = {key: value for key, value in env.items() if not is_filtered_env_var(key, value)}
@@ -3573,6 +4124,14 @@ class Runtime:
             if os.name == "nt":
                 env["TEMP"] = str(tmp_dir)
                 env["TMP"] = str(tmp_dir)
+        for key in SERVER_INTERNAL_SECRET_ENV_NAMES:
+            env.pop(key, None)
+        return env
+
+    def _command_env(self, extra: Any) -> dict[str, str]:
+        with self._shell_snapshot_lock:
+            snapshot = dict(self._shell_snapshot_env) if self._shell_snapshot_env is not None else None
+        env = snapshot if snapshot is not None else self._fresh_command_env()
         if isinstance(extra, dict):
             for key, value in extra.items():
                 key_text = str(key)
@@ -5582,125 +6141,6 @@ class Runtime:
         }
         return payload
 
-    def browser_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        return browser_tools.status(args)
-
-    def browser_tabs(self, args: dict[str, Any]) -> dict[str, Any]:
-        return browser_tools.tabs(args)
-
-    def browser_active_tab(self, args: dict[str, Any]) -> dict[str, Any]:
-        return browser_tools.active_tab(args)
-
-    def browser_snapshot(self, args: dict[str, Any]) -> dict[str, Any]:
-        return browser_tools.snapshot(args)
-
-    def browser_screenshot(self, args: dict[str, Any]) -> dict[str, Any]:
-        return browser_tools.screenshot(args)
-
-    def browser_evaluate(self, args: dict[str, Any]) -> dict[str, Any]:
-        return browser_tools.evaluate(args)
-
-    def browser_click(self, args: dict[str, Any]) -> dict[str, Any]:
-        return browser_tools.click(args)
-
-    def browser_type(self, args: dict[str, Any]) -> dict[str, Any]:
-        return browser_tools.type_text(args)
-
-    def browser_navigate(self, args: dict[str, Any]) -> dict[str, Any]:
-        return browser_tools.navigate(args)
-
-    def browser_back(self, args: dict[str, Any]) -> dict[str, Any]:
-        return browser_tools.back(args)
-
-    def browser_reload(self, args: dict[str, Any]) -> dict[str, Any]:
-        return browser_tools.reload(args)
-
-    def browser_hover(self, args: dict[str, Any]) -> dict[str, Any]:
-        return browser_tools.hover(args)
-
-    def browser_select(self, args: dict[str, Any]) -> dict[str, Any]:
-        return browser_tools.select_option(args)
-
-    def browser_press(self, args: dict[str, Any]) -> dict[str, Any]:
-        return browser_tools.press(args)
-
-    def browser_upload(self, args: dict[str, Any]) -> dict[str, Any]:
-        files: list[str] = []
-        for path in cast(list[str], args.get("paths") or []):
-            resolved = self.resolve_existing(path)
-            if not resolved.path.is_file():
-                raise ToolFailure("IS_DIRECTORY", f"Upload path is not a file: {path}", category="validation")
-            files.append(str(resolved.path))
-        for download_id in cast(list[str], args.get("download_ids") or []):
-            files.append(str(self._browser_download_path(download_id)))
-        if not files:
-            raise ToolFailure(
-                "INVALID_ARGUMENT",
-                "Provide at least one workspace path or managed download_id for browser_upload.",
-                category="validation",
-            )
-        if len(files) > 32:
-            raise ToolFailure("INVALID_ARGUMENT", "Browser upload accepts at most 32 files.", category="validation")
-        return browser_tools.upload({**args, "_resolved_files": files})
-
-    def _browser_download_root(self) -> Path:
-        self._ensure_runtime_dirs()
-        root = self.runtime_dir / "browser-downloads"
-        root.mkdir(parents=True, mode=0o700, exist_ok=True)
-        return root
-
-    def _browser_download_path(self, download_id: str) -> Path:
-        if not re.fullmatch(r"[0-9a-f]{24}", str(download_id)):
-            raise ToolFailure("INVALID_ARGUMENT", "Invalid managed browser download id.", category="validation")
-        directory = self._browser_download_root() / str(download_id)
-        if not directory.is_dir() or directory.is_symlink():
-            raise ToolFailure(
-                "BROWSER_DOWNLOAD_NOT_FOUND",
-                f"Managed browser download {download_id!r} was not found.",
-                category="not_found",
-            )
-        files = [path for path in directory.iterdir() if path.is_file() and not path.is_symlink() and not path.name.startswith(".")]
-        if len(files) != 1:
-            raise ToolFailure(
-                "BROWSER_DOWNLOAD_NOT_FOUND",
-                f"Managed browser download {download_id!r} is incomplete or unavailable.",
-                category="not_found",
-            )
-        return files[0]
-
-    def browser_download(self, args: dict[str, Any]) -> dict[str, Any]:
-        return browser_tools.download({**args, "_download_root": str(self._browser_download_root())})
-
-    def browser_watch_start(self, args: dict[str, Any]) -> dict[str, Any]:
-        if self.browser_watch_manager is None:
-            raise ToolFailure("INTERNAL_ERROR", "Browser watch manager is unavailable.", category="internal")
-        return self.browser_watch_manager.start(args)
-
-    def browser_watch_poll(self, args: dict[str, Any]) -> dict[str, Any]:
-        if self.browser_watch_manager is None:
-            raise ToolFailure("INTERNAL_ERROR", "Browser watch manager is unavailable.", category="internal")
-        return self.browser_watch_manager.poll(args)
-
-    def browser_watch_stop(self, args: dict[str, Any]) -> dict[str, Any]:
-        if self.browser_watch_manager is None:
-            raise ToolFailure("INTERNAL_ERROR", "Browser watch manager is unavailable.", category="internal")
-        return self.browser_watch_manager.stop(args)
-
-    def browser_wait(self, args: dict[str, Any]) -> dict[str, Any]:
-        return browser_tools.wait(args)
-
-    def browser_events(self, args: dict[str, Any]) -> dict[str, Any]:
-        return browser_tools.events(args)
-
-    def browser_console(self, args: dict[str, Any]) -> dict[str, Any]:
-        return browser_tools.console(args)
-
-    def browser_network(self, args: dict[str, Any]) -> dict[str, Any]:
-        return browser_tools.network(args)
-
-    def browser_inspect(self, args: dict[str, Any]) -> dict[str, Any]:
-        return browser_tools.inspect(args)
-
     def code_symbols(self, args: dict[str, Any]) -> dict[str, Any]:
         resolved = self.resolve_existing(str(args.get("path", ".")))
         return code_intel.symbols(self.workspace.root, resolved.path, args)
@@ -5712,57 +6152,6 @@ class Runtime:
     def code_references(self, args: dict[str, Any]) -> dict[str, Any]:
         resolved = self.resolve_existing(str(args.get("path", ".")))
         return code_intel.references(self.workspace.root, resolved.path, args)
-
-    def chrome_extension_install(self, args: dict[str, Any]) -> dict[str, Any]:
-        return chrome_bridge.install(args)
-
-    def chrome_extension_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        return chrome_bridge.status(args)
-
-    def chrome_extensions(self, args: dict[str, Any]) -> dict[str, Any]:
-        return chrome_bridge.extensions(args)
-
-    def chrome_extension_tabs(self, args: dict[str, Any]) -> dict[str, Any]:
-        return chrome_bridge.tabs(args)
-
-    def chrome_extension_execute(self, args: dict[str, Any]) -> dict[str, Any]:
-        return chrome_bridge.execute(args)
-
-    def chrome_extension_send(self, args: dict[str, Any]) -> dict[str, Any]:
-        return chrome_bridge.send(args)
-
-    def app_accessibility(self, args: dict[str, Any]) -> dict[str, Any]:
-        return macos_apps.accessibility(args)
-
-    def app_list(self, args: dict[str, Any]) -> dict[str, Any]:
-        return macos_apps.list_apps(args)
-
-    def app_launch(self, args: dict[str, Any]) -> dict[str, Any]:
-        return macos_apps.launch(args)
-
-    def app_activate(self, args: dict[str, Any]) -> dict[str, Any]:
-        return macos_apps.activate(args)
-
-    def app_windows(self, args: dict[str, Any]) -> dict[str, Any]:
-        return macos_apps.windows(args)
-
-    def app_snapshot(self, args: dict[str, Any]) -> dict[str, Any]:
-        return macos_apps.snapshot(args)
-
-    def app_click(self, args: dict[str, Any]) -> dict[str, Any]:
-        return macos_apps.click(args)
-
-    def app_type(self, args: dict[str, Any]) -> dict[str, Any]:
-        return macos_apps.type_text(args)
-
-    def app_press(self, args: dict[str, Any]) -> dict[str, Any]:
-        return macos_apps.press(args)
-
-    def app_menu(self, args: dict[str, Any]) -> dict[str, Any]:
-        return macos_apps.menu(args)
-
-    def app_screenshot(self, args: dict[str, Any]) -> dict[str, Any]:
-        return macos_apps.screenshot(args)
 
 
 def walk_files(root: Path) -> Iterator[Path]:
@@ -6231,6 +6620,105 @@ def is_literal_network_reference_command(command: str) -> bool:
         PurePosixPath(executable.replace("\\", "/")).name.lower() in NETWORK_LITERAL_COMMANDS
         for executable in executables
     )
+
+
+def normalize_network_host(value: str) -> str | None:
+    token = value.strip().strip("'\"").rstrip(".,;)")
+    if not token:
+        return None
+    if "://" in token:
+        try:
+            parsed = urllib.parse.urlsplit(token)
+        except ValueError:
+            return None
+        return parsed.hostname.lower().rstrip(".") if parsed.hostname else None
+    scp_match = SCP_TARGET_RE.match(token)
+    if scp_match:
+        host = scp_match.group("host").strip("[]").lower().rstrip(".")
+        return host or None
+    if "@" in token and "/" not in token:
+        token = token.rsplit("@", 1)[-1]
+    host = token.strip("[]").lower().rstrip(".")
+    if host == "localhost" or "." in host or ":" in host or re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", host):
+        return host
+    return None
+
+
+def network_host_allowed(host: str, allow_domains: tuple[str, ...]) -> bool:
+    normalized = host.lower().rstrip(".")
+    for rule in allow_domains:
+        if rule.startswith("*."):
+            suffix = rule[2:]
+            if normalized.endswith(f".{suffix}") and normalized != suffix:
+                return True
+        elif normalized == rule:
+            return True
+    return False
+
+
+def command_network_analysis(command: str) -> dict[str, Any]:
+    if is_literal_network_reference_command(command):
+        return {"network_intent": False, "hosts": [], "unresolved_target": False}
+
+    hosts: set[str] = set()
+    for match in NETWORK_URL_RE.finditer(command):
+        host = normalize_network_host(match.group(0))
+        if host:
+            hosts.add(host)
+
+    try:
+        tokens = shlex_split(strip_heredoc_payloads(command))
+    except ValueError:
+        tokens = command.split()
+    network_intent = bool(NETWORK_RE.search(command))
+    unresolved_target = False
+    direct_network_commands = {"curl", "wget", "ssh", "scp", "ftp", "nc", "netcat", "telnet"}
+
+    for index, token in enumerate(tokens):
+        name = PurePosixPath(token.replace("\\", "/")).name.lower()
+        if name in direct_network_commands:
+            network_intent = True
+            discovered = False
+            for candidate in tokens[index + 1 :]:
+                if candidate in SHELL_CONTROL_TOKENS:
+                    break
+                if candidate.startswith("-"):
+                    continue
+                host = normalize_network_host(candidate)
+                if host:
+                    hosts.add(host)
+                    discovered = True
+            unresolved_target = unresolved_target or not discovered
+            continue
+
+        subcommands = NETWORK_PACKAGE_SUBCOMMANDS.get(name)
+        if subcommands:
+            command_args = [item.lower() for item in tokens[index + 1 :] if not item.startswith("-")]
+            if command_args and command_args[0] in subcommands:
+                network_intent = True
+                discovered = False
+                for candidate in tokens[index + 2 :]:
+                    host = normalize_network_host(candidate)
+                    if host:
+                        hosts.add(host)
+                        discovered = True
+                unresolved_target = unresolved_target or not discovered
+
+        if name.startswith("python") and index + 2 < len(tokens) and tokens[index + 1] == "-m":
+            module = tokens[index + 2].lower()
+            if module in {"pip", "pip3"}:
+                command_args = [item.lower() for item in tokens[index + 3 :] if not item.startswith("-")]
+                if command_args and command_args[0] in NETWORK_PACKAGE_SUBCOMMANDS[module]:
+                    network_intent = True
+                    unresolved_target = True
+
+    if network_intent and not hosts:
+        unresolved_target = True
+    return {
+        "network_intent": network_intent,
+        "hosts": sorted(hosts),
+        "unresolved_target": unresolved_target,
+    }
 
 
 def entry_for_path(path: Path, root: Path) -> dict[str, Any]:
@@ -6904,9 +7392,21 @@ def input_schemas() -> dict[str, dict[str, Any]]:
     integer = {"type": "integer"}
     boolean = {"type": "boolean"}
     string_array = {"type": "array", "items": {"type": "string"}}
-    return {
+    schemas = {
         "server_info": object_schema(),
         "check_exec_environment": object_schema(),
+        "runtime_doctor": object_schema(),
+        "hooks_status": object_schema(),
+        "shell_snapshot": object_schema(
+            {
+                "refresh": {**boolean, "default": False},
+                "tools": {
+                    "type": "array",
+                    "items": {**string, "minLength": 1},
+                    "maxItems": 32,
+                },
+            }
+        ),
         "read_file": object_schema(
             {
                 "path": {**string, "minLength": 1},
@@ -6917,6 +7417,30 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "encoding": {**string, "enum": ["utf-8"], "default": "utf-8"},
             },
             ["path"],
+        ),
+        "read_files": object_schema(
+            {
+                "requests": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 32,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {**string, "minLength": 1},
+                            "start_line": {**integer, "minimum": 1, "default": 1},
+                            "end_line": {**integer, "minimum": 1},
+                            "max_lines": {**integer, "minimum": 1},
+                            "max_bytes": {**integer, "minimum": 1, "maximum": 262144, "default": 65536},
+                            "encoding": {**string, "enum": ["utf-8"], "default": "utf-8"},
+                        },
+                        "required": ["path"],
+                        "additionalProperties": False,
+                    },
+                },
+                "max_total_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 262144},
+            },
+            ["requests"],
         ),
         "list_dir": object_schema(
             {
@@ -6955,6 +7479,21 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "max_preview_bytes": {**integer, "minimum": 80, "maximum": 4096, "default": 512},
             },
             ["query"],
+        ),
+        "tool_search": object_schema(
+            {
+                "query": {**string, "minLength": 1},
+                "limit": {**integer, "minimum": 1, "maximum": 20, "default": 8},
+                "include_schema": {**boolean, "default": False},
+            },
+            ["query"],
+        ),
+        "tool_invoke": object_schema(
+            {
+                "name": {**string, "minLength": 1},
+                "arguments": {"type": "object", "default": {}},
+            },
+            ["name"],
         ),
         "apply_patch": object_schema({"patch": {**string, "minLength": 1}, "dry_run": {**boolean, "default": False}}, ["patch"]),
         "exec_command": object_schema(
@@ -7766,6 +8305,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             ["app"],
         ),
     }
+    return {name: schemas[name] for name in TOOL_REGISTRY}
 
 
 def _server_card_auth(runtime: Runtime, *, oauth_base_url: str | None = None) -> dict[str, Any]:
@@ -8619,10 +9159,15 @@ def build_runtime(
         workspace,
         enable_view_image=args.enable_view_image,
         enable_workflow_tools=bool(getattr(args, "enable_workflow_tools", False)),
+        defer_workflow_tools=bool(getattr(args, "defer_workflow_tools", False)),
+        enable_hooks=bool(getattr(args, "enable_hooks", False)),
+        hooks_file=getattr(args, "hooks_file", None),
         state_root=Path(args.state_root).expanduser() if getattr(args, "state_root", None) else None,
         permission_mode=runtime_policy.permission_mode,
         shell_env_policy=runtime_policy.shell_env_policy,
         allow_network=runtime_policy.allow_network,
+        network_policy=runtime_policy.network_policy,
+        network_allow_domains=runtime_policy.network_allow_domains,
         auth_token=auth_token,
         oauth_config=oauth_config,
         project_context=project_context,
@@ -8635,7 +9180,7 @@ def build_runtime(
             "WARNING: permission_mode=host gives commands the server process's full host environment, "
             "credentials, filesystem, and network access."
             if runtime.capabilities.host_environment
-            else "WARNING: permission_mode=dangerous disables MCP safety gates. Use only inside an isolated container or VM."
+            else "WARNING: permission_mode=dangerous disables ordinary MCP command safety gates. Use only inside an isolated container or VM."
         )
         print(warning, file=sys.stderr)
     if emit_warning and runtime.fake_readonly_annotations:
@@ -8876,21 +9421,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--stdio", action="store_true", help="serve newline-delimited JSON-RPC over stdio")
     parser.add_argument(
-        "--chrome-native-host",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
-        "--install-chrome-bridge",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
-        "--chrome-bridge-no-open",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
         "--auth-token",
         default=None,
         help=f"require Authorization: Bearer <token> on /mcp; defaults to {ENV_PREFIX}_AUTH_TOKEN",
@@ -8921,16 +9451,36 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "exec_command permission mode: safe denies network/shell-expansion/inline-script gates; "
             "trusted allows local development network, shell expansion, and inline scripts; "
-            "dangerous disables permission gates while keeping an isolated command home; "
-            "host disables permission gates and inherits the full host environment"
+            "dangerous disables ordinary permission gates while keeping an isolated command home; "
+            "host disables ordinary permission gates and inherits the full host environment; "
+            "an explicit deny/allowlist network policy still applies in every mode"
         ),
     )
     parser.add_argument(
         "--allow-network",
         action="store_true",
         help=(
-            "compatibility alias: allow network-looking exec_command calls without changing other gates; "
+            "compatibility alias for --network-policy unrestricted; "
             f"can also be enabled with {ENV_PREFIX}_ALLOW_NETWORK=1"
+        ),
+    )
+    parser.add_argument(
+        "--network-policy",
+        choices=NETWORK_POLICY_CHOICES,
+        default=None,
+        help=(
+            "network command policy: deny requires approval, allowlist permits only statically resolved allowed "
+            "domains, unrestricted disables the network gate; defaults to deny in safe mode and unrestricted "
+            f"in network-capable modes or {ENV_PREFIX}_NETWORK_POLICY"
+        ),
+    )
+    parser.add_argument(
+        "--network-allow-domain",
+        action="append",
+        default=[],
+        help=(
+            "domain allowed without approval when --network-policy allowlist is active; repeat for multiple "
+            f"domains, use *.example.com for subdomains, or set {ENV_PREFIX}_NETWORK_ALLOW_DOMAINS as CSV"
         ),
     )
     parser.add_argument(
@@ -8944,6 +9494,29 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=truthy_env(os.environ.get(f"{ENV_PREFIX}_ENABLE_WORKFLOW_TOOLS")),
         help="enable the opt-in project insight, Skills, checks, task, and checkpoint toolset",
+    )
+    parser.add_argument(
+        "--defer-workflow-tools",
+        action="store_true",
+        default=truthy_env(os.environ.get(f"{ENV_PREFIX}_DEFER_WORKFLOW_TOOLS")),
+        help=(
+            "hide workflow tools from the direct catalog and expose them through tool_search + tool_invoke; "
+            "requires --enable-workflow-tools"
+        ),
+    )
+    parser.add_argument(
+        "--enable-hooks",
+        action="store_true",
+        default=truthy_env(os.environ.get(f"{ENV_PREFIX}_ENABLE_HOOKS")),
+        help="enable opt-in workspace hooks from .agents/hooks.json or --hooks-file",
+    )
+    parser.add_argument(
+        "--hooks-file",
+        default=os.environ.get(f"{ENV_PREFIX}_HOOKS_FILE") or DEFAULT_HOOK_CONFIG_PATH,
+        help=(
+            "workspace-relative hook configuration file; defaults to .agents/hooks.json "
+            f"or {ENV_PREFIX}_HOOKS_FILE"
+        ),
     )
     parser.add_argument(
         "--state-root",
@@ -8992,18 +9565,6 @@ def install_sigterm_handler() -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.chrome_native_host:
-        from .chrome_native_host import main as chrome_native_host_main
-
-        return chrome_native_host_main()
-    if args.install_chrome_bridge:
-        try:
-            result = chrome_bridge.install({"open_extensions_page": not args.chrome_bridge_no_open})
-        except ToolFailure as exc:
-            print(f"ERROR: {exc.message}", file=sys.stderr)
-            return 2
-        print(json.dumps(result, ensure_ascii=False))
-        return 0
     install_sigterm_handler()
     return run_stdio(args) if args.stdio else run_http(args)
 

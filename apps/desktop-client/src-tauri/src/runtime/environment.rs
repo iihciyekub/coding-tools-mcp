@@ -100,29 +100,16 @@ fn probe(mut command: Command) -> Option<String> {
 
 fn usable_python(python: &Path, version: &str) -> bool {
     let mut command = Command::new(python);
-    command.args(["-I", "-c", "import sys; import coding_tools_mcp, jwt; from playwright.sync_api import sync_playwright; assert sys.version_info >= (3,11); print(coding_tools_mcp.__version__)"]);
+    command.args(["-I", "-c", "import sys; import coding_tools_mcp, jwt; assert sys.version_info >= (3,11); print(coding_tools_mcp.__version__)"]);
     probe(command).as_deref() == Some(version)
 }
 
-pub(super) fn readiness(
-    resources: &Path,
-    data: &Path,
-    _path: &str,
-) -> (bool, Option<String>, Option<String>) {
+pub(super) fn readiness(resources: &Path, data: &Path, _path: &str) -> (bool, Option<String>) {
     let package_dir = resources.join("runtime");
     let package = match Package::read(&package_dir) {
         Ok(package) => package,
-        Err(_) => return (false, None, None),
+        Err(_) => return (false, None),
     };
-    let playwright_version = fs::read_to_string(package_dir.join("requirements.txt"))
-        .ok()
-        .and_then(|requirements| {
-            requirements.lines().find_map(|line| {
-                line.strip_prefix("playwright==")
-                    .and_then(|value| value.split_whitespace().next())
-                    .map(str::to_string)
-            })
-        });
     let target = data.join("runtimes").join(&package.environment_key);
     let python = python_in(&target);
     let ready = target.join(".ready");
@@ -130,9 +117,9 @@ pub(super) fn readiness(
         .ok()
         .is_some_and(|value| value.trim() == package.version);
     if marker_matches && python.is_file() {
-        return (true, Some(package.version), playwright_version);
+        return (true, Some(package.version));
     }
-    (false, Some(package.version), playwright_version)
+    (false, Some(package.version))
 }
 
 pub(super) fn reset_managed(resources: &Path, data: &Path) -> Result<bool, String> {
@@ -566,11 +553,14 @@ result = subprocess.run([sys.executable, '-I', '-m', 'coding_tools_mcp', '--stdi
 assert result.returncode == 0, result.stderr
 responses = [json.loads(line) for line in result.stdout.splitlines()]
 catalog = next(x['result']['tools'] for x in responses if x.get('id') == 2)
-assert any(x['name'] == 'browser_snapshot' for x in catalog)
-assert any(x['name'] == 'chrome_extension_install' for x in catalog)
+assert any(x['name'] == 'read_files' for x in catalog)
+assert any(x['name'] == 'tool_search' for x in catalog)
+assert any(x['name'] == 'runtime_doctor' for x in catalog)
+assert any(x['name'] == 'hooks_status' for x in catalog)
+assert any(x['name'] == 'shell_snapshot' for x in catalog)
 print(len(catalog))
 "#]).arg(temporary.path());
-        assert_eq!(probe(handshake).as_deref(), Some("51"));
+        assert_eq!(probe(handshake).as_deref(), Some("28"));
         let mut command = Command::new(&second.0);
         command.args([
             "-I",
