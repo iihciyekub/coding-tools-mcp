@@ -139,13 +139,8 @@ Linux：按工作区管理配置、一键启停服务器与隧道、凭证写入
 原子提交并支持回滚。工作流中的 Git 写操作、Checkpoint 恢复和工作流状态更新
 具有各自明确且受保护的写语义，不是绕过 Patch 引擎的通用源码编辑器。
 
-| 分组 | 工具 |
-| --- | --- |
-| 文件与搜索 | `read_file` · `read_files` · `list_dir` · `list_files` · `search_text` · `tool_search` · `apply_patch` · `view_image` |
-| 执行 | `exec_command` · `get_command` · `list_commands` · `write_stdin` · `read_output` · `kill_command` · `request_permissions` |
-| Git | `git_status` · `git_diff` · `git_log` · `git_show` · `git_blame` |
-| 运行时 | `server_info` · `check_exec_environment` · `runtime_doctor` · `hooks_status` · `shell_snapshot` |
-| 代码智能 | `code_symbols` · `code_definition` · `code_references` |
+`tool_search({})` 提供实时分类目录，按用途组织已启用的能力并说明选用场景。
+完整工具清单统一维护在 [工具与 Schema](docs/tools-and-schemas.md)。
 
 `--enable-hooks` 会从 `.agents/hooks.json` 启用工作区范围内的
 `before_tool`、`after_tool`、`tool_error` hooks。`shell_snapshot` 会冻结过滤后的
@@ -154,6 +149,11 @@ Linux：按工作区管理配置、一键启停服务器与隧道、凭证写入
 与网络策略方面的可执行修复建议。使用
 `--enable-workflow-tools --defer-workflow-tools` 时，40 个 workflow 工具不再进入
 初始 `tools/list`，而是由 `tool_search` 搜索并通过 `tool_invoke` 调用。
+桌面启动的运行时默认使用此模式：常用工具直接调用，高级能力按需发现。
+`tool_search({})` 返回分类目录，选择分类后查看工具摘要，再按工具名读取参数；
+也可直接用“运行测试”“恢复任务”等中英文意图搜索，跳过目录浏览。
+无需为每个小修改建立任务、计划、审查和检查点。详见
+[渐进式工具发现与选用策略](docs/tool-discovery.md)。
 
 网络命令策略可独立选择 `--network-policy deny|allowlist|unrestricted`。
 allowlist 模式下可重复使用 `--network-allow-domain github.com`，子域可写成

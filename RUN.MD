@@ -34,10 +34,10 @@ codesign --verify --deep --strict --verbose=2 \
 ```bash
 ditto -c -k --keepParent \
   "src-tauri/target/release/bundle/macos/Coding Tools MCP.app" \
-  "src-tauri/target/release/bundle/macos/Coding Tools MCP_0.3.21.app.zip"
+  "src-tauri/target/release/bundle/macos/Coding Tools MCP_0.3.22.app.zip"
 
 xcrun notarytool submit \
-  "src-tauri/target/release/bundle/macos/Coding Tools MCP_0.3.21.app.zip" \
+  "src-tauri/target/release/bundle/macos/Coding Tools MCP_0.3.22.app.zip" \
   --keychain-profile "WOSAide-Notary" \
   --wait
 
@@ -51,7 +51,7 @@ xcrun stapler validate "src-tauri/target/release/bundle/macos/Coding Tools MCP.a
 cd apps/desktop-client
 bash ./create-dmg.sh \
   "src-tauri/target/release/bundle/macos/Coding Tools MCP.app" \
-  "src-tauri/target/release/bundle/dmg/Coding-Tools-MCP-0.3.21-arm64.dmg"
+  "src-tauri/target/release/bundle/dmg/Coding-Tools-MCP-0.3.22-arm64.dmg"
 ```
 
 该脚本会生成标准 macOS Finder 安装窗口：左侧为较大的 Coding Tools MCP 图标，右侧为 Applications 快捷方式，用户可直接拖拽安装。
@@ -61,14 +61,14 @@ bash ./create-dmg.sh \
 ```bash
 codesign --force --timestamp \
   --sign "Developer ID Application: Yongjian Li (2NLAH5MYH8)" \
-  "src-tauri/target/release/bundle/dmg/Coding-Tools-MCP-0.3.21-arm64.dmg"
+  "src-tauri/target/release/bundle/dmg/Coding-Tools-MCP-0.3.22-arm64.dmg"
 ```
 
 提交 Apple 公证：
 
 ```bash
 xcrun notarytool submit \
-  "src-tauri/target/release/bundle/dmg/Coding-Tools-MCP-0.3.21-arm64.dmg" \
+  "src-tauri/target/release/bundle/dmg/Coding-Tools-MCP-0.3.22-arm64.dmg" \
   --keychain-profile "WOSAide-Notary" \
   --wait
 ```
@@ -76,8 +76,8 @@ xcrun notarytool submit \
 公证通过后：
 
 ```bash
-xcrun stapler staple "src-tauri/target/release/bundle/dmg/Coding-Tools-MCP-0.3.21-arm64.dmg"
-xcrun stapler validate "src-tauri/target/release/bundle/dmg/Coding-Tools-MCP-0.3.21-arm64.dmg"
+xcrun stapler staple "src-tauri/target/release/bundle/dmg/Coding-Tools-MCP-0.3.22-arm64.dmg"
+xcrun stapler validate "src-tauri/target/release/bundle/dmg/Coding-Tools-MCP-0.3.22-arm64.dmg"
 ```
 
 最关键的修正就两个：

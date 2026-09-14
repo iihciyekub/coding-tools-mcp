@@ -168,15 +168,50 @@ def _render_read_files(payload: dict[str, Any]) -> str:
 
 
 def _render_tool_search(payload: dict[str, Any]) -> str:
+    if payload.get("mode") == "directory":
+        lines = [
+            "Tool directory: "
+            f"{payload.get('direct_tool_count', 0)} direct, {payload.get('deferred_tool_count', 0)} deferred.",
+            str(payload.get("strategy", "")),
+        ]
+        categories = payload.get("categories", [])
+        for category in categories if isinstance(categories, list) else []:
+            if not isinstance(category, dict):
+                continue
+            lines.append(
+                f"\n{category.get('id')}: {category.get('title')} "
+                f"({category.get('direct_count', 0)} direct, {category.get('deferred_count', 0)} deferred)\n"
+                f"{category.get('use_when', '')}\n"
+                f"Browse: {_render_next_action(category)}"
+            )
+        return "\n".join(lines)
     matches = payload.get("matches")
     if not isinstance(matches, list) or not matches:
-        return "No matching tools found."
-    lines: list[str] = []
+        return f"No matching tools found. Browse enabled categories: {_render_next_action(payload)}"
+    lines = []
+    if payload.get("strategy"):
+        lines.append(str(payload["strategy"]))
     for item in matches:
         if not isinstance(item, dict):
             continue
-        suffix = " [deferred via tool_invoke]" if item.get("deferred") else ""
-        lines.append(f"{item.get('name', 'unknown')}{suffix}: {item.get('description', '')}")
+        name = item.get("name", "unknown")
+        route = "deferred via tool_invoke" if item.get("deferred") else "direct"
+        lines.append(f"\n{name} ({route}): {item.get('description', '')}")
+        schema = item.get("input_schema")
+        if isinstance(schema, dict):
+            # Parameter schemas are essential model input, not incidental
+            # structured metadata: some hosts forward only text content.
+            lines.append("input_schema: " + json.dumps(schema, ensure_ascii=False, separators=(",", ":")))
+            if item.get("deferred"):
+                lines.append(f"Call tool_invoke with name={json.dumps(name)} and arguments matching input_schema.")
+            else:
+                lines.append(f"Call {name} directly with arguments matching input_schema.")
+        else:
+            action = item.get("schema_action")
+            if isinstance(action, dict):
+                lines.append("Parameters: " + _render_next_action({"next_action": action}))
+    if payload.get("truncated"):
+        lines.append(f"More tools: {_render_next_action(payload)}")
     return "\n".join(lines)
 
 

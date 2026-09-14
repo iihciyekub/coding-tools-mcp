@@ -129,7 +129,7 @@ instructions:
     "io.modelcontextprotocol/serverInfo": {
       "name": "coding-tools-mcp",
       "title": "Coding Tools MCP",
-      "version": "0.3.9"
+      "version": "0.3.10"
     }
   }
 }
@@ -437,7 +437,11 @@ workflow section for 68 directly exposed tools. Adding
 catalog, exposes `tool_invoke`, and leaves them searchable through
 `tool_search`: 29 tools are direct and 40 are deferred, while all 69 registered
 runtime capabilities remain available. These selections are fixed at startup;
-the runtime does not emit dynamic tool-list changes.
+the runtime does not emit dynamic tool-list changes. The desktop launcher
+selects deferred workflow exposure by default; the CLI defaults are unchanged.
+Tool descriptions carry a category and a concise selection hint. Both
+`initialize` and `server/discover` include progressive discovery guidance
+alongside the existing project instructions.
 
 Each definition below lists the live input property names and annotations. The
 authoritative JSON Schemas are returned by `tools/list` and checked for drift in
@@ -563,16 +567,37 @@ cap is known to be exceeded. `context_lines=0` does not reread matching files.
 
 ### tool_search
 
-Inputs: `"query"`, `"limit"`, `"include_schema"`.
+Inputs: `"query"`, `"category"`, `"limit"`, `"offset"`, `"include_schema"`.
 
 Annotations: `{"title":"Search tools","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
-Ranks all tools available to the current Runtime. Results include tool name,
-title, description, annotations, score, and whether the match is deferred;
-`include_schema=true` returns direct-tool schemas. Deferred matches always
-include their schema plus `invoke_via: "tool_invoke"`, so a host can call the
-gateway without a dynamic `tools/list` refresh. The default result limit is
-eight.
+All inputs are optional. With no query or category, returns a compact directory
+of enabled categories, each with its selection guidance, direct/deferred counts,
+and a `next_action` for browsing. This directory contains no tool schemas.
+With a category and no query, returns bounded tool summaries in registry order;
+`include_schema=true` adds their schemas. Empty categories are absent from the
+directory, and a selected category with no enabled tools returns no matches.
+
+A nonempty query ranks only tools available to the current Runtime, optionally
+filtered by category. Exact normalized tool names return only the named tool;
+other queries use English/Chinese intent aliases, names, descriptions, and
+category keywords. Recognized intent phrases exclude weak keyword-only matches
+so unrelated schemas do not fill the result limit. This is local lexical search,
+not a semantic model. A query
+containing only punctuation is invalid. Results include tool name, title,
+description, category, use_when, annotations, score, and whether the match is
+deferred. `include_schema=true` returns direct-tool schemas. Deferred query
+matches always include their schema plus `invoke_via: "tool_invoke"`; direct
+matches use their own name as `invoke_via`. Summaries without a schema provide
+a `schema_action` that retrieves that tool's parameters.
+
+Both text content and structured results include any returned parameter schemas
+and invocation guidance. The default result limit is eight (maximum twenty);
+`offset` defaults to zero and paginates category or search results. `next_action`
+preserves the query/filter/schema options when more results remain. A miss
+returns a directory action. Directory responses contain all nonempty categories
+and do not paginate. Discovery never changes `tools/list` or enables a tool.
+See [Progressive tool discovery](tool-discovery.md) for calling examples.
 
 ### tool_invoke
 
@@ -586,7 +611,9 @@ Exposed only when both `--enable-workflow-tools` and
 The nested tool receives its normal schema validation, permission checks, hook
 events, telemetry, and structured result. `tool_invoke` therefore acts as a
 static MCP-compatible deferred dispatch gateway rather than changing the live
-tool catalog.
+tool catalog. Nested errors, status, diagnostics, and permission requirements
+are also exposed at the gateway result's top level, preserving actionable error
+text for clients that do not forward structured results.
 
 ### apply_patch
 

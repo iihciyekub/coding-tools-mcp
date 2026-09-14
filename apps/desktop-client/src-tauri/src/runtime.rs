@@ -367,6 +367,7 @@ fn spawn_runtime(
             "--shell-env-inherit",
             "all",
             "--enable-workflow-tools",
+            "--defer-workflow-tools",
         ])
         .arg("--state-root")
         .arg(workflow_state_root);

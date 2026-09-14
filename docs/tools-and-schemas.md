@@ -4,6 +4,10 @@ The normative behavior is [runtime-contract-v0.3.md](runtime-contract-v0.3.md).
 Live JSON Schemas come from `tools/list`; CI compares their names, input
 properties, annotations, and error codes with the contract.
 
+For the category directory, progressive parameter loading, and tool selection
+strategy, see [Progressive tool discovery](tool-discovery.md). Desktop-launched
+runtimes now select deferred workflow exposure; the CLI defaults are unchanged.
+
 ## Fixed inventory
 
 The implementation declares exactly 69 tools. With the default `view_image`
@@ -21,7 +25,7 @@ capability enabled, the default catalog exposes 28 tools:
 - `list_files`: iterate files with glob, ignore, hidden-file, sort, and cap
   controls.
 - `search_text`: literal or regex search; ripgrep stops after the result cap.
-- `tool_search`: rank all tools available to the current runtime; deferred matches include their invocation metadata and schema.
+- `tool_search`: browse enabled categories and tool summaries, or search English/Chinese intent and exact names; deferred search matches include invocation metadata and schemas in text and structured results.
 - `apply_patch`: stage and atomically commit add/update/delete/move envelopes.
 - `exec_command`: run a bounded command and optionally deduplicate retries with `operation_id`.
 - `get_command`: read one command's status by `command_id` or `operation_id` without consuming output.
@@ -91,10 +95,11 @@ selection is fixed for that runtime; it does not change during a connection:
 
 `view_image` may be disabled when an installation cannot accept binary image
 content. The workflow toolset is opt-in. With normal workflow exposure the
-direct catalog contains 68 tools. Adding `--defer-workflow-tools` keeps those 40
+direct catalog contains 68 tools. Adding `--defer-workflow-tools` (selected by
+the desktop launcher) keeps those 40
 workflow capabilities available to `tool_search` but removes them from the
 direct `tools/list`; `tool_invoke` is exposed instead, producing a 29-tool
-direct catalog and 40 deferred tools. A deferred search result always includes
+direct catalog and 40 deferred tools. A deferred intent-search result always includes
 its input schema and `invoke_via: "tool_invoke"`. This is a static gateway
 selected at startup, not a dynamic tool-list mutation, so `listChanged` remains
 `false`.

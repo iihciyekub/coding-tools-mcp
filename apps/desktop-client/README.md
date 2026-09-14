@@ -19,8 +19,11 @@ API.
 - English and Simplified Chinese UI, including the native menu-bar menu with a persisted language selector
 - Native process-group cleanup when the app exits
 - Project context, checks/evidence, tasks, checkpoints, LSP, structured Git,
-  reviews, approvals, managed-worktree registration, and extended browser
-  actions are enabled for desktop-launched runtimes
+  reviews, approvals, and managed-worktree registration are enabled for
+  desktop-launched runtimes. Workflow tools use progressive discovery by default:
+  browse `tool_search({})`, retrieve a selected tool's parameters, then call
+  `tool_invoke`. Everyday tools stay directly available. See the
+  [tool discovery guide](../../docs/tool-discovery.md).
 - Native workspace menus surface pending approval decisions only when user action is
   required; routine task/check/checkpoint/review activity stays out of the tray menu.
   Runtime logs remain directly accessible without requiring a separate webview window.
@@ -100,7 +103,7 @@ after preparation. Old versioned environments are retained for rollback/reuse;
 they are not included in app updates.
 
 For Cloudflare Quick Tunnel profiles, a missing `cloudflared` is handled the same
-way on macOS: Desktop 0.3.21 downloads the pinned, SHA-256-verified release into
+way on macOS: Desktop 0.3.22 downloads the pinned, SHA-256-verified release into
 the app-owned tools directory. The native menu-bar **Resources** menu now focuses on
 the coding runtime itself: MCP Runtime/core version, uv, and cloudflared readiness,
 plus prepare/repair actions. Homebrew, `/usr/local`, and system Python are not

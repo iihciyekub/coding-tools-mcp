@@ -6,6 +6,7 @@ The documentation keeps stable file paths for existing links, while this index p
 
 - [Quickstart](quickstart.md)
 - [MCP client configuration](mcp-client-config.md)
+- [Progressive tool discovery and selection](tool-discovery.md)
 - [Remote MCP](remote-mcp.md)
 - [Docker](docker.md)
 - [Troubleshooting](troubleshooting.md)

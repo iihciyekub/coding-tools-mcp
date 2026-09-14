@@ -154,13 +154,9 @@ with rollback. Workflow Git operations, checkpoint restore, and workflow-state
 updates have their own explicit guarded mutation semantics rather than acting as
 alternate general-purpose source editors.
 
-| Group | Tools |
-| --- | --- |
-| Files & search | `read_file` · `read_files` · `list_dir` · `list_files` · `search_text` · `tool_search` · `apply_patch` · `view_image` |
-| Execution | `exec_command` · `get_command` · `list_commands` · `write_stdin` · `read_output` · `kill_command` · `request_permissions` |
-| Git | `git_status` · `git_diff` · `git_log` · `git_show` · `git_blame` |
-| Runtime | `server_info` · `check_exec_environment` · `runtime_doctor` · `hooks_status` · `shell_snapshot` |
-| Code intelligence | `code_symbols` · `code_definition` · `code_references` |
+The live category directory comes from `tool_search({})`; it groups enabled
+capabilities by purpose and gives selection hints. The complete inventory is
+maintained in [Tools and schemas](docs/tools-and-schemas.md).
 
 `--enable-hooks` activates workspace-confined `before_tool`, `after_tool`, and
 `tool_error` hooks from `.agents/hooks.json`. `shell_snapshot` freezes the
@@ -171,6 +167,10 @@ sandbox state, and network policy.
 With `--enable-workflow-tools --defer-workflow-tools`, the 40 workflow tools are
 found by `tool_search` and called through `tool_invoke` instead of being placed
 in the initial `tools/list` payload.
+The desktop launcher selects this mode by default. Start with `tool_search({})`
+for the category directory, browse summaries, then retrieve only the parameters
+you need. English/Chinese intent search can skip browsing. See
+[Progressive tool discovery and selection](docs/tool-discovery.md).
 
 Network command policy can be selected independently with
 `--network-policy deny|allowlist|unrestricted`. In allowlist mode, repeat

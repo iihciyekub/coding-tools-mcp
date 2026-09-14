@@ -96,6 +96,7 @@ from .protocol import (
 from .project_context import ProjectContext, load_project_context
 from .telemetry import SessionTelemetry
 from .textutils import DEFAULT_MAX_LINES, TextTruncation, truncate_text_head
+from .tool_catalog import CATEGORIES, TOOL_GUIDES, TOOL_USAGE_INSTRUCTIONS, discovery_score, normalize_query
 from .tool_results import make_tool_result
 from .transport_stdio import serve_stdio
 from .workflow_store import MAX_CHECKPOINT_BYTES, TASK_STATES, WorkflowStore, restore_token
@@ -767,15 +768,24 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "tool_search": ToolSpec(
         title="Search tools",
         description=(
-            "Search the tools available to this runtime and return the best matching tool metadata. "
-            "When deferred tools are enabled, deferred matches include the schema and can be called through tool_invoke."
+            "Discover enabled tools progressively. Call {} for a category directory, "
+            "{\"category\":\"code\"} for tool summaries, or "
+            "{\"query\":\"code_definition\",\"include_schema\":true} for one tool's parameters. "
+            "English/Chinese intent queries also work; use limit=3 for a focused search. "
+            "Deferred search matches include input schemas and tool_invoke routing. "
+            "Reuse known schemas; directly listed tools need no discovery call."
         ),
         read_only=True,
         idempotent=True,
     ),
     "tool_invoke": ToolSpec(
         title="Invoke deferred tool",
-        description="Invoke one deferred workflow tool discovered through tool_search.",
+        description=(
+            "Call a deferred tool using its discovered input_schema: pass its exact name and an arguments object "
+            "matching that schema. For example, after discovering workspace_overview: "
+            "{\"name\":\"workspace_overview\",\"arguments\":{}}. "
+            "Call directly listed tools by their own names. Normal validation and permissions still apply."
+        ),
         destructive=True,
         open_world=True,
         gated_by="enable_deferred_tools",
@@ -2112,8 +2122,17 @@ class Runtime:
             "protocolVersion": protocol_version,
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": self.server_identity(),
-            "instructions": self.project_context.server_instructions(),
+            "instructions": self.tool_usage_instructions(),
         }
+
+    def tool_usage_instructions(self) -> str:
+        guidance = TOOL_USAGE_INSTRUCTIONS
+        if self.defer_workflow_tools:
+            guidance += (
+                " Deferred tools stay outside tools/list: discover their input_schema, then call "
+                "tool_invoke with the exact name and matching arguments. No tools/list refresh is needed."
+            )
+        return f"{guidance}\n\n{self.project_context.server_instructions()}"
 
     def discover_payload(self) -> dict[str, Any]:
         """Tell a client that never handshakes what this server can do.
@@ -2132,7 +2151,7 @@ class Runtime:
         return {
             "supportedVersions": list(MODERN_PROTOCOL_VERSIONS),
             "capabilities": capabilities,
-            "instructions": self.project_context.server_instructions(),
+            "instructions": self.tool_usage_instructions(),
         }
 
     def protocol_tasks_enabled(self) -> bool:
@@ -2532,6 +2551,7 @@ class Runtime:
                 "direct_count": len(self._exposed_tool_names),
                 "deferred_count": len(self._deferred_tool_names),
                 "available_count": len(self._available_tool_names),
+                "directory": {"tool": "tool_search", "arguments": {}},
             },
             "shell_snapshot": {
                 "active": self._shell_snapshot_env is not None,
@@ -3024,73 +3044,115 @@ class Runtime:
 
     def tool_search(self, args: dict[str, Any]) -> dict[str, Any]:
         query = str(args.get("query", "")).strip()
-        if not query:
-            raise ToolFailure("INVALID_ARGUMENT", "query must not be empty.", category="validation")
         limit = int(args.get("limit", 8))
+        offset = int(args.get("offset", 0))
+        category_id = str(args.get("category", ""))
         include_schema = bool(args.get("include_schema", False))
-        query_normalized = " ".join(re.findall(r"[\w]+", query.lower().replace("_", " ")))
-        query_tokens = set(query_normalized.split())
-        ranked: list[tuple[float, str]] = []
-        for name in self._available_tool_names:
-            spec = TOOL_REGISTRY[name]
-            name_text = name.lower().replace("_", " ")
-            title_text = spec.title.lower()
-            description_text = spec.description.lower()
-            score = 0.0
-            if query_normalized in {name.lower(), name_text, title_text}:
-                score += 100.0
-            if query_normalized and query_normalized in name_text:
-                score += 45.0
-            if query_normalized and query_normalized in title_text:
-                score += 30.0
-            if query_normalized and query_normalized in description_text:
-                score += 12.0
-            name_tokens = set(name_text.split())
-            title_tokens = set(re.findall(r"[\w]+", title_text))
-            description_tokens = set(re.findall(r"[\w]+", description_text))
-            for token in query_tokens:
-                if token in name_tokens:
-                    score += 16.0
-                elif token in title_tokens:
-                    score += 9.0
-                elif token in description_tokens:
-                    score += 3.0
-            similarity = max(
-                difflib.SequenceMatcher(None, query_normalized, name_text).ratio(),
-                difflib.SequenceMatcher(None, query_normalized, title_text).ratio(),
-            )
-            if similarity >= 0.45:
-                score += similarity * 10.0
-            if score > 0:
-                ranked.append((score, name))
-        ranked.sort(key=lambda item: (-item[0], item[1]))
-        selected = ranked[:limit]
-        matches: list[dict[str, Any]] = []
-        for score, name in selected:
-            definition = tool_definition(name, fake_readonly=self.fake_readonly_annotations)
-            item = {
-                "name": name,
-                "title": definition["title"],
-                "description": definition["description"],
-                "annotations": definition["annotations"],
-                "score": round(score, 3),
-                "deferred": name in self._deferred_tool_name_set,
-            }
-            if name in self._deferred_tool_name_set:
-                item["invoke_via"] = "tool_invoke"
-            if include_schema or name in self._deferred_tool_name_set:
-                item["input_schema"] = definition["inputSchema"]
-            matches.append(item)
-        return {
-            "query": query,
-            "matches": matches,
-            "count": len(matches),
+        counts = {
             "searched_tool_count": len(self._available_tool_names),
             "direct_tool_count": len(self._exposed_tool_names),
             "deferred_tool_count": len(self._deferred_tool_names),
-            "limit": limit,
-            "truncated": len(ranked) > len(selected),
         }
+        if not query and not category_id:
+            categories = []
+            for key, category in CATEGORIES.items():
+                members = [name for name in self._available_tool_names if TOOL_GUIDES[name].category == key]
+                if not members:
+                    continue
+                deferred = sum(name in self._deferred_tool_name_set for name in members)
+                categories.append({
+                    "id": key,
+                    "title": category.title,
+                    "use_when": category.use_when,
+                    "tool_count": len(members),
+                    "direct_count": len(members) - deferred,
+                    "deferred_count": deferred,
+                    "next_action": {"tool": "tool_search", "arguments": {"category": key}},
+                })
+            return {
+                "mode": "directory",
+                "query": query,
+                "categories": categories,
+                "matches": [],
+                "count": len(categories),
+                "truncated": False,
+                "strategy": TOOL_USAGE_INSTRUCTIONS,
+                **counts,
+            }
+
+        query_normalized = normalize_query(query)
+        if query and not query_normalized:
+            raise ToolFailure("INVALID_ARGUMENT", "query must contain a tool name or search words.", category="validation")
+        candidates = [
+            name for name in self._available_tool_names
+            if not category_id or TOOL_GUIDES[name].category == category_id
+        ]
+        exact = [name for name in candidates if normalize_query(name) == query_normalized]
+        ranked: list[tuple[float, str]] = []
+        for name in exact or candidates:
+            spec = TOOL_REGISTRY[name]
+            score = (
+                discovery_score(query_normalized, name, spec.title, spec.description)
+                if query_normalized else 0.0
+            )
+            if not query_normalized or score > 0:
+                ranked.append((score, name))
+        if query_normalized:
+            ranked.sort(key=lambda item: (-item[0], item[1]))
+            # A recognized intent should not load unrelated schemas merely to
+            # fill the result limit. Keep broad matches for exploratory queries.
+            if ranked and ranked[0][0] >= 300:
+                ranked = [item for item in ranked if item[0] >= 300]
+        selected = ranked[offset:offset + limit]
+        matches: list[dict[str, Any]] = []
+        for score, name in selected:
+            definition = tool_definition(name, fake_readonly=self.fake_readonly_annotations)
+            guide = TOOL_GUIDES[name]
+            deferred = name in self._deferred_tool_name_set
+            item = {
+                "name": name,
+                "title": definition["title"],
+                "description": definition["description"] if query or include_schema else guide.use_when,
+                "category": guide.category,
+                "use_when": guide.use_when,
+                "annotations": definition["annotations"],
+                "score": round(score, 3),
+                "deferred": deferred,
+                "invoke_via": "tool_invoke" if deferred else name,
+            }
+            # Category browsing is deliberately schema-free by default. Keep
+            # deferred intent-search schemas for existing discovery clients.
+            if include_schema or (query_normalized and deferred):
+                item["input_schema"] = definition["inputSchema"]
+            else:
+                item["schema_action"] = {
+                    "tool": "tool_search",
+                    "arguments": {"query": name, "include_schema": True},
+                }
+            matches.append(item)
+        truncated = offset + len(selected) < len(ranked)
+        result: dict[str, Any] = {
+            "mode": "search" if query else "category",
+            "query": query,
+            "category": category_id or None,
+            "matches": matches,
+            "count": len(matches),
+            "total_matches": len(ranked),
+            **counts,
+            "limit": limit,
+            "offset": offset,
+            "truncated": truncated,
+        }
+        if category_id:
+            result["strategy"] = CATEGORIES[category_id].use_when
+        if truncated:
+            result["next_action"] = {
+                "tool": "tool_search",
+                "arguments": {**args, "offset": offset + len(selected)},
+            }
+        elif not matches:
+            result["next_action"] = {"tool": "tool_search", "arguments": {}}
+        return result
 
     def tool_invoke(self, args: dict[str, Any]) -> dict[str, Any]:
         name = str(args.get("name", "")).strip()
@@ -3109,12 +3171,18 @@ class Runtime:
             cast(dict[str, Any], raw_arguments),
             allow_deferred=True,
         )
-        return {
+        result = {
             "ok": payload.get("ok") is not False,
             "tool": name,
             "deferred": True,
             "result": payload,
         }
+        # Text-only clients must receive the nested error and recovery guidance,
+        # not a generic gateway failure. Preserve the nested result as well.
+        for key in ("error", "status", "diagnostics", "permission_request"):
+            if key in payload:
+                result[key] = payload[key]
+        return result
 
     def list_dir(self, args: dict[str, Any]) -> dict[str, Any]:
         resolved = self.resolve_existing(str(args.get("path", ".")))
@@ -7349,7 +7417,10 @@ def tool_definition(name: str, *, fake_readonly: bool = False) -> dict[str, Any]
     return {
         "name": name,
         "title": annotations["title"],
-        "description": TOOL_REGISTRY[name].description,
+        "description": (
+            f"[{TOOL_GUIDES[name].category}] {TOOL_REGISTRY[name].description} "
+            f"Selection: {TOOL_GUIDES[name].use_when}"
+        ),
         "inputSchema": schemas[name],
         "outputSchema": tool_output_schema(),
         "annotations": annotations,
@@ -7482,11 +7553,12 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         ),
         "tool_search": object_schema(
             {
-                "query": {**string, "minLength": 1},
+                "query": {**string, "default": "", "description": "English/Chinese intent or exact tool name. Omit for directory/category browsing."},
+                "category": {**string, "enum": list(CATEGORIES), "description": "Optional category ID from the directory; also filters intent searches."},
                 "limit": {**integer, "minimum": 1, "maximum": 20, "default": 8},
+                "offset": {**integer, "minimum": 0, "default": 0},
                 "include_schema": {**boolean, "default": False},
             },
-            ["query"],
         ),
         "tool_invoke": object_schema(
             {

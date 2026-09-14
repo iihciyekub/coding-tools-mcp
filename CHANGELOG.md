@@ -1,6 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.3.10 - 2026-09-14
+
+- Desktop 0.3.22 ships the 0.3.10 runtime and makes progressive workflow-tool
+  discovery the default for desktop-launched workspaces.
+- Desktop-launched runtimes now defer the 40 workflow tools behind the existing
+  discovery gateway, leaving 29 directly exposed tools with image support enabled.
+- Added a categorized tool directory, schema-free category browsing, pagination,
+  English/Chinese intent aliases, exact-name discovery, and per-tool selection
+  guidance. Search results now render parameter schemas and invocation guidance
+  in text as well as structured content for clients that only forward text.
+- Gateway errors now preserve nested error details and recovery diagnostics at
+  the top level. Published tool names and normal dispatch permissions are unchanged.
 
 ## 0.3.9 - 2026-09-14
 
