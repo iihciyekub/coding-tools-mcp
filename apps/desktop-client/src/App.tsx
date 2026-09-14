@@ -168,7 +168,14 @@ function App() {
 }
 
 function Header() { return <header className="panel-header"><span className="brand-mark"><CloudIcon /></span><strong>Coding Tools MCP</strong><small>{APP_VERSION}</small></header>; }
-function ValueButton({ label, copyLabel, value, disabled, copied, onClick, after }: { label: string; copyLabel: string; value: string; disabled: boolean; copied: boolean; onClick: () => void; after?: React.ReactNode }) { return <div className="value-button-wrap"><button className="value-button" type="button" disabled={disabled} onClick={onClick}><span><small>{label}</small><code>{value}</code></span><span className={copied ? "copied" : ""}>{copied ? <CheckIcon /> : <><CopyIcon /><small>{disabled ? "" : copyLabel}</small></>}</span></button>{after}</div>; }
+function middleEllipsis(value: string, limit = 30) {
+  if (value.length <= limit) return value;
+  const visible = limit - 1;
+  const start = Math.ceil(visible / 2);
+  return `${value.slice(0, start)}…${value.slice(-Math.floor(visible / 2))}`;
+}
+
+function ValueButton({ label, copyLabel, value, disabled, copied, onClick, after }: { label: string; copyLabel: string; value: string; disabled: boolean; copied: boolean; onClick: () => void; after?: React.ReactNode }) { return <div className={`value-button-wrap ${after ? "has-secondary-action" : ""}`}><button className="value-button" type="button" disabled={disabled} onClick={onClick} title={disabled ? undefined : value}><span className="value-content"><small>{label}</small><code>{middleEllipsis(value)}</code></span><span className={`copy-action ${copied ? "copied" : ""}`} aria-hidden="true">{copied ? <CheckIcon /> : <><CopyIcon /><small>{disabled ? "" : copyLabel}</small></>}</span></button>{after}</div>; }
 function MenuRow({ icon, label, detail = "", disabled = false, onClick }: { icon: React.ReactNode; label: string; detail?: string; disabled?: boolean; onClick: () => void }) { return <button className="menu-row" type="button" disabled={disabled} onClick={onClick}><span>{icon}<strong>{label}</strong></span><span>{detail && <small>{detail}</small>}<ChevronIcon /></span></button>; }
 function DependencyRow({ name, detail, ready, busy, action, t }: { name: string; detail: string; ready: boolean; busy: boolean; action: () => void; t: (text: string) => string }) { return <div className="dependency-row"><span><strong>{name}</strong><small>{detail}</small></span><span className={ready ? "ready" : "needed"}>{ready ? t("Ready") : t("Missing")}</span><button type="button" disabled={busy} onClick={action}>{busy ? <SpinnerIcon /> : ready ? t("Repair") : t("Install")}</button></div>; }
 function LogSection({ title, text }: { title: string; text: string }) { return <section className="log-section"><strong>{title}</strong><pre>{text || "—"}</pre></section>; }
