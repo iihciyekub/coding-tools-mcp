@@ -19,8 +19,10 @@ use std::time::Duration;
 use storage::ProfileStore;
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Manager};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{
+    AppHandle, Manager, PhysicalPosition, Rect, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use workflow::{
@@ -240,6 +242,28 @@ fn profile_logs(
         .map_err(|_| "Profile store is unavailable.")?
         .log_dir(&profile_id)?;
     read_logs(&directory)
+}
+
+#[tauri::command]
+fn open_logs(app: AppHandle, profile_id: String) -> Result<(), String> {
+    open_logs_folder(&app, &profile_id)
+}
+
+#[tauri::command]
+fn set_language(
+    app: AppHandle,
+    language: String,
+    state: tauri::State<'_, DesktopState>,
+) -> Result<(), String> {
+    if !matches!(language.as_str(), "en" | "zh-CN") {
+        return Err("Unknown desktop language.".into());
+    }
+    state
+        .store
+        .lock()
+        .map_err(|_| "Profile store is unavailable.".to_string())?
+        .set_language(&language)?;
+    refresh_tray_menu(&app)
 }
 
 #[tauri::command]
@@ -1038,11 +1062,19 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
 }
 
 fn refresh_tray_menu(app: &AppHandle) -> Result<(), String> {
-    let menu = build_tray_menu(app)?;
-    let tray = app
-        .tray_by_id(TRAY_ID)
-        .ok_or_else(|| "Tray icon is unavailable.".to_string())?;
-    tray.set_menu(Some(menu)).map_err(menu_error)
+    #[cfg(target_os = "linux")]
+    {
+        let menu = build_tray_menu(app)?;
+        let tray = app
+            .tray_by_id(TRAY_ID)
+            .ok_or_else(|| "Tray icon is unavailable.".to_string())?;
+        return tray.set_menu(Some(menu)).map_err(menu_error);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = app;
+        Ok(())
+    }
 }
 
 fn refresh_tray_menu_on_main(app: AppHandle) {
@@ -1516,6 +1548,55 @@ fn handle_tray_menu_event(app: &AppHandle, id: &str) {
     }
 }
 
+fn toggle_panel(app: &AppHandle, tray_rect: Rect) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "Desktop panel is unavailable.".to_string())?;
+    if window.is_visible().map_err(menu_error)? {
+        window.hide().map_err(menu_error)?;
+        return Ok(());
+    }
+
+    let scale_factor = window.scale_factor().map_err(menu_error)?;
+    let tray_position = tray_rect.position.to_physical::<f64>(scale_factor);
+    let tray_size = tray_rect.size.to_physical::<f64>(scale_factor);
+    let window_size = window.outer_size().map_err(menu_error)?;
+    let tray_center_x = tray_position.x + tray_size.width / 2.0;
+    let tray_center_y = tray_position.y + tray_size.height / 2.0;
+    let monitor = window
+        .available_monitors()
+        .map_err(menu_error)?
+        .into_iter()
+        .find(|monitor| {
+            let position = monitor.position();
+            let size = monitor.size();
+            tray_center_x >= f64::from(position.x)
+                && tray_center_x < f64::from(position.x) + f64::from(size.width)
+                && tray_center_y >= f64::from(position.y)
+                && tray_center_y < f64::from(position.y) + f64::from(size.height)
+        });
+
+    let mut x = tray_center_x - f64::from(window_size.width) / 2.0;
+    let mut y = tray_position.y + tray_size.height + 6.0;
+    if let Some(monitor) = monitor {
+        let position = monitor.position();
+        let size = monitor.size();
+        let min_x = f64::from(position.x) + 8.0;
+        let max_x =
+            f64::from(position.x) + f64::from(size.width) - f64::from(window_size.width) - 8.0;
+        x = x.clamp(min_x, max_x.max(min_x));
+        let monitor_mid_y = f64::from(position.y) + f64::from(size.height) / 2.0;
+        if tray_center_y > monitor_mid_y {
+            y = tray_position.y - f64::from(window_size.height) - 6.0;
+        }
+    }
+    window
+        .set_position(PhysicalPosition::new(x.round() as i32, y.round() as i32))
+        .map_err(menu_error)?;
+    window.show().map_err(menu_error)?;
+    window.set_focus().map_err(menu_error)
+}
+
 pub fn run() {
     let store = ProfileStore::open_default()
         .unwrap_or_else(|error| panic!("Could not initialize desktop storage: {error}"));
@@ -1544,13 +1625,53 @@ pub fn run() {
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
                 app.handle().set_dock_visibility(false)?;
             }
-            let menu = build_tray_menu(app.handle()).map_err(std::io::Error::other)?;
-            TrayIconBuilder::with_id(TRAY_ID)
+            let panel =
+                WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+                    .title("Coding Tools MCP")
+                    .inner_size(360.0, 420.0)
+                    .minimizable(false)
+                    .maximizable(false)
+                    .closable(false)
+                    .resizable(false)
+                    .decorations(false)
+                    .transparent(true)
+                    .shadow(false)
+                    .always_on_top(true)
+                    .visible_on_all_workspaces(true)
+                    .skip_taskbar(true)
+                    .accept_first_mouse(true)
+                    .visible(false)
+                    .build()?;
+            let focus_panel = panel.clone();
+            panel.on_window_event(move |event| {
+                if matches!(event, WindowEvent::Focused(false)) {
+                    let _ = focus_panel.hide();
+                }
+            });
+            let fallback_menu = build_tray_menu(app.handle()).map_err(std::io::Error::other)?;
+            #[cfg(not(target_os = "linux"))]
+            let _ = fallback_menu;
+            let tray_builder = TrayIconBuilder::with_id(TRAY_ID)
                 .icon(tray_template_icon())
                 .icon_as_template(cfg!(target_os = "macos"))
-                .tooltip(format!("Coding Tools MCP {}", env!("CARGO_PKG_VERSION")))
-                .menu(&menu)
-                .show_menu_on_left_click(true)
+                .tooltip(format!("Coding Tools MCP {}", env!("CARGO_PKG_VERSION")));
+            #[cfg(target_os = "linux")]
+            let tray_builder = tray_builder.menu(&fallback_menu);
+            tray_builder
+                .show_menu_on_left_click(false)
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        rect,
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        if let Err(error) = toggle_panel(tray.app_handle(), rect) {
+                            show_error(tray.app_handle(), error);
+                        }
+                    }
+                })
                 .on_menu_event(|app, event| {
                     handle_tray_menu_event(app, event.id().as_ref());
                 })
@@ -1567,6 +1688,8 @@ pub fn run() {
             stop_profile,
             profile_status,
             profile_logs,
+            open_logs,
+            set_language,
             open_resource,
             install_resource,
             repair_dependencies,

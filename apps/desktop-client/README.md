@@ -16,7 +16,7 @@ API.
   readable until the user explicitly chooses one of the two desktop modes.
 - Live runtime/tunnel status with copyable Server URL and OAuth authorization passcode
 - Secrets stored in the operating-system keychain
-- English and Simplified Chinese UI, including the native menu-bar menu with a persisted language selector
+- English and Simplified Chinese UI, including the fixed menu-bar panel with a persisted language selector
 - Native process-group cleanup when the app exits
 - Project context, checks/evidence, tasks, checkpoints, LSP, structured Git,
   reviews, approvals, and managed-worktree registration are enabled for
@@ -24,9 +24,9 @@ API.
   browse `tool_search({})`, retrieve a selected tool's parameters, then call
   `tool_invoke`. Everyday tools stay directly available. See the
   [tool discovery guide](../../docs/tool-discovery.md).
-- Native workspace menus surface pending approval decisions only when user action is
-  required; routine task/check/checkpoint/review activity stays out of the tray menu.
-  Runtime logs remain directly accessible without requiring a separate webview window.
+- The compact panel surfaces pending approval decisions only when user action is
+  required and keeps routine task/check activity behind progressive navigation.
+  Runtime and installation logs remain directly accessible in the same panel.
 
 The first launch imports the previous PySide client's `profiles.json`. Legacy
 `secrets.json` values are moved into the system keychain and the plaintext file
@@ -103,8 +103,8 @@ after preparation. Old versioned environments are retained for rollback/reuse;
 they are not included in app updates.
 
 For Cloudflare Quick Tunnel profiles, a missing `cloudflared` is handled the same
-way on macOS: Desktop 0.3.22 downloads the pinned, SHA-256-verified release into
-the app-owned tools directory. The native menu-bar **Resources** menu now focuses on
+way on macOS: Desktop 0.3.23 downloads the pinned, SHA-256-verified release into
+the app-owned tools directory. The menu-bar **Environment & setup** page focuses on
 the coding runtime itself: MCP Runtime/core version, uv, and cloudflared readiness,
 plus prepare/repair actions. Homebrew, `/usr/local`, and system Python are not
 modified. Other desktop platforms currently use an existing platform-installed

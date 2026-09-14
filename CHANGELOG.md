@@ -1,5 +1,12 @@
 # Changelog
 
+## Desktop 0.3.23
+
+- Replace the primary native tray menu with a compact, fixed menu-bar panel for
+  workspace control, copyable connection details, environment setup, logs, access,
+  language, and advanced workflow actions.
+- Anchor the panel below the tray icon and hide it when focus moves away.
+
 ## 0.3.10 - 2026-09-14
 
 - Desktop 0.3.22 ships the 0.3.10 runtime and makes progressive workflow-tool
