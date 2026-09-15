@@ -188,13 +188,19 @@ async fn start_profile(
     let store = Arc::clone(&state.store);
     let runtime = Arc::clone(&state.runtime);
     tauri::async_runtime::spawn_blocking(move || {
-        let (profile, log_dir) = {
+        let (profile, log_dir, workspace_sequence) = {
             let mut store = store.lock().map_err(|_| "Profile store is unavailable.")?;
+            let workspace_sequence = store
+                .profiles()
+                .iter()
+                .position(|profile| profile.id == profile_id)
+                .map(|index| index + 1)
+                .ok_or("Workspace profile was not found.")?;
             let profile = store.prepare_for_start(&profile_id)?;
             let log_dir = store.log_dir(&profile_id)?;
-            (profile, log_dir)
+            (profile, log_dir, workspace_sequence)
         };
-        start_workspace(&runtime, &profile, &log_dir)
+        start_workspace(&runtime, &profile, &log_dir, workspace_sequence)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1212,20 +1218,26 @@ fn start_workspace_from_menu(app: AppHandle, profile_id: String) {
     tauri::async_runtime::spawn_blocking(move || {
         let result = (|| {
             let state = app.state::<DesktopState>();
-            let (profile, log_dir) = {
+            let (profile, log_dir, workspace_sequence) = {
                 let mut store = state
                     .store
                     .lock()
                     .map_err(|_| "Profile store is unavailable.".to_string())?;
+                let workspace_sequence = store
+                    .profiles()
+                    .iter()
+                    .position(|profile| profile.id == profile_id)
+                    .map(|index| index + 1)
+                    .ok_or_else(|| "Workspace profile was not found.".to_string())?;
                 let profile = store
                     .get(&profile_id)
                     .ok_or_else(|| "Workspace profile was not found.".to_string())?;
                 let profile = store.update(quick_tunnel_profile(profile))?;
                 let profile = store.prepare_for_start(&profile.id)?;
                 let log_dir = store.log_dir(&profile.id)?;
-                (profile, log_dir)
+                (profile, log_dir, workspace_sequence)
             };
-            start_workspace(&state.runtime, &profile, &log_dir)?;
+            start_workspace(&state.runtime, &profile, &log_dir, workspace_sequence)?;
             Ok::<(), String>(())
         })();
         if let Err(error) = result {

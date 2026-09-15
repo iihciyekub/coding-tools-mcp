@@ -39,6 +39,7 @@ export interface WorkspaceProfile {
 export interface RuntimeStatus {
   state: RuntimeState;
   pid: number | null;
+  server_name: string;
   local_message: string;
   public_message: string;
   public_url: string;

@@ -254,6 +254,7 @@ impl AuthConfig {
 pub struct RuntimeStatus {
     pub state: String,
     pub pid: Option<u32>,
+    pub server_name: String,
     pub local_message: String,
     pub public_message: String,
     pub public_url: String,
@@ -269,6 +270,7 @@ impl RuntimeStatus {
         Self {
             state: "stopped".into(),
             pid: None,
+            server_name: String::new(),
             local_message: "Not running".into(),
             public_message: "Unknown".into(),
             public_url: String::new(),

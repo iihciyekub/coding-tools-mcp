@@ -34,6 +34,8 @@ const zh: Record<string, string> = {
   "Server URL copied automatically": "启动成功，Server URL 已自动复制",
   "Copy Server URL": "复制 Server URL",
   "Server URL · changes after restart": "Server URL · 重启后会变化",
+  "MCP name": "MCP 名称",
+  "Start the workspace to create an MCP name": "启动工作区后生成 MCP 名称",
   "Authorization passcode": "授权口令",
   "Authorization passcode copied": "授权口令已复制",
   "Copy authorization passcode": "复制授权口令",

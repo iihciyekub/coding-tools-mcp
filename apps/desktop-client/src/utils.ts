@@ -31,6 +31,11 @@ export function publicEndpoint(profile: WorkspaceProfile, resolvedUrl = ""): str
   return base ? `${base.replace(/\/$/, "")}/mcp` : "";
 }
 
+export function workspaceHue(position: number): number {
+  const ordinal = Math.max(1, Math.trunc(position));
+  return (210 + (ordinal - 1) * 137) % 360;
+}
+
 export function frpSnippet(profile: WorkspaceProfile): string {
   const name = profile.name.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^[-_]+|[-_]+$/g, "") || "workspace";
   return [

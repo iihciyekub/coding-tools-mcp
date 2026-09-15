@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { WorkspaceProfile } from "./types";
-import { frpSnippet, normalizeDomain, publicEndpoint, recommendedPublicUrl } from "./utils";
+import { frpSnippet, normalizeDomain, publicEndpoint, recommendedPublicUrl, workspaceHue } from "./utils";
 
 const profile: WorkspaceProfile = {
   id: "a".repeat(32),
@@ -32,5 +32,11 @@ describe("desktop URL helpers", () => {
   it("normalizes a domain and recommends a workspace-specific public URL", () => {
     expect(normalizeDomain(" HTTPS://Example.COM/path ")).toBe("example.com");
     expect(recommendedPublicUrl("Tax Review", "example.com")).toBe("https://tax-review-mcp.example.com");
+  });
+
+  it("gives neighboring workspaces distinct background hues", () => {
+    const hues = Array.from({ length: 12 }, (_, index) => workspaceHue(index + 1));
+    expect(new Set(hues).size).toBe(hues.length);
+    expect(workspaceHue(1)).toBe(210);
   });
 });

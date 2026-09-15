@@ -2,6 +2,7 @@ mod environment;
 
 use crate::models::{LogBundle, RuntimeStatus, WorkspaceProfile, MCP_ENDPOINT_PATH};
 use crate::resource_installer;
+use chrono::Local;
 use regex::Regex;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -63,6 +64,15 @@ struct ManagedSession {
     runtime: ManagedChild,
     tunnel: Option<ManagedChild>,
     public_url: Arc<Mutex<String>>,
+    server_name: String,
+}
+
+fn new_server_name(workspace_sequence: usize) -> String {
+    format!(
+        "CTM-{}-{}",
+        Local::now().format("%Y%m%d%H%M%S"),
+        workspace_sequence.max(1)
+    )
 }
 
 pub struct RuntimeManager {
@@ -117,6 +127,7 @@ impl RuntimeManager {
         profile: &WorkspaceProfile,
         log_dir: &Path,
         resolved: (PathBuf, Vec<String>),
+        workspace_sequence: usize,
     ) -> Result<RuntimeStatus, String> {
         profile.validate()?;
         if self.sessions.contains_key(&profile.id) {
@@ -130,8 +141,14 @@ impl RuntimeManager {
             return Err(format!("Local port {} is already in use. Stop the existing process or choose another port.", profile.runtime.local_port));
         }
         fs::create_dir_all(log_dir).map_err(|error| error.to_string())?;
-        let mut runtime =
-            spawn_runtime(profile, log_dir, resolved, &self.data_dir.join("workflow"))?;
+        let server_name = new_server_name(workspace_sequence);
+        let mut runtime = spawn_runtime(
+            profile,
+            log_dir,
+            resolved,
+            &self.data_dir.join("workflow"),
+            &server_name,
+        )?;
         if let Err(error) = wait_for_port(profile.runtime.local_port, &mut runtime, START_TIMEOUT) {
             runtime.terminate();
             return Err(error);
@@ -162,6 +179,7 @@ impl RuntimeManager {
                 runtime,
                 tunnel,
                 public_url,
+                server_name,
             },
         );
         Ok(self.status(profile))
@@ -225,6 +243,7 @@ impl RuntimeManager {
         RuntimeStatus {
             state: state.into(),
             pid: Some(runtime_pid),
+            server_name: session.server_name.clone(),
             local_message: format!("Listening on 127.0.0.1:{}", profile.runtime.local_port),
             public_message,
             public_url,
@@ -256,6 +275,7 @@ pub fn start_workspace(
     manager: &Arc<Mutex<RuntimeManager>>,
     profile: &WorkspaceProfile,
     log_dir: &Path,
+    workspace_sequence: usize,
 ) -> Result<RuntimeStatus, String> {
     profile.validate()?;
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -295,7 +315,7 @@ pub fn start_workspace(
     let resolved = resolved?;
     state.runtime_ready_hint = true;
     tunnel_setup?;
-    state.start(profile, log_dir, resolved)
+    state.start(profile, log_dir, resolved, workspace_sequence)
 }
 
 pub fn prepare_runtime(
@@ -350,6 +370,7 @@ fn spawn_runtime(
     log_dir: &Path,
     resolved: (PathBuf, Vec<String>),
     workflow_state_root: &Path,
+    server_name: &str,
 ) -> Result<ManagedChild, String> {
     let (program, prefix) = resolved;
     let mut command = Command::new(program);
@@ -385,9 +406,11 @@ fn spawn_runtime(
         "CODING_TOOLS_MCP_OAUTH_MODE",
         "CODING_TOOLS_MCP_OAUTH_PASSWORD",
         "CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET",
+        "CODING_TOOLS_MCP_SERVER_NAME",
     ] {
         command.env_remove(name);
     }
+    command.env("CODING_TOOLS_MCP_SERVER_NAME", server_name);
     match profile.auth.r#type.as_str() {
         "oauth" => {
             command
@@ -632,6 +655,12 @@ fn configure_process_group(command: &mut Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_names_include_second_precision_and_workspace_sequence() {
+        let name = new_server_name(7);
+        assert!(Regex::new(r"^CTM-\d{14}-7$").unwrap().is_match(&name));
+    }
 
     #[test]
     fn stopping_preparation_cancels_its_start_intent() {

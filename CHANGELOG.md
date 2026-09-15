@@ -1,5 +1,16 @@
 # Changelog
 
+## Desktop 0.3.28
+
+- Each desktop-launched MCP service now receives a per-start name in the form
+  `CTM-YYYYMMDDHHMMSS-<workspace number>`. The name is exposed by the MCP
+  handshake and is shown above Server URL with a one-click copy action.
+- Workspace accents now derive from each workspace's position using evenly
+  separated hues, keeping adjacent workspaces visually distinct instead of
+  allowing path-hash collisions to make them share the same red background.
+- This signed and notarized release supersedes the withdrawn Desktop 0.3.27
+  release.
+
 ## Desktop 0.3.27
 
 - Added a workspace-list **Stop all** action that stops every running or starting MCP runtime and tunnel in one operation.

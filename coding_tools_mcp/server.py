@@ -102,7 +102,7 @@ from .transport_stdio import serve_stdio
 from .workflow_store import MAX_CHECKPOINT_BYTES, TASK_STATES, WorkflowStore, restore_token
 
 
-SERVER_NAME = "coding-tools-mcp"
+SERVER_NAME = os.environ.get("CODING_TOOLS_MCP_SERVER_NAME", "").strip() or "coding-tools-mcp"
 SERVER_TITLE = "Coding Tools MCP"
 MCP_ENDPOINT_PATH = "/mcp"
 DEFAULT_EXCLUDED_NAMES = {
