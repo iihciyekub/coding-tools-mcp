@@ -208,6 +208,14 @@ impl ProfileStore {
         if self.profiles.iter().any(|item| item.id == profile.id) {
             return Err("Workspace profile already exists.".into());
         }
+        let candidate_path =
+            std::fs::canonicalize(&profile.path).unwrap_or_else(|_| PathBuf::from(&profile.path));
+        if self.profiles.iter().any(|existing| {
+            std::fs::canonicalize(&existing.path).unwrap_or_else(|_| PathBuf::from(&existing.path))
+                == candidate_path
+        }) {
+            return Err("This workspace folder has already been added.".into());
+        }
         validate_profile_uniqueness(&self.profiles, &profile)?;
         save_secrets(&profile)?;
         self.profiles.push(profile.clone());

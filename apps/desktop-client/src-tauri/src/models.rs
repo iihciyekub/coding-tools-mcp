@@ -17,6 +17,9 @@ fn default_auth_type() -> String {
 fn default_permission_mode() -> String {
     "trusted".into()
 }
+fn default_file_access_scope() -> String {
+    "workspace".into()
+}
 fn default_port() -> u16 {
     28766
 }
@@ -103,6 +106,8 @@ pub struct RuntimeConfig {
     pub local_port: u16,
     #[serde(default = "default_permission_mode")]
     pub permission_mode: String,
+    #[serde(default = "default_file_access_scope")]
+    pub file_access_scope: String,
 }
 
 impl Default for RuntimeConfig {
@@ -110,6 +115,7 @@ impl Default for RuntimeConfig {
         Self {
             local_port: default_port(),
             permission_mode: default_permission_mode(),
+            file_access_scope: default_file_access_scope(),
         }
     }
 }
@@ -169,6 +175,12 @@ impl WorkspaceProfile {
             "safe" | "trusted" | "dangerous" | "host"
         ) {
             return Err("Unknown permission mode.".into());
+        }
+        if !matches!(
+            self.runtime.file_access_scope.as_str(),
+            "workspace" | "home"
+        ) {
+            return Err("Unknown file access scope.".into());
         }
         if !matches!(self.auth.r#type.as_str(), "oauth" | "bearer") {
             return Err("Unknown authentication type.".into());

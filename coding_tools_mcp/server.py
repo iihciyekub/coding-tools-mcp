@@ -737,31 +737,31 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "read_file": ToolSpec(
         title="Read file",
-        description="Read a UTF-8 text file slice inside the configured workspace.",
+        description="Read a UTF-8 text file slice inside the configured file scope. Relative paths are workspace-relative; ~/... uses Home scope when enabled.",
         read_only=True,
         idempotent=True,
     ),
     "read_files": ToolSpec(
         title="Read files",
-        description="Read bounded UTF-8 slices from multiple workspace files in one call.",
+        description="Read bounded UTF-8 slices from multiple files in the configured file scope.",
         read_only=True,
         idempotent=True,
     ),
     "list_dir": ToolSpec(
         title="List directory",
-        description="List directory entries inside the configured workspace.",
+        description="List directory entries inside the configured file scope.",
         read_only=True,
         idempotent=True,
     ),
     "list_files": ToolSpec(
         title="List files",
-        description="List workspace files using glob filters.",
+        description="List files in the configured file scope using glob filters.",
         read_only=True,
         idempotent=True,
     ),
     "search_text": ToolSpec(
         title="Search text",
-        description="Search UTF-8 workspace files for text or regex matches.",
+        description="Search UTF-8 files in the configured file scope for text or regex matches.",
         read_only=True,
         idempotent=True,
     ),
@@ -1624,6 +1624,8 @@ class ResolvedPath:
     display: str
     path: Path
     existed: bool
+    root: Path | None = None
+    scope: str = "workspace"
 
 
 @dataclass
@@ -1634,13 +1636,14 @@ class OperationRecord:
 
 
 class Workspace:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, allow_home_root: bool = False) -> None:
         self.root = root.expanduser().resolve(strict=True)
         if not self.root.is_dir():
             raise ToolFailure("INVALID_ARGUMENT", "Workspace root must be a directory.", category="validation")
         unsafe_roots = {"/"}
         try:
-            unsafe_roots.add(str(Path.home().resolve()))
+            if not allow_home_root:
+                unsafe_roots.add(str(Path.home().resolve()))
         except RuntimeError:
             pass
         if str(self.root) in unsafe_roots:
@@ -1669,7 +1672,7 @@ class Workspace:
         if not is_relative_to(resolved, self.root):
             code = "SYMLINK_ESCAPE" if candidate.is_symlink() else "PATH_OUTSIDE_WORKSPACE"
             raise ToolFailure(code, "Path escapes the configured workspace.", category="security")
-        return ResolvedPath(normalize_rel_display(resolved, self.root), resolved, True)
+        return ResolvedPath(normalize_rel_display(resolved, self.root), resolved, True, self.root)
 
     def resolve_for_write(self, raw_path: str) -> ResolvedPath:
         pure = self._reject_unsafe_text(raw_path)
@@ -1680,7 +1683,7 @@ class Workspace:
             resolved = candidate.resolve(strict=True)
             if not is_relative_to(resolved, self.root):
                 raise ToolFailure("SYMLINK_ESCAPE", "Path escapes the configured workspace.", category="security")
-            return ResolvedPath(normalize_rel_display(resolved, self.root), resolved, True)
+            return ResolvedPath(normalize_rel_display(resolved, self.root), resolved, True, self.root)
 
         parent = candidate.parent
         missing: list[Path] = []
@@ -1696,7 +1699,7 @@ class Workspace:
         if not is_relative_to(resolved_parent, self.root):
             raise ToolFailure("PATH_OUTSIDE_WORKSPACE", "Path escapes the configured workspace.", category="security")
         target = resolved_parent.joinpath(*reversed([p.name for p in missing]), candidate.name)
-        return ResolvedPath(normalize_rel_display(target, self.root), target, False)
+        return ResolvedPath(normalize_rel_display(target, self.root), target, False, self.root)
 
     def reject_write_symlink(self, raw_path: str) -> None:
         pure = self._reject_unsafe_text(raw_path)
@@ -1755,6 +1758,68 @@ class Workspace:
         if completed.returncode not in {0, 1}:
             return set()
         return {path for path in completed.stdout.split("\0") if path}
+
+
+class FileAccess:
+    """Resolve ordinary file-tool paths without changing the project workspace.
+
+    Relative paths remain workspace-relative for compatibility. When a broader
+    home root is configured, callers can explicitly address it with ``~/...``.
+    Git, LSP, workflow state, project instructions, and command cwd continue to
+    use the project workspace.
+    """
+
+    def __init__(self, workspace: Workspace, home_root: Path | None = None) -> None:
+        self.workspace = workspace
+        self.home = Workspace(home_root, allow_home_root=True) if home_root is not None else None
+
+    @property
+    def root(self) -> Path:
+        return self.home.root if self.home is not None else self.workspace.root
+
+    def _scope(self, raw_path: str) -> tuple[Workspace, str, str]:
+        raw = raw_path or "."
+        if raw == "~" or raw.startswith("~/"):
+            if self.home is None:
+                raise ToolFailure(
+                    "PATH_OUTSIDE_FILE_SCOPE",
+                    "Home-folder access is not enabled for this workspace.",
+                    category="security",
+                )
+            inner = raw[2:] if raw.startswith("~/") else "."
+            return self.home, inner or ".", "home"
+        return self.workspace, raw, "workspace"
+
+    @staticmethod
+    def _decorate(resolved: ResolvedPath, scope: str) -> ResolvedPath:
+        if scope != "home":
+            return resolved
+        display = "~" if resolved.display == "." else f"~/{resolved.display}"
+        return ResolvedPath(display, resolved.path, resolved.existed, resolved.root, "home")
+
+    def resolve_existing(self, raw_path: str = ".") -> ResolvedPath:
+        scope, inner, label = self._scope(raw_path)
+        return self._decorate(scope.resolve_existing(inner), label)
+
+    def resolve_for_write(self, raw_path: str) -> ResolvedPath:
+        scope, inner, label = self._scope(raw_path)
+        return self._decorate(scope.resolve_for_write(inner), label)
+
+    def reject_write_symlink(self, raw_path: str) -> None:
+        scope, inner, _ = self._scope(raw_path)
+        scope.reject_write_symlink(inner)
+
+    def workspace_for_resolved(self, resolved: ResolvedPath) -> Workspace:
+        if resolved.scope == "home" and self.home is not None:
+            return self.home
+        return self.workspace
+
+    def display_path(self, path: Path, resolved: ResolvedPath) -> str:
+        root = resolved.root or self.workspace_for_resolved(resolved).root
+        rel = normalize_rel_display(path, root)
+        if resolved.scope == "home":
+            return "~" if rel == "." else f"~/{rel}"
+        return rel
 
 
 class WorkspaceCommandManager:
@@ -1830,6 +1895,7 @@ class Runtime:
         self,
         workspace: Path,
         *,
+        file_access_root: Path | None = None,
         enable_view_image: bool = True,
         enable_workflow_tools: bool = False,
         defer_workflow_tools: bool = False,
@@ -1849,6 +1915,7 @@ class Runtime:
         command_manager: WorkspaceCommandManager | None = None,
     ) -> None:
         self.workspace = Workspace(workspace)
+        self.file_access = FileAccess(self.workspace, file_access_root)
         self.enable_view_image = enable_view_image
         self.enable_workflow_tools = enable_workflow_tools
         self.defer_workflow_tools = bool(defer_workflow_tools and enable_workflow_tools)
@@ -2455,6 +2522,12 @@ class Runtime:
     def resolve_for_write(self, raw_path: str) -> ResolvedPath:
         return self.workspace.resolve_for_write(raw_path)
 
+    def resolve_file_existing(self, raw_path: str = ".") -> ResolvedPath:
+        return self.file_access.resolve_existing(raw_path)
+
+    def resolve_file_for_write(self, raw_path: str) -> ResolvedPath:
+        return self.file_access.resolve_for_write(raw_path)
+
     def git_path_filter(self, raw_path: str) -> str:
         if raw_path == ".":
             return "."
@@ -2463,6 +2536,8 @@ class Runtime:
     def _exec_environment_summary(self) -> dict[str, Any]:
         return {
             "workspace": str(self.workspace.root),
+            "file_access_root": str(self.file_access.root),
+            "file_access_scope": "home" if self.file_access.home is not None else "workspace",
             "permission_mode": self.permission_mode,
             "network_allowed": self.allow_network,
             "network_policy": {
@@ -2910,7 +2985,7 @@ class Runtime:
 
     def read_file(self, args: dict[str, Any]) -> dict[str, Any]:
         requested_path = str(args.get("path", ""))
-        resolved = self.resolve_existing(requested_path)
+        resolved = self.resolve_file_existing(requested_path)
         if resolved.path.is_dir():
             raise ToolFailure("IS_DIRECTORY", "Path is a directory.", category="validation")
         max_bytes = int(args.get("max_bytes", 131072))
@@ -3185,9 +3260,10 @@ class Runtime:
         return result
 
     def list_dir(self, args: dict[str, Any]) -> dict[str, Any]:
-        resolved = self.resolve_existing(str(args.get("path", ".")))
+        resolved = self.resolve_file_existing(str(args.get("path", ".")))
         if not resolved.path.is_dir():
             raise ToolFailure("NOT_A_DIRECTORY", "Path is not a directory.", category="validation")
+        file_workspace = self.file_access.workspace_for_resolved(resolved)
         recursive = bool(args.get("recursive", False))
         max_depth = int(args.get("max_depth", 1))
         max_entries = int(args.get("max_entries", 1000))
@@ -3205,17 +3281,20 @@ class Runtime:
                 children = list(directory.iterdir())
             except OSError:
                 return
-            child_rel_paths = [normalize_rel_display(child, self.workspace.root) for child in children]
-            ignored = set() if include_ignored else self.workspace.git_ignored_paths(child_rel_paths)
+            child_rel_paths = [normalize_rel_display(child, file_workspace.root) for child in children]
+            ignored = set() if include_ignored else file_workspace.git_ignored_paths(child_rel_paths)
             for child in children:
-                if self.workspace.is_ignored_path(
+                if file_workspace.is_ignored_path(
                     child,
                     include_hidden=include_hidden,
                     include_ignored=include_ignored,
                     git_ignored=ignored,
                 ):
                     continue
-                entries.append(entry_for_path(child, self.workspace.root))
+                entry = entry_for_path(child, file_workspace.root)
+                if resolved.scope == "home":
+                    entry["path"] = "~" if entry["path"] == "." else f"~/{entry['path']}"
+                entries.append(entry)
                 if len(entries) >= max_entries:
                     truncated = True
                     return
@@ -3232,9 +3311,10 @@ class Runtime:
         }
 
     def list_files(self, args: dict[str, Any]) -> dict[str, Any]:
-        resolved = self.resolve_existing(str(args.get("path", ".")))
+        resolved = self.resolve_file_existing(str(args.get("path", ".")))
         if not resolved.path.is_dir():
             raise ToolFailure("NOT_A_DIRECTORY", "Path is not a directory.", category="validation")
+        file_workspace = self.file_access.workspace_for_resolved(resolved)
         patterns_arg = args.get("patterns")
         glob_arg = args.get("glob")
         if isinstance(patterns_arg, list) and patterns_arg:
@@ -3264,21 +3344,22 @@ class Runtime:
             # Filter by glob first so git check-ignore only sees candidates.
             candidates = [
                 (path, rel)
-                for path, rel in ((path, normalize_rel_display(path, self.workspace.root)) for path in batch)
+                for path, rel in ((path, normalize_rel_display(path, file_workspace.root)) for path in batch)
                 if matches_any_glob(rel, patterns) and not matches_any_glob(rel, exclude_patterns)
             ]
-            ignored = set() if include_ignored else self.workspace.git_ignored_paths([rel for _, rel in candidates])
+            ignored = set() if include_ignored else file_workspace.git_ignored_paths([rel for _, rel in candidates])
             for path, rel in candidates:
-                if path.is_symlink() and not self.workspace.is_safe_existing_path(path):
+                if path.is_symlink() and not file_workspace.is_safe_existing_path(path):
                     continue
-                if self.workspace.is_ignored_path(
+                if file_workspace.is_ignored_path(
                     path,
                     include_hidden=include_hidden,
                     include_ignored=include_ignored,
                     git_ignored=ignored,
                 ):
                     continue
-                files.append(file_entry(path, rel, path.lstat()))
+                display_rel = f"~/{rel}" if resolved.scope == "home" else rel
+                files.append(file_entry(path, display_rel, path.lstat()))
                 if len(files) >= max_results:
                     truncated = True
                     break
@@ -3303,6 +3384,8 @@ class Runtime:
         max_results: int,
         sort_key: str,
     ) -> dict[str, Any] | None:
+        if resolved.scope == "home":
+            return None
         fd = cached_which("fd", "fdfind")
         if not fd or not resolved.path.is_dir():
             return None
@@ -3394,7 +3477,8 @@ class Runtime:
         query = str(args.get("query", ""))
         if not query:
             raise ToolFailure("INVALID_ARGUMENT", "query is required.", category="validation")
-        resolved = self.resolve_existing(str(args.get("path", ".")))
+        resolved = self.resolve_file_existing(str(args.get("path", ".")))
+        file_workspace = self.file_access.workspace_for_resolved(resolved)
         regex = bool(args.get("regex", False))
         case_sensitive = bool(args.get("case_sensitive", False))
         include_globs = [str(item) for item in args.get("include_globs", [])]
@@ -3434,17 +3518,17 @@ class Runtime:
             for path in batch:
                 if path.is_dir():
                     continue
-                if path.is_symlink() and not self.workspace.is_safe_existing_path(path):
+                if path.is_symlink() and not file_workspace.is_safe_existing_path(path):
                     continue
-                rel = normalize_rel_display(path, self.workspace.root)
+                rel = normalize_rel_display(path, file_workspace.root)
                 if include_globs and not matches_any_glob(rel, include_globs):
                     continue
                 if matches_any_glob(rel, exclude_globs):
                     continue
                 candidates.append((path, rel))
-            ignored = self.workspace.git_ignored_paths([rel for _, rel in candidates])
+            ignored = file_workspace.git_ignored_paths([rel for _, rel in candidates])
             for path, rel in candidates:
-                if self.workspace.is_ignored_path(path, git_ignored=ignored):
+                if file_workspace.is_ignored_path(path, git_ignored=ignored):
                     continue
                 try:
                     data = path.read_bytes()
@@ -3472,7 +3556,8 @@ class Runtime:
                         continue
                     before = lines[max(0, index - context_lines) : index]
                     after = lines[index + 1 : index + 1 + context_lines]
-                    matches.append(search_match_item(rel, index + 1, column, line, before, after, max_preview_bytes))
+                    display_rel = f"~/{rel}" if resolved.scope == "home" else rel
+                    matches.append(search_match_item(display_rel, index + 1, column, line, before, after, max_preview_bytes))
         return {
             "query": query,
             "matches": matches,
@@ -3494,6 +3579,8 @@ class Runtime:
         max_results: int,
         max_preview_bytes: int,
     ) -> dict[str, Any] | None:
+        if resolved.scope == "home":
+            return None
         rg = cached_which("rg")
         if not rg:
             return None
@@ -3612,12 +3699,12 @@ class Runtime:
             for op in operations:
                 self._validate_patch_path(op.path, require_existing=op.kind in {"update", "delete"})
                 if op.kind in {"add", "update", "delete"}:
-                    self.workspace.reject_write_symlink(op.path)
+                    self.file_access.reject_write_symlink(op.path)
                 if op.move_to:
                     self._validate_patch_path(op.move_to, require_existing=False)
-                    self.workspace.reject_write_symlink(op.move_to)
+                    self.file_access.reject_write_symlink(op.move_to)
                 if op.kind == "add":
-                    target = self.workspace.resolve_for_write(op.path)
+                    target = self.resolve_file_for_write(op.path)
                     if target.existed:
                         raise ToolFailure("PATCH_FAILED", "Cannot add file that already exists.", category="validation")
                     baseline = FileBaseline.capture(target.path)
@@ -3632,7 +3719,7 @@ class Runtime:
                     summaries.append(f"A {target.display}")
                     additions += len((op.add_content or "").splitlines())
                 elif op.kind == "delete":
-                    target = self.workspace.resolve_existing(op.path)
+                    target = self.resolve_file_existing(op.path)
                     if target.path.is_dir():
                         raise ToolFailure("PATCH_FAILED", "Cannot delete a directory.", category="validation")
                     prior = staged.get(target.display)
@@ -3642,7 +3729,7 @@ class Runtime:
                     summaries.append(f"D {target.display}")
                     removals += len((baseline.data or b"").splitlines())
                 elif op.kind == "update":
-                    source = self.workspace.resolve_existing(op.path)
+                    source = self.resolve_file_existing(op.path)
                     if source.path.is_dir():
                         raise ToolFailure("PATCH_FAILED", "Cannot update a directory.", category="validation")
                     prior = staged.get(source.display)
@@ -3658,7 +3745,7 @@ class Runtime:
                             removals += line.startswith("-")
                     source_mode = prior.mode if prior is not None else baseline.mode
                     if op.move_to:
-                        dest = self.workspace.resolve_for_write(op.move_to)
+                        dest = self.resolve_file_for_write(op.move_to)
                         if dest.existed and dest.display != source.display:
                             raise ToolFailure("PATCH_FAILED", "Cannot move over an existing file.", category="validation")
                         dest_baseline = baseline if dest.display == source.display else FileBaseline.capture(dest.path)
@@ -3704,13 +3791,15 @@ class Runtime:
 
     def _validate_patch_path(self, raw_path: str, *, require_existing: bool) -> None:
         if require_existing:
-            self.workspace.resolve_existing(raw_path)
+            self.resolve_file_existing(raw_path)
         else:
-            self.workspace.resolve_for_write(raw_path)
+            self.resolve_file_for_write(raw_path)
 
     def _commit_staged_files(self, staged: list[StagedFile]) -> None:
         self.patch_committer.commit(staged)
         for change in staged:
+            if change.display == "~" or change.display.startswith("~/"):
+                continue
             if change.display in self.patch_baselines:
                 continue
             self.patch_baselines[change.display] = (
@@ -4945,7 +5034,7 @@ class Runtime:
         for rel, before in baselines:
             if selected and rel not in selected:
                 continue
-            current_path = self.workspace.resolve_for_write(rel).path
+            current_path = self.resolve_for_write(rel).path
             after = read_text_preserve_newlines(current_path) if current_path.exists() and not current_path.is_dir() else None
             if before == after:
                 continue
@@ -6169,7 +6258,7 @@ class Runtime:
         }
 
     def view_image(self, args: dict[str, Any]) -> dict[str, Any]:
-        resolved = self.resolve_existing(str(args.get("path", "")))
+        resolved = self.resolve_file_existing(str(args.get("path", "")))
         max_bytes = int(args.get("max_bytes", 5_242_880))
         max_width = int(args.get("max_width", IMAGE_RESIZE_MAX_DIMENSION))
         max_height = int(args.get("max_height", IMAGE_RESIZE_MAX_DIMENSION))
@@ -9227,8 +9316,15 @@ def build_runtime(
     command_manager: WorkspaceCommandManager | None = None,
 ) -> Runtime:
     workspace = Path(args.workspace or os.environ.get(f"{ENV_PREFIX}_WORKSPACE") or os.getcwd())
+    raw_file_access_root = (
+        getattr(args, "file_access_root", None)
+        or os.environ.get(f"{ENV_PREFIX}_FILE_ACCESS_ROOT")
+        or ""
+    ).strip()
+    file_access_root = Path(raw_file_access_root).expanduser() if raw_file_access_root else None
     runtime = Runtime(
         workspace,
+        file_access_root=file_access_root,
         enable_view_image=args.enable_view_image,
         enable_workflow_tools=bool(getattr(args, "enable_workflow_tools", False)),
         defer_workflow_tools=bool(getattr(args, "defer_workflow_tools", False)),
@@ -9480,6 +9576,14 @@ def build_parser() -> argparse.ArgumentParser:
         version=f"%(prog)s {__version__}",
     )
     parser.add_argument("--workspace", help="workspace root; defaults to CODING_TOOLS_MCP_WORKSPACE or cwd")
+    parser.add_argument(
+        "--file-access-root",
+        default=None,
+        help=(
+            "optional broader root for ordinary file tools; relative paths stay workspace-relative, "
+            "and ~/... addresses this root; defaults to CODING_TOOLS_MCP_FILE_ACCESS_ROOT when set"
+        ),
+    )
     parser.add_argument(
         "--host",
         default=os.environ.get(f"{ENV_PREFIX}_HOST") or "127.0.0.1",

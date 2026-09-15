@@ -24,6 +24,7 @@ export interface AuthConfig {
 export interface RuntimeConfig {
   local_port: number;
   permission_mode: PermissionMode;
+  file_access_scope: "workspace" | "home";
 }
 
 export interface WorkspaceProfile {

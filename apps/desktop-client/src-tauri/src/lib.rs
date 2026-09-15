@@ -120,6 +120,15 @@ fn create_profile(
         .store
         .lock()
         .map_err(|_| "Profile store is unavailable.")?;
+    let requested =
+        std::fs::canonicalize(&path).unwrap_or_else(|_| std::path::PathBuf::from(&path));
+    if let Some(existing) = store.profiles().into_iter().find(|profile| {
+        std::fs::canonicalize(&profile.path)
+            .unwrap_or_else(|_| std::path::PathBuf::from(&profile.path))
+            == requested
+    }) {
+        return Ok(existing);
+    }
     let profile = WorkspaceProfile::new(path, store.next_port())?;
     store.insert(profile)
 }

@@ -1,5 +1,15 @@
 # Changelog
 
+## Desktop 0.3.26
+
+- Added an independent Home-folder file scope so ordinary file tools can use
+  `~/...` while Git, LSP, workflow state, project instructions, and command
+  context remain anchored to the selected project workspace.
+- Added stable per-workspace accent backgrounds, duplicate-folder prevention,
+  and clearer file-scope status in the compact desktop panel.
+- Added in-place second-click confirmation for Stop and Quit to reduce accidental
+  runtime shutdowns without introducing modal confirmation dialogs.
+
 ## Desktop 0.3.25
 
 - Show the selected workspace position, such as `Workspace 1/3`, alongside its

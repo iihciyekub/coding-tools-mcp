@@ -373,6 +373,23 @@ class RuntimeHelperTests(unittest.TestCase):
 
         self.assertEqual(runtime.workspace.root, Path(tmp).resolve())
 
+    def test_home_file_scope_expands_file_tools_without_expanding_project_scope(self) -> None:
+        with TemporaryDirectory() as workspace_tmp, TemporaryDirectory() as home_tmp:
+            workspace = Path(workspace_tmp)
+            home = Path(home_tmp)
+            (home / "note.txt").write_text("home note\n", encoding="utf-8")
+            runtime = Runtime(workspace, file_access_root=home)
+
+            payload = runtime.read_file({"path": "~/note.txt"})
+            self.assertEqual(payload["path"], "~/note.txt")
+            self.assertEqual(payload["content"], "home note\n")
+            self.assertEqual(runtime.server_info_payload()["file_access_root"], str(home.resolve()))
+            self.assertEqual(runtime.server_info_payload()["file_access_scope"], "home")
+
+            with self.assertRaises(ToolFailure) as error:
+                runtime.resolve_existing("~/note.txt")
+            self.assertEqual(error.exception.code, "NOT_FOUND")
+
     def test_kill_command_keeps_unresponsive_command(self) -> None:
         class StillRunningProcess:
             def poll(self) -> None:

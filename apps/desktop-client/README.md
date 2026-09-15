@@ -14,6 +14,12 @@ API.
   trusted runtime, while **Full Access** maps to host mode for agent workflows that
   intentionally need the wider Mac environment. Legacy safe/dangerous profiles remain
   readable until the user explicitly chooses one of the two desktop modes.
+- Independent **File scope** control: keep ordinary file tools inside the workspace,
+  or allow explicit `~/...` access across the current user's Home folder without
+  expanding Git, LSP, workflow state, checks, or project-context roots.
+- Stable per-workspace accent backgrounds and in-place second-click confirmation for
+  Stop and Quit, so multiple workspaces are easier to distinguish and accidental
+  shutdowns are less likely.
 - Live runtime/tunnel status with copyable Server URL and OAuth authorization passcode
 - Secrets stored in the operating-system keychain
 - English and Simplified Chinese UI, including the fixed menu-bar panel with a persisted language selector

@@ -371,6 +371,11 @@ fn spawn_runtime(
         ])
         .arg("--state-root")
         .arg(workflow_state_root);
+    if profile.runtime.file_access_scope == "home" {
+        if let Some(home) = std::env::var_os("HOME") {
+            command.arg("--file-access-root").arg(home);
+        }
+    }
     command
         .current_dir(&profile.path)
         .env("PATH", effective_path());
