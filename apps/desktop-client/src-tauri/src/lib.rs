@@ -223,6 +223,30 @@ async fn stop_profile(
 }
 
 #[tauri::command]
+async fn stop_all_profiles(
+    state: tauri::State<'_, DesktopState>,
+) -> Result<HashMap<String, RuntimeStatus>, String> {
+    let profiles = state
+        .store
+        .lock()
+        .map_err(|_| "Profile store is unavailable.")?
+        .profiles();
+    let runtime = Arc::clone(&state.runtime);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut runtime = runtime
+            .lock()
+            .map_err(|_| "Runtime manager is unavailable.")?;
+        runtime.stop_all();
+        Ok(profiles
+            .iter()
+            .map(|profile| (profile.id.clone(), runtime.status(profile)))
+            .collect())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 fn profile_status(
     profile_id: String,
     state: tauri::State<'_, DesktopState>,
@@ -1723,6 +1747,7 @@ pub fn run() {
             delete_profile,
             start_profile,
             stop_profile,
+            stop_all_profiles,
             profile_status,
             profile_logs,
             open_logs,

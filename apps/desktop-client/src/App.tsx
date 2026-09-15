@@ -8,10 +8,10 @@ import type { DependencyStatus, LogBundle, PermissionMode, RuntimeStatus, Worksp
 import { publicEndpoint } from "./utils";
 
 const PANEL_WIDTH = 360;
-const APP_VERSION = "0.3.26";
+const APP_VERSION = "0.3.27";
 type Page = "home" | "workspaces" | "environment" | "logs" | "settings" | "workflow" | "more";
 type CopyAction = "server-url" | "credential" | "logs";
-type ConfirmAction = { kind: "stop"; profileId: string } | { kind: "quit" } | null;
+type ConfirmAction = { kind: "stop"; profileId: string } | { kind: "stop-all" } | { kind: "quit" } | null;
 
 const stoppedStatus = (port: number): RuntimeStatus => ({ state: "stopped", pid: null, local_message: "Not running", public_message: "Unknown", public_url: "", local_url: `http://127.0.0.1:${port}/mcp` });
 const quickTunnelProfile = (profile: WorkspaceProfile): WorkspaceProfile => ({ ...profile, tunnel: { ...profile.tunnel, type: "cloudflare", cloudflare_mode: "quick", domain: "", public_url: "", frp_server: "", frp_subdomain: "", cloudflare_token: "" }, auth: { ...profile.auth, type: "oauth" } });
@@ -50,6 +50,10 @@ function App() {
   const credential = selected?.auth.type === "bearer" ? selected.auth.bearer_token : selected?.auth.oauth_password ?? "";
   const selectedWorkflow = selected ? workflow[selected.id] : undefined;
   const environmentReady = dependencies.runtime_ready && dependencies.cloudflared;
+  const activeWorkspaceCount = profiles.reduce((count, profile) => {
+    const profileStatus = statuses[profile.id] ?? stoppedStatus(profile.runtime.local_port);
+    return count + (Boolean(profileStatus.pid) || profileStatus.state === "starting" ? 1 : 0);
+  }, 0);
 
   const refresh = useCallback(async (keepSelection = true) => {
     try {
@@ -131,6 +135,14 @@ function App() {
     try { const saved = await api.saveProfile({ ...selected, runtime: { ...selected.runtime, file_access_scope: fileAccessScope } }); setProfiles((current) => current.map((profile) => profile.id === saved.id ? saved : profile)); setError(""); }
     catch (reason) { setError(String(reason)); } finally { setBusy(null); }
   };
+  const stopAllWorkspaces = async () => {
+    if (!activeWorkspaceCount || busy === "stop-all") return;
+    if (confirmAction?.kind !== "stop-all") { setConfirmAction({ kind: "stop-all" }); return; }
+    setConfirmAction(null); setBusy("stop-all"); setError("");
+    try { setStatuses(await api.stopAllProfiles()); }
+    catch (reason) { setError(String(reason)); }
+    finally { setBusy(null); }
+  };
   const quitApp = async () => { if (confirmAction?.kind !== "quit") { setConfirmAction({ kind: "quit" }); return; } setConfirmAction(null); await api.quit(); };
   const removeWorkspace = async () => {
     if (!selected || running) return; if (!confirmDelete) { setConfirmDelete(true); return; } setBusy("delete");
@@ -167,7 +179,7 @@ function App() {
       <footer className="panel-footer"><button type="button" disabled={!selected} onClick={() => openSubpage("settings", "home")}><ShieldIcon /><span>{selected?.runtime.permission_mode === "host" ? t("Full Access") : t("Standard access")}{selected?.runtime.file_access_scope === "home" ? ` · ${t("Home")}` : ""}</span></button><button className={`footer-quit-button ${confirmAction?.kind === "quit" ? "confirm" : ""}`} type="button" onClick={() => void quitApp()}><PowerIcon /><span>{confirmAction?.kind === "quit" ? t("Click again to quit") : t("Quit Coding Tools MCP")}</span></button></footer>
     </>}
 
-    {page === "workspaces" && <section className="subpage-body"><div className="workspace-list">{profiles.map((profile) => { const profileStatus = statuses[profile.id] ?? stoppedStatus(profile.runtime.local_port); return <button style={{ "--workspace-hue": workspaceHue(profile.path) } as React.CSSProperties} className={`workspace-choice ${profile.id === selectedId ? "selected" : ""}`} type="button" key={profile.id} onClick={() => { setSelectedId(profile.id); setPage("home"); }}><i className={`status-dot ${profileStatus.state}`} /><span><strong>{profile.name}</strong><small>{shortPath(profile.path)}</small></span>{profile.id === selectedId && <CheckIcon />}</button>; })}</div><button className="primary-button" type="button" onClick={() => void addWorkspace()}><PlusIcon />{t("Add workspace")}</button></section>}
+    {page === "workspaces" && <section className="subpage-body"><div className="workspace-list">{profiles.map((profile) => { const profileStatus = statuses[profile.id] ?? stoppedStatus(profile.runtime.local_port); return <button style={{ "--workspace-hue": workspaceHue(profile.path) } as React.CSSProperties} className={`workspace-choice ${profile.id === selectedId ? "selected" : ""}`} type="button" key={profile.id} onClick={() => { setSelectedId(profile.id); setPage("home"); }}><i className={`status-dot ${profileStatus.state}`} /><span><strong>{profile.name}</strong><small>{shortPath(profile.path)}</small></span>{profile.id === selectedId && <CheckIcon />}</button>; })}</div><button className="primary-button" type="button" onClick={() => void addWorkspace()}><PlusIcon />{t("Add workspace")}</button><button className={`stop-all-button ${confirmAction?.kind === "stop-all" ? "confirm" : ""}`} type="button" disabled={!activeWorkspaceCount || busy === "stop-all"} onClick={() => void stopAllWorkspaces()}>{busy === "stop-all" ? <SpinnerIcon /> : <StopIcon />}{busy === "stop-all" ? t("Stopping all…") : confirmAction?.kind === "stop-all" ? t("Click again to stop all") : t("Stop all")}{activeWorkspaceCount > 1 && busy !== "stop-all" && confirmAction?.kind !== "stop-all" ? <small>{activeWorkspaceCount}</small> : null}</button></section>}
 
     {page === "environment" && <section className="subpage-body environment-page">
       <div className="environment-summary"><span><strong>{environmentReady ? t("Runtime environment is ready") : t("Runtime environment needs setup")}</strong><small>{t("Installed in the app's private directory")}</small></span><small>{navigator.platform.includes("Mac") ? "macOS" : navigator.platform}</small></div>
@@ -221,6 +233,7 @@ const SpinnerIcon = () => <Icon className="spinner"><path d="M21 12a9 9 0 1 1-3-
 const LanguageIcon = () => <Icon><circle cx="12" cy="12" r="10" /><path d="M2 12h20M12 2a15 15 0 0 1 0 20M12 2a15 15 0 0 0 0 20" /></Icon>;
 const GithubIcon = () => <Icon><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3.3-.4 6.8-1.6 6.8-7A5.4 5.4 0 0 0 19.4 4 5 5 0 0 0 19.3.5S18.2.1 15 2a13.4 13.4 0 0 0-7 0C4.8.1 3.7.5 3.7.5A5 5 0 0 0 3.6 4a5.4 5.4 0 0 0-1.4 3.7c0 5.3 3.5 6.5 6.8 6.9A4.8 4.8 0 0 0 8 18v4M8 19c-3 .9-3-1.5-4-2" /></Icon>;
 const PowerIcon = () => <Icon><path d="M12 2v10M18.4 6.6a9 9 0 1 1-12.8 0" /></Icon>;
+const StopIcon = () => <Icon><rect x="6" y="6" width="12" height="12" rx="2" /></Icon>;
 const ActivityIcon = () => <Icon><path d="M3 12h4l3-8 4 16 3-8h4" /></Icon>;
 
 export default App;

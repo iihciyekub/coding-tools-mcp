@@ -10,6 +10,7 @@ export const api = {
   deleteProfile: (profileId: string) => invoke<void>("delete_profile", { profileId }),
   startProfile: (profileId: string) => invoke<RuntimeStatus>("start_profile", { profileId }),
   stopProfile: (profileId: string) => invoke<RuntimeStatus>("stop_profile", { profileId }),
+  stopAllProfiles: () => invoke<Record<string, RuntimeStatus>>("stop_all_profiles"),
   status: (profileId: string) => invoke<RuntimeStatus>("profile_status", { profileId }),
   logs: (profileId: string) => invoke<LogBundle>("profile_logs", { profileId }),
   openLogs: (profileId: string) => invoke<void>("open_logs", { profileId }),

@@ -1,5 +1,11 @@
 # Changelog
 
+## Desktop 0.3.27
+
+- Added a workspace-list **Stop all** action that stops every running or starting MCP runtime and tunnel in one operation.
+- Stop all follows the existing in-place safety pattern: the first click arms the action, the second click within four seconds confirms it, and the button shows progress while all services stop.
+- The Stop all control is disabled when nothing is active, shows the active workspace count when useful, and includes Simplified Chinese localization.
+
 ## Desktop 0.3.26
 
 - Added an independent Home-folder file scope so ordinary file tools can use
