@@ -122,82 +122,6 @@ impl RuntimeManager {
         }
     }
 
-    fn start(
-        &mut self,
-        profile: &WorkspaceProfile,
-        log_dir: &Path,
-        resolved: (PathBuf, Vec<String>),
-        workspace_sequence: usize,
-    ) -> Result<RuntimeStatus, String> {
-        profile.validate()?;
-        if self.sessions.contains_key(&profile.id) {
-            let status = self.status(profile);
-            if status.state == "running" {
-                return Ok(status);
-            }
-            self.stop(profile);
-        }
-        if port_is_listening(profile.runtime.local_port) {
-            return Err(format!("Local port {} is already in use. Stop the existing process or choose another port.", profile.runtime.local_port));
-        }
-        fs::create_dir_all(log_dir).map_err(|error| error.to_string())?;
-        let server_name = new_server_name(workspace_sequence);
-        let mut runtime = spawn_runtime(
-            profile,
-            log_dir,
-            resolved,
-            &self.data_dir.join("workflow"),
-            &server_name,
-        )?;
-        if let Err(error) = wait_for_port(profile.runtime.local_port, &mut runtime, START_TIMEOUT) {
-            runtime.terminate();
-            return Err(error);
-        }
-
-        let public_url = Arc::new(Mutex::new(profile.public_url()));
-        let tunnel = match profile.tunnel.r#type.as_str() {
-            "frp" => None,
-            "cloudflare" => {
-                match spawn_cloudflare(profile, log_dir, Arc::clone(&public_url), &self.data_dir) {
-                    Ok(child) => Some(child),
-                    Err(error) => {
-                        runtime.terminate();
-                        return Err(error);
-                    }
-                }
-            }
-            _ => {
-                runtime.terminate();
-                return Err(
-                    "Only Cloudflare and externally managed FRP tunnels are supported.".into(),
-                );
-            }
-        };
-        self.sessions.insert(
-            profile.id.clone(),
-            ManagedSession {
-                runtime,
-                tunnel,
-                public_url,
-                server_name,
-            },
-        );
-        Ok(self.status(profile))
-    }
-
-    pub fn stop(&mut self, profile: &WorkspaceProfile) -> RuntimeStatus {
-        if let Some(cancelled) = self.preparing.remove(&profile.id) {
-            cancelled.store(true, Ordering::Relaxed);
-        }
-        if let Some(mut session) = self.sessions.remove(&profile.id) {
-            if let Some(tunnel) = session.tunnel.as_mut() {
-                tunnel.terminate();
-            }
-            session.runtime.terminate();
-        }
-        RuntimeStatus::stopped(profile.runtime.local_port)
-    }
-
     pub fn status(&mut self, profile: &WorkspaceProfile) -> RuntimeStatus {
         if self.preparing.contains_key(&profile.id) {
             let mut status = RuntimeStatus::stopped(profile.runtime.local_port);
@@ -284,7 +208,7 @@ pub fn start_workspace(
             .lock()
             .map_err(|_| "Runtime manager is unavailable")?;
         let status = state.status(profile);
-        if status.state == "running" {
+        if status.pid.is_some() {
             return Ok(status);
         }
         if state.preparing.contains_key(&profile.id) {
@@ -295,27 +219,156 @@ pub fn start_workspace(
             .insert(profile.id.clone(), Arc::clone(&cancelled));
         (state.resource_dir.clone(), state.data_dir.clone())
     };
-    // Download/install without holding the UI/status mutex.
+    // Resolve dependencies and launch processes without holding the UI/status mutex.
     let resolved = environment::resolve(&resources, &data, log_dir, &effective_path(), &cancelled);
-    let tunnel_setup = if resolved.is_ok()
-        && profile.tunnel.r#type == "cloudflare"
-        && resolve_cloudflared(&data).is_err()
-    {
-        resource_installer::install("cloudflared", &data, &cancelled).map(|_| ())
-    } else {
-        Ok(())
-    };
+    let runtime_ready = resolved.is_ok();
+    let startup = resolved.and_then(|resolved| {
+        if profile.tunnel.r#type == "cloudflare" && resolve_cloudflared(&data).is_err() {
+            resource_installer::install("cloudflared", &data, &cancelled)?;
+        }
+        start_session(
+            profile,
+            log_dir,
+            resolved,
+            &data,
+            workspace_sequence,
+            &cancelled,
+        )
+    });
     let mut state = manager
         .lock()
         .map_err(|_| "Runtime manager is unavailable")?;
+    let owns_start = state
+        .preparing
+        .get(&profile.id)
+        .is_some_and(|signal| Arc::ptr_eq(signal, &cancelled));
+    if owns_start {
+        state.preparing.remove(&profile.id);
+    }
+    if runtime_ready {
+        state.runtime_ready_hint = true;
+    }
+    if cancelled.load(Ordering::Relaxed) || !owns_start {
+        drop(state);
+        if let Ok(session) = startup {
+            terminate_session(session);
+        }
+        return Err("Workspace startup was cancelled.".into());
+    }
+    let session = startup?;
+    state.sessions.insert(profile.id.clone(), session);
+    Ok(state.status(profile))
+}
+
+pub fn stop_workspace(
+    manager: &Arc<Mutex<RuntimeManager>>,
+    profile: &WorkspaceProfile,
+) -> Result<RuntimeStatus, String> {
+    let session = {
+        let mut state = manager
+            .lock()
+            .map_err(|_| "Runtime manager is unavailable")?;
+        if let Some(cancelled) = state.preparing.remove(&profile.id) {
+            cancelled.store(true, Ordering::Relaxed);
+        }
+        state.sessions.remove(&profile.id)
+    };
+    if let Some(session) = session {
+        terminate_session(session);
+    }
+    Ok(RuntimeStatus::stopped(profile.runtime.local_port))
+}
+
+pub fn stop_all_workspaces(manager: &Arc<Mutex<RuntimeManager>>) -> Result<(), String> {
+    let sessions = {
+        let mut state = manager
+            .lock()
+            .map_err(|_| "Runtime manager is unavailable")?;
+        for (_, cancelled) in state.preparing.drain() {
+            cancelled.store(true, Ordering::Relaxed);
+        }
+        state
+            .sessions
+            .drain()
+            .map(|(_, session)| session)
+            .collect::<Vec<_>>()
+    };
+    for session in sessions {
+        terminate_session(session);
+    }
+    Ok(())
+}
+
+fn start_session(
+    profile: &WorkspaceProfile,
+    log_dir: &Path,
+    resolved: (PathBuf, Vec<String>),
+    data_dir: &Path,
+    workspace_sequence: usize,
+    cancelled: &AtomicBool,
+) -> Result<ManagedSession, String> {
     if cancelled.load(Ordering::Relaxed) {
         return Err("Workspace startup was cancelled.".into());
     }
-    state.preparing.remove(&profile.id);
-    let resolved = resolved?;
-    state.runtime_ready_hint = true;
-    tunnel_setup?;
-    state.start(profile, log_dir, resolved, workspace_sequence)
+    if port_is_listening(profile.runtime.local_port) {
+        return Err(format!(
+            "Local port {} is already in use. Stop the existing process or choose another port.",
+            profile.runtime.local_port
+        ));
+    }
+    fs::create_dir_all(log_dir).map_err(|error| error.to_string())?;
+    let server_name = new_server_name(workspace_sequence);
+    let mut runtime = spawn_runtime(
+        profile,
+        log_dir,
+        resolved,
+        &data_dir.join("workflow"),
+        &server_name,
+    )?;
+    if let Err(error) = wait_for_port(
+        profile.runtime.local_port,
+        &mut runtime,
+        START_TIMEOUT,
+        cancelled,
+    ) {
+        runtime.terminate();
+        return Err(error);
+    }
+
+    let public_url = Arc::new(Mutex::new(profile.public_url()));
+    let tunnel = match profile.tunnel.r#type.as_str() {
+        "frp" => None,
+        "cloudflare" => match spawn_cloudflare(
+            profile,
+            log_dir,
+            Arc::clone(&public_url),
+            data_dir,
+            cancelled,
+        ) {
+            Ok(child) => Some(child),
+            Err(error) => {
+                runtime.terminate();
+                return Err(error);
+            }
+        },
+        _ => {
+            runtime.terminate();
+            return Err("Only Cloudflare and externally managed FRP tunnels are supported.".into());
+        }
+    };
+    Ok(ManagedSession {
+        runtime,
+        tunnel,
+        public_url,
+        server_name,
+    })
+}
+
+fn terminate_session(mut session: ManagedSession) {
+    if let Some(tunnel) = session.tunnel.as_mut() {
+        tunnel.terminate();
+    }
+    session.runtime.terminate();
 }
 
 pub fn prepare_runtime(
@@ -448,6 +501,7 @@ fn spawn_cloudflare(
     log_dir: &Path,
     public_url: Arc<Mutex<String>>,
     data_dir: &Path,
+    cancelled: &AtomicBool,
 ) -> Result<ManagedChild, String> {
     let executable = resolve_cloudflared(data_dir)?;
     let mut command = Command::new(executable);
@@ -500,6 +554,10 @@ fn spawn_cloudflare(
     let mut managed = ManagedChild { child, group_id };
     let deadline = Instant::now() + TUNNEL_TIMEOUT;
     while Instant::now() < deadline {
+        if cancelled.load(Ordering::Relaxed) {
+            managed.terminate();
+            return Err("Workspace startup was cancelled.".into());
+        }
         if !managed.is_running() {
             return Err(
                 "cloudflared exited before establishing a tunnel. Check cloudflared.log.".into(),
@@ -562,9 +620,17 @@ fn stream_tunnel_output<R: Read + Send + 'static>(
     });
 }
 
-fn wait_for_port(port: u16, child: &mut ManagedChild, timeout: Duration) -> Result<(), String> {
+fn wait_for_port(
+    port: u16,
+    child: &mut ManagedChild,
+    timeout: Duration,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
+        if cancelled.load(Ordering::Relaxed) {
+            return Err("Workspace startup was cancelled.".into());
+        }
         if port_is_listening(port) {
             return Ok(());
         }
@@ -667,16 +733,18 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let profile =
             WorkspaceProfile::new(temporary.path().to_string_lossy().into_owned(), 28766).unwrap();
-        let mut manager = RuntimeManager::new();
+        let manager = Arc::new(Mutex::new(RuntimeManager::new()));
         let cancelled = Arc::new(AtomicBool::new(false));
         manager
+            .lock()
+            .unwrap()
             .preparing
             .insert(profile.id.clone(), Arc::clone(&cancelled));
-        assert_eq!(manager.status(&profile).state, "starting");
-        assert!(manager.status(&profile).is_active());
-        manager.stop(&profile);
+        assert_eq!(manager.lock().unwrap().status(&profile).state, "starting");
+        assert!(manager.lock().unwrap().status(&profile).is_active());
+        stop_workspace(&manager, &profile).unwrap();
         assert!(cancelled.load(Ordering::Relaxed));
-        assert_eq!(manager.status(&profile).state, "stopped");
+        assert_eq!(manager.lock().unwrap().status(&profile).state, "stopped");
     }
 
     #[test]

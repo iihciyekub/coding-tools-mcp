@@ -33,7 +33,8 @@ export function publicEndpoint(profile: WorkspaceProfile, resolvedUrl = ""): str
 
 export function workspaceHue(position: number): number {
   const ordinal = Math.max(1, Math.trunc(position));
-  return (210 + (ordinal - 1) * 137) % 360;
+  const calmHues = [210, 170, 250, 190, 275, 225, 160, 265, 200, 240, 180, 285];
+  return calmHues[(ordinal - 1) % calmHues.length];
 }
 
 export function frpSnippet(profile: WorkspaceProfile): string {

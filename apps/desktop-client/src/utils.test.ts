@@ -34,9 +34,10 @@ describe("desktop URL helpers", () => {
     expect(recommendedPublicUrl("Tax Review", "example.com")).toBe("https://tax-review-mcp.example.com");
   });
 
-  it("gives neighboring workspaces distinct background hues", () => {
+  it("gives neighboring workspaces distinct non-warning background hues", () => {
     const hues = Array.from({ length: 12 }, (_, index) => workspaceHue(index + 1));
     expect(new Set(hues).size).toBe(hues.length);
+    expect(hues.every((hue) => hue >= 150 && hue <= 290)).toBe(true);
     expect(workspaceHue(1)).toBe(210);
   });
 });

@@ -8,10 +8,11 @@ import type { DependencyStatus, LogBundle, PermissionMode, RuntimeStatus, Worksp
 import { publicEndpoint, workspaceHue } from "./utils";
 
 const PANEL_WIDTH = 360;
-const APP_VERSION = "0.3.28";
+const APP_VERSION = "0.3.30";
 type Page = "home" | "workspaces" | "environment" | "logs" | "settings" | "workflow" | "more";
 type CopyAction = "server-name" | "server-url" | "credential" | "logs";
 type ConfirmAction = { kind: "stop"; profileId: string } | { kind: "stop-all" } | { kind: "quit" } | null;
+type WorkspaceAction = "starting" | "stopping";
 
 const stoppedStatus = (port: number): RuntimeStatus => ({ state: "stopped", pid: null, server_name: "", local_message: "Not running", public_message: "Unknown", public_url: "", local_url: `http://127.0.0.1:${port}/mcp` });
 const quickTunnelProfile = (profile: WorkspaceProfile): WorkspaceProfile => ({ ...profile, tunnel: { ...profile.tunnel, type: "cloudflare", cloudflare_mode: "quick", domain: "", public_url: "", frp_server: "", frp_subdomain: "", cloudflare_token: "" }, auth: { ...profile.auth, type: "oauth" } });
@@ -25,9 +26,13 @@ function App() {
   const [backTarget, setBackTarget] = useState<Page>("home");
   const [profiles, setProfiles] = useState<WorkspaceProfile[]>([]);
   const [statuses, setStatuses] = useState<Record<string, RuntimeStatus>>({});
+  const [workspaceActions, setWorkspaceActions] = useState<Record<string, WorkspaceAction>>({});
+  const workspaceActionsRef = useRef<Record<string, WorkspaceAction>>({});
   const [workflow, setWorkflow] = useState<Awaited<ReturnType<typeof api.snapshot>>["workflow"]>({});
   const [dependencies, setDependencies] = useState<DependencyStatus>({ uv: false, cloudflared: false, runtime_ready: false, runtime_version: null });
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selectedIdRef = useRef<string | null>(null);
+  const refreshSequenceRef = useRef(0);
   const [busy, setBusy] = useState<string | null>(null);
   const [copied, setCopied] = useState<CopyAction | null>(null);
   const [revealCredential, setRevealCredential] = useState(false);
@@ -37,26 +42,35 @@ function App() {
   const [installLog, setInstallLog] = useState<string[]>([]);
   const [error, setError] = useState("");
 
+  const workspaceStatus = (profile: WorkspaceProfile) => {
+    const current = statuses[profile.id] ?? stoppedStatus(profile.runtime.local_port);
+    const action = workspaceActions[profile.id];
+    return action ? { ...current, state: action } : current;
+  };
   const selected = profiles.find((profile) => profile.id === selectedId) ?? null;
   const selectedPosition = selected ? profiles.findIndex((profile) => profile.id === selected.id) + 1 : 0;
   const selectedSubtitle = selected
-    ? [profiles.length > 1 ? `${t("Workspace")} ${selectedPosition}/${profiles.length}` : "", shortPath(selected.path)].filter(Boolean).join(" · ")
+    ? shortPath(selected.path)
     : t("Add a workspace to begin.");
-  const status = selected ? statuses[selected.id] ?? stoppedStatus(selected.runtime.local_port) : null;
-  const running = Boolean(status?.pid) || status?.state === "starting";
+  const status = selected ? workspaceStatus(selected) : null;
+  const starting = status?.state === "starting";
+  const stopping = status?.state === "stopping";
+  const running = Boolean(status?.pid) || starting || stopping;
   const serverUrl = selected && status?.state === "running" ? publicEndpoint(selected, status.public_url) : "";
   const credentialLabel = selected?.auth.type === "bearer" ? "Bearer Token" : t("OAuth authorization passcode");
   const credential = selected?.auth.type === "bearer" ? selected.auth.bearer_token : selected?.auth.oauth_password ?? "";
   const selectedWorkflow = selected ? workflow[selected.id] : undefined;
   const environmentReady = dependencies.runtime_ready && dependencies.cloudflared;
   const activeWorkspaceCount = profiles.reduce((count, profile) => {
-    const profileStatus = statuses[profile.id] ?? stoppedStatus(profile.runtime.local_port);
-    return count + (Boolean(profileStatus.pid) || profileStatus.state === "starting" ? 1 : 0);
+    const profileStatus = workspaceStatus(profile);
+    return count + (Boolean(profileStatus.pid) || profileStatus.state === "starting" || profileStatus.state === "stopping" ? 1 : 0);
   }, 0);
 
   const refresh = useCallback(async (keepSelection = true) => {
+    const sequence = ++refreshSequenceRef.current;
     try {
       const snapshot = await api.snapshot();
+      if (sequence !== refreshSequenceRef.current) return;
       setLanguage(snapshot.language);
       setProfiles(snapshot.profiles);
       setStatuses(snapshot.statuses);
@@ -68,7 +82,7 @@ function App() {
   }, []);
 
   useEffect(() => { void refresh(false); const timer = window.setInterval(() => void refresh(), 2500); return () => window.clearInterval(timer); }, [refresh]);
-  useEffect(() => { setRevealCredential(false); setConfirmDelete(false); setConfirmAction(null); setRuntimeLogs(null); }, [selectedId]);
+  useEffect(() => { selectedIdRef.current = selectedId; setRevealCredential(false); setConfirmDelete(false); setConfirmAction(null); setRuntimeLogs(null); }, [selectedId]);
   useEffect(() => { if (!confirmAction) return; const timer = window.setTimeout(() => setConfirmAction(null), 4000); return () => window.clearTimeout(timer); }, [confirmAction]);
   useEffect(() => {
     const panel = panelRef.current;
@@ -98,21 +112,44 @@ function App() {
       const profile = await api.createProfile(chosen); await refresh(false); setSelectedId(profile.id); setPage("home");
     } catch (reason) { setError(String(reason)); }
   };
-  const toggleWorkspace = async () => {
-    if (!selected || !status) return; setBusy("workspace"); setError("");
+  const setWorkspaceAction = (profileId: string, action: WorkspaceAction | null, expected?: WorkspaceAction) => {
+    if (expected && workspaceActionsRef.current[profileId] !== expected) return;
+    const next = { ...workspaceActionsRef.current };
+    if (action) next[profileId] = action;
+    else delete next[profileId];
+    workspaceActionsRef.current = next;
+    setWorkspaceActions(next);
+  };
+  const startWorkspace = async (profile: WorkspaceProfile) => {
+    setWorkspaceAction(profile.id, "starting"); setError("");
     try {
-      let next: RuntimeStatus;
-      if (running) {
-        if (confirmAction?.kind !== "stop" || confirmAction.profileId !== selected.id) { setConfirmAction({ kind: "stop", profileId: selected.id }); return; }
-        setConfirmAction(null);
-        next = await api.stopProfile(selected.id);
-      }
-      else {
-        const saved = await api.saveProfile(quickTunnelProfile(selected)); setProfiles((current) => current.map((profile) => profile.id === saved.id ? saved : profile));
-        next = await api.startProfile(saved.id); const endpoint = next.state === "running" ? publicEndpoint(saved, next.public_url) : ""; if (endpoint) await copy(endpoint, "server-url");
-      }
-      setStatuses((current) => ({ ...current, [selected.id]: next }));
-    } catch (reason) { if (String(reason) !== "Workspace startup was cancelled.") setError(String(reason)); } finally { setBusy(null); }
+      const saved = await api.saveProfile(quickTunnelProfile(profile));
+      setProfiles((current) => current.map((item) => item.id === saved.id ? saved : item));
+      if (workspaceActionsRef.current[profile.id] !== "starting") return;
+      const next = await api.startProfile(saved.id);
+      setStatuses((current) => ({ ...current, [profile.id]: next }));
+      const endpoint = next.state === "running" ? publicEndpoint(saved, next.public_url) : "";
+      if (endpoint) await copy(endpoint, "server-url");
+    } catch (reason) {
+      if (String(reason) !== "Workspace startup was cancelled.") setError(String(reason));
+    } finally { setWorkspaceAction(profile.id, null, "starting"); }
+  };
+  const stopWorkspace = async (profileId: string) => {
+    setWorkspaceAction(profileId, "stopping"); setError("");
+    try {
+      const next = await api.stopProfile(profileId);
+      setStatuses((current) => ({ ...current, [profileId]: next }));
+    } catch (reason) { setError(String(reason)); }
+    finally { setWorkspaceAction(profileId, null, "stopping"); }
+  };
+  const toggleWorkspace = () => {
+    if (!selected || !status || stopping) return;
+    if (starting) { setConfirmAction(null); void stopWorkspace(selected.id); return; }
+    if (running) {
+      if (confirmAction?.kind !== "stop" || confirmAction.profileId !== selected.id) { setConfirmAction({ kind: "stop", profileId: selected.id }); return; }
+      setConfirmAction(null); void stopWorkspace(selected.id); return;
+    }
+    void startWorkspace(selected);
   };
   const runEnvironmentAction = async (label: string, action: () => Promise<string>) => {
     setBusy(label); setError("");
@@ -121,8 +158,8 @@ function App() {
     finally { setBusy(null); }
   };
   const loadLogs = async () => {
-    if (!selected) return; setBusy("logs");
-    try { setRuntimeLogs(await api.logs(selected.id)); setPage("logs"); setError(""); } catch (reason) { setError(String(reason)); } finally { setBusy(null); }
+    if (!selected) return; const profileId = selected.id; setBusy("logs");
+    try { const logs = await api.logs(profileId); if (selectedIdRef.current !== profileId) return; setRuntimeLogs(logs); setPage("logs"); setError(""); } catch (reason) { setError(String(reason)); } finally { setBusy(null); }
   };
   const savePermission = async (permissionMode: PermissionMode) => {
     if (!selected || running) return; setBusy("permission");
@@ -171,14 +208,14 @@ function App() {
     {page === "home" && <>
       <section className={`workspace-hero ${selected ? "tinted" : ""}`} style={selected ? { "--workspace-hue": workspaceHue(selectedPosition) } as React.CSSProperties : undefined}>
         <div className="workspace-picker-row"><button className="workspace-picker" type="button" disabled={!profiles.length} onClick={() => setPage("workspaces")}><FolderIcon /><span><strong>{selected?.name ?? t("No workspace")}</strong><small>{selectedSubtitle}</small></span>{profiles.length > 1 && <SwitchIcon />}</button><button className="icon-button" type="button" aria-label={t("Add workspace")} onClick={() => void addWorkspace()}><PlusIcon /></button></div>
-        {selected && <div className="status-row"><span className="status-copy"><i className={`status-dot ${status?.state ?? "stopped"}`} />{status?.state === "starting" ? t("Preparing runtime dependencies…") : status?.state === "running" ? t("Running · public tunnel ready") : status?.state === "error" ? t("Connection error") : t("Workspace stopped")}</span><button className={`power-button ${running ? "danger" : ""} ${confirmAction?.kind === "stop" && confirmAction.profileId === selected.id ? "confirm" : ""}`} type="button" disabled={busy === "workspace"} onClick={() => void toggleWorkspace()}>{busy === "workspace" ? t("Working…") : confirmAction?.kind === "stop" && confirmAction.profileId === selected.id ? t("Click again to stop") : t(running ? "Stop" : "Start")}</button></div>}
+        {selected && <div className="status-row"><span className="status-copy"><i className={`status-dot ${status?.state ?? "stopped"}`} />{profiles.length > 1 && <b className="status-index">[{selectedPosition}/{profiles.length}]</b>}{starting ? t("Preparing runtime dependencies…") : stopping ? t("Stopping…") : status?.state === "running" ? t("Running · public tunnel ready") : status?.state === "error" ? t("Connection error") : t("Workspace stopped")}</span><button className={`power-button ${running && !starting ? "danger" : ""} ${confirmAction?.kind === "stop" && confirmAction.profileId === selected.id ? "confirm" : ""}`} type="button" disabled={stopping} onClick={toggleWorkspace}>{starting || stopping ? <SpinnerIcon /> : null}{stopping ? t("Stopping…") : starting ? t("Cancel startup") : confirmAction?.kind === "stop" && confirmAction.profileId === selected.id ? t("Click again to stop") : t(running ? "Stop" : "Start")}</button></div>}
       </section>
       {selected && <section className="connection-block"><ValueButton label={t("MCP name")} copyLabel={t("Copy")} value={status?.server_name || t("Start the workspace to create an MCP name")} disabled={!status?.server_name} copied={copied === "server-name"} onClick={() => void copy(status?.server_name ?? "", "server-name")} /><ValueButton label="Server URL" copyLabel={t("Copy")} value={serverUrl || t("Start the workspace to create a public URL")} disabled={!serverUrl} copied={copied === "server-url"} onClick={() => void copy(serverUrl, "server-url")} /><ValueButton label={credentialLabel} copyLabel={t("Copy")} value={revealCredential ? credential : "••••••••••••"} disabled={!credential} copied={copied === "credential"} onClick={() => void copy(credential, "credential")} after={<button className="reveal-button" type="button" aria-label={t(revealCredential ? "Hide authorization passcode" : "Show authorization passcode")} onClick={(event) => { event.stopPropagation(); setRevealCredential((current) => !current); }}>{revealCredential ? <EyeOffIcon /> : <EyeIcon />}</button>} /></section>}
       <nav className="menu-list" aria-label={t("Manage")}><MenuRow icon={<PackageIcon />} label={t("Environment & setup")} detail={environmentReady ? t("Ready") : t("Setup needed")} onClick={() => setPage("environment")} /><MenuRow icon={<LogIcon />} label={t("Runtime logs")} disabled={!selected || busy === "logs"} onClick={() => { setBackTarget("home"); void loadLogs(); }} /><MenuRow icon={<MoreIcon />} label={t("More")} onClick={() => setPage("more")} /></nav>
       <footer className="panel-footer"><button type="button" disabled={!selected} onClick={() => openSubpage("settings", "home")}><ShieldIcon /><span>{selected?.runtime.permission_mode === "host" ? t("Full Access") : t("Standard access")}{selected?.runtime.file_access_scope === "home" ? ` · ${t("Home")}` : ""}</span></button><button className={`footer-quit-button ${confirmAction?.kind === "quit" ? "confirm" : ""}`} type="button" onClick={() => void quitApp()}><PowerIcon /><span>{confirmAction?.kind === "quit" ? t("Click again to quit") : t("Quit Coding Tools MCP")}</span></button></footer>
     </>}
 
-    {page === "workspaces" && <section className="subpage-body"><div className="workspace-list">{profiles.map((profile, index) => { const profileStatus = statuses[profile.id] ?? stoppedStatus(profile.runtime.local_port); return <button style={{ "--workspace-hue": workspaceHue(index + 1) } as React.CSSProperties} className={`workspace-choice ${profile.id === selectedId ? "selected" : ""}`} type="button" key={profile.id} onClick={() => { setSelectedId(profile.id); setPage("home"); }}><i className={`status-dot ${profileStatus.state}`} /><span><strong>{profile.name}</strong><small>{shortPath(profile.path)}</small></span>{profile.id === selectedId && <CheckIcon />}</button>; })}</div><button className="primary-button" type="button" onClick={() => void addWorkspace()}><PlusIcon />{t("Add workspace")}</button><button className={`stop-all-button ${confirmAction?.kind === "stop-all" ? "confirm" : ""}`} type="button" disabled={!activeWorkspaceCount || busy === "stop-all"} onClick={() => void stopAllWorkspaces()}>{busy === "stop-all" ? <SpinnerIcon /> : <StopIcon />}{busy === "stop-all" ? t("Stopping all…") : confirmAction?.kind === "stop-all" ? t("Click again to stop all") : t("Stop all")}{activeWorkspaceCount > 1 && busy !== "stop-all" && confirmAction?.kind !== "stop-all" ? <small>{activeWorkspaceCount}</small> : null}</button></section>}
+    {page === "workspaces" && <section className="subpage-body"><div className="workspace-list">{profiles.map((profile, index) => { const profileStatus = workspaceStatus(profile); return <button style={{ "--workspace-hue": workspaceHue(index + 1) } as React.CSSProperties} className={`workspace-choice ${profile.id === selectedId ? "selected" : ""}`} type="button" key={profile.id} onClick={() => { setSelectedId(profile.id); setPage("home"); }}><i className={`status-dot ${profileStatus.state}`} /><span><strong>{profile.name}</strong><small>{shortPath(profile.path)}</small></span>{profile.id === selectedId && <CheckIcon />}</button>; })}</div><button className="primary-button" type="button" onClick={() => void addWorkspace()}><PlusIcon />{t("Add workspace")}</button><button className="secondary-button workspace-action-button" type="button" disabled={!selected} onClick={() => openSubpage("settings", "workspaces")}><SettingsIcon />{t("Workspace settings")}</button><button className={`stop-all-button ${confirmAction?.kind === "stop-all" ? "confirm" : ""}`} type="button" disabled={!activeWorkspaceCount || busy === "stop-all"} onClick={() => void stopAllWorkspaces()}>{busy === "stop-all" ? <SpinnerIcon /> : <StopIcon />}{busy === "stop-all" ? t("Stopping all…") : confirmAction?.kind === "stop-all" ? t("Click again to stop all") : t("Stop all")}{activeWorkspaceCount > 1 && busy !== "stop-all" && confirmAction?.kind !== "stop-all" ? <small>{activeWorkspaceCount}</small> : null}</button></section>}
 
     {page === "environment" && <section className="subpage-body environment-page">
       <div className="environment-summary"><span><strong>{environmentReady ? t("Runtime environment is ready") : t("Runtime environment needs setup")}</strong><small>{t("Installed in the app's private directory")}</small></span><small>{navigator.platform.includes("Mac") ? "macOS" : navigator.platform}</small></div>
@@ -197,7 +234,7 @@ function App() {
   </main>;
 }
 
-function Header() { return <header className="panel-header"><span className="brand-mark"><CloudIcon /></span><strong>Coding Tools MCP</strong><small>{APP_VERSION}</small></header>; }
+function Header() { return <header className="panel-header"><span className="brand-mark"><AppMarkIcon /></span><strong>Coding Tools MCP</strong><small>{APP_VERSION}</small></header>; }
 function middleEllipsis(value: string, limit = 30) {
   if (value.length <= limit) return value;
   const visible = limit - 1;
@@ -212,9 +249,9 @@ function LogSection({ title, text }: { title: string; text: string }) { return <
 function ActivityRow({ label, title, detail }: { label: string; title: string; detail: string }) { return <div className="activity-row"><small>{label}</small><span><strong>{title}</strong><small>{detail}</small></span></div>; }
 
 const Icon = ({ children, className = "" }: { children: React.ReactNode; className?: string }) => <svg className={`icon ${className}`} viewBox="0 0 24 24" aria-hidden="true">{children}</svg>;
+const AppMarkIcon = () => <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M12.252 12.331H7.749v1.002c0 1.014.821 1.835 1.835 1.835h.833a1.835 1.835 0 0 0 1.835-1.835zm-11.25-1.498a4.83 4.83 0 0 1 3.784-4.717A5.666 5.666 0 0 1 15.63 7.717 4 4 0 0 1 17 15.13a.665.665 0 1 1-.666-1.15A2.669 2.669 0 0 0 15 8.999a.665.665 0 0 1-.665-.666 4.335 4.335 0 0 0-8.313-1.725L5.9 6.92a.67.67 0 0 1-.448.423l-.092.02a3.502 3.502 0 0 0-1.783 6.147l.156.124.099.092a.665.665 0 0 1-.782 1.04l-.116-.068-.215-.171a4.82 4.82 0 0 1-1.717-3.695m12.58 2.5a3.164 3.164 0 0 1-2.917 3.155V17.5a.665.665 0 0 1-1.33 0v-1.012a3.164 3.164 0 0 1-2.916-3.155v-1.667c0-.367.298-.665.665-.665h.585v-1a.665.665 0 0 1 1.33 0v1h2.003v-1a.665.665 0 0 1 1.33 0v1h.585c.367 0 .665.298.665.665z" /></svg>;
 const BackIcon = () => <Icon><path d="m15 18-6-6 6-6" /></Icon>;
 const ChevronIcon = () => <Icon><path d="m9 18 6-6-6-6" /></Icon>;
-const CloudIcon = () => <Icon><path d="M17.5 19H9a7 7 0 1 1 6.7-9h1.8a4.5 4.5 0 1 1 0 9Z" /><path d="M12 13v6m-3-3 3 3 3-3" /></Icon>;
 const FolderIcon = () => <Icon><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" /></Icon>;
 const PlusIcon = () => <Icon><path d="M12 5v14M5 12h14" /></Icon>;
 const SwitchIcon = () => <Icon><path d="m8 7 4-4 4 4M16 17l-4 4-4-4" /></Icon>;
@@ -234,5 +271,6 @@ const GithubIcon = () => <Icon><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3.3-.4 6.8
 const PowerIcon = () => <Icon><path d="M12 2v10M18.4 6.6a9 9 0 1 1-12.8 0" /></Icon>;
 const StopIcon = () => <Icon><rect x="6" y="6" width="12" height="12" rx="2" /></Icon>;
 const ActivityIcon = () => <Icon><path d="M3 12h4l3-8 4 16 3-8h4" /></Icon>;
+const SettingsIcon = () => <Icon><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z" /></Icon>;
 
 export default App;

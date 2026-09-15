@@ -7,8 +7,8 @@ mod workflow;
 use models::{LogBundle, RuntimeStatus, WorkspaceProfile};
 use resource_installer::managed_version;
 use runtime::{
-    prepare_runtime as prepare_runtime_environment, read_logs, start_workspace, DependencyStatus,
-    RuntimeManager,
+    prepare_runtime as prepare_runtime_environment, read_logs, start_workspace,
+    stop_all_workspaces, stop_workspace, DependencyStatus, RuntimeManager,
 };
 use serde::Serialize;
 use std::collections::HashMap;
@@ -219,10 +219,7 @@ async fn stop_profile(
             .map_err(|_| "Profile store is unavailable.")?
             .get(&profile_id)
             .ok_or("Workspace profile was not found.")?;
-        Ok(runtime
-            .lock()
-            .map_err(|_| "Runtime manager is unavailable.")?
-            .stop(&profile))
+        stop_workspace(&runtime, &profile)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -239,10 +236,10 @@ async fn stop_all_profiles(
         .profiles();
     let runtime = Arc::clone(&state.runtime);
     tauri::async_runtime::spawn_blocking(move || {
+        stop_all_workspaces(&runtime)?;
         let mut runtime = runtime
             .lock()
             .map_err(|_| "Runtime manager is unavailable.")?;
-        runtime.stop_all();
         Ok(profiles
             .iter()
             .map(|profile| (profile.id.clone(), runtime.status(profile)))
@@ -491,6 +488,7 @@ fn draw_polyline(rgba: &mut [u8], size: u32, points: &[(f32, f32)], thickness: f
 
 fn tray_template_icon() -> Image<'static> {
     const SIZE: u32 = 32;
+    const STROKE: f32 = 3.6;
     let mut rgba = vec![0; (SIZE * SIZE * 4) as usize];
     let cloud = [
         (11.0, 20.0),
@@ -511,7 +509,7 @@ fn tray_template_icon() -> Image<'static> {
         (25.5, 20.0),
         (21.0, 20.0),
     ];
-    draw_polyline(&mut rgba, SIZE, &cloud, 2.8);
+    draw_polyline(&mut rgba, SIZE, &cloud, STROKE);
     draw_polyline(
         &mut rgba,
         SIZE,
@@ -523,12 +521,12 @@ fn tray_template_icon() -> Image<'static> {
             (20.0, 22.0),
             (20.0, 19.0),
         ],
-        2.8,
+        STROKE,
     );
-    draw_stroke(&mut rgba, SIZE, (12.0, 19.0), (20.0, 19.0), 2.8);
-    draw_stroke(&mut rgba, SIZE, (14.0, 15.5), (14.0, 19.0), 2.8);
-    draw_stroke(&mut rgba, SIZE, (18.0, 15.5), (18.0, 19.0), 2.8);
-    draw_stroke(&mut rgba, SIZE, (16.0, 24.0), (16.0, 28.0), 2.8);
+    draw_stroke(&mut rgba, SIZE, (12.0, 19.0), (20.0, 19.0), STROKE);
+    draw_stroke(&mut rgba, SIZE, (14.0, 15.5), (14.0, 19.0), STROKE);
+    draw_stroke(&mut rgba, SIZE, (18.0, 15.5), (18.0, 19.0), STROKE);
+    draw_stroke(&mut rgba, SIZE, (16.0, 24.0), (16.0, 28.0), STROKE);
     Image::new_owned(rgba, SIZE, SIZE)
 }
 
@@ -1261,11 +1259,7 @@ fn stop_workspace_from_menu(app: AppHandle, profile_id: String) {
                 .map_err(|_| "Profile store is unavailable.".to_string())?
                 .get(&profile_id)
                 .ok_or_else(|| "Workspace profile was not found.".to_string())?;
-            state
-                .runtime
-                .lock()
-                .map_err(|_| "Runtime manager is unavailable.".to_string())?
-                .stop(&profile);
+            stop_workspace(&state.runtime, &profile)?;
             Ok::<(), String>(())
         })();
         if let Err(error) = result {
