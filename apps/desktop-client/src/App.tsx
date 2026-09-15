@@ -2,14 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
 import { detectLanguage, translator, type Language } from "./i18n";
 import type { DependencyStatus, LogBundle, PermissionMode, RuntimeStatus, WorkspaceProfile } from "./types";
 import { publicEndpoint } from "./utils";
 
 const PANEL_WIDTH = 360;
-const APP_VERSION = "0.3.23";
+const APP_VERSION = "0.3.25";
 type Page = "home" | "workspaces" | "environment" | "logs" | "settings" | "workflow" | "more";
 type CopyAction = "server-url" | "credential" | "logs";
 
@@ -37,6 +36,10 @@ function App() {
   const [error, setError] = useState("");
 
   const selected = profiles.find((profile) => profile.id === selectedId) ?? null;
+  const selectedPosition = selected ? profiles.findIndex((profile) => profile.id === selected.id) + 1 : 0;
+  const selectedSubtitle = selected
+    ? [profiles.length > 1 ? `${t("Workspace")} ${selectedPosition}/${profiles.length}` : "", shortPath(selected.path)].filter(Boolean).join(" · ")
+    : t("Add a workspace to begin.");
   const status = selected ? statuses[selected.id] ?? stoppedStatus(selected.runtime.local_port) : null;
   const running = Boolean(status?.pid) || status?.state === "starting";
   const serverUrl = selected && status?.state === "running" ? publicEndpoint(selected, status.public_url) : "";
@@ -80,9 +83,11 @@ function App() {
   const addWorkspace = async () => {
     const appWindow = getCurrentWindow(); setError("");
     try {
-      let chosen: string | string[] | null;
-      try { chosen = await open({ directory: true, multiple: false, title: t("Choose folder") }); } finally { await appWindow.show(); await appWindow.setFocus(); }
-      if (typeof chosen !== "string") return;
+      await appWindow.hide();
+      let chosen: string | null;
+      try { chosen = await api.pickWorkspaceFolder(); }
+      finally { await appWindow.show(); await appWindow.setFocus(); }
+      if (!chosen) return;
       const profile = await api.createProfile(chosen); await refresh(false); setSelectedId(profile.id); setPage("home");
     } catch (reason) { setError(String(reason)); }
   };
@@ -140,12 +145,12 @@ function App() {
 
     {page === "home" && <>
       <section className="workspace-hero">
-        <div className="workspace-picker-row"><button className="workspace-picker" type="button" disabled={!profiles.length} onClick={() => setPage("workspaces")}><FolderIcon /><span><strong>{selected?.name ?? t("No workspace")}</strong><small>{selected ? shortPath(selected.path) : t("Add a workspace to begin.")}</small></span>{profiles.length > 1 && <SwitchIcon />}</button><button className="icon-button" type="button" aria-label={t("Add workspace")} onClick={() => void addWorkspace()}><PlusIcon /></button></div>
+        <div className="workspace-picker-row"><button className="workspace-picker" type="button" disabled={!profiles.length} onClick={() => setPage("workspaces")}><FolderIcon /><span><strong>{selected?.name ?? t("No workspace")}</strong><small>{selectedSubtitle}</small></span>{profiles.length > 1 && <SwitchIcon />}</button><button className="icon-button" type="button" aria-label={t("Add workspace")} onClick={() => void addWorkspace()}><PlusIcon /></button></div>
         {selected && <div className="status-row"><span className="status-copy"><i className={`status-dot ${status?.state ?? "stopped"}`} />{status?.state === "starting" ? t("Preparing runtime dependencies…") : status?.state === "running" ? t("Running · public tunnel ready") : status?.state === "error" ? t("Connection error") : t("Workspace stopped")}</span><button className={`power-button ${running ? "danger" : ""}`} type="button" disabled={busy === "workspace"} onClick={() => void toggleWorkspace()}>{busy === "workspace" ? t("Working…") : t(running ? "Stop" : "Start")}</button></div>}
       </section>
       {selected && <section className="connection-block"><ValueButton label="Server URL" copyLabel={t("Copy")} value={serverUrl || t("Start the workspace to create a public URL")} disabled={!serverUrl} copied={copied === "server-url"} onClick={() => void copy(serverUrl, "server-url")} /><ValueButton label={credentialLabel} copyLabel={t("Copy")} value={revealCredential ? credential : "••••••••••••"} disabled={!credential} copied={copied === "credential"} onClick={() => void copy(credential, "credential")} after={<button className="reveal-button" type="button" aria-label={t(revealCredential ? "Hide authorization passcode" : "Show authorization passcode")} onClick={(event) => { event.stopPropagation(); setRevealCredential((current) => !current); }}>{revealCredential ? <EyeOffIcon /> : <EyeIcon />}</button>} /></section>}
       <nav className="menu-list" aria-label={t("Manage")}><MenuRow icon={<PackageIcon />} label={t("Environment & setup")} detail={environmentReady ? t("Ready") : t("Setup needed")} onClick={() => setPage("environment")} /><MenuRow icon={<LogIcon />} label={t("Runtime logs")} disabled={!selected || busy === "logs"} onClick={() => { setBackTarget("home"); void loadLogs(); }} /><MenuRow icon={<MoreIcon />} label={t("More")} onClick={() => setPage("more")} /></nav>
-      <footer className="panel-footer"><button type="button" disabled={!selected} onClick={() => openSubpage("settings", "home")}><ShieldIcon /><span>{selected?.runtime.permission_mode === "host" ? t("Full Access") : t("Standard access")}</span></button><button type="button" onClick={() => void refresh()}><RefreshIcon /><span>{t("Refresh")}</span></button></footer>
+      <footer className="panel-footer"><button type="button" disabled={!selected} onClick={() => openSubpage("settings", "home")}><ShieldIcon /><span>{selected?.runtime.permission_mode === "host" ? t("Full Access") : t("Standard access")}</span></button><button className="footer-quit-button" type="button" onClick={() => void api.quit()}><PowerIcon /><span>{t("Quit Coding Tools MCP")}</span></button></footer>
     </>}
 
     {page === "workspaces" && <section className="subpage-body"><div className="workspace-list">{profiles.map((profile) => { const profileStatus = statuses[profile.id] ?? stoppedStatus(profile.runtime.local_port); return <button className={`workspace-choice ${profile.id === selectedId ? "selected" : ""}`} type="button" key={profile.id} onClick={() => { setSelectedId(profile.id); setPage("home"); }}><i className={`status-dot ${profileStatus.state}`} /><span><strong>{profile.name}</strong><small>{shortPath(profile.path)}</small></span>{profile.id === selectedId && <CheckIcon />}</button>; })}</div><button className="primary-button" type="button" onClick={() => void addWorkspace()}><PlusIcon />{t("Add workspace")}</button></section>}

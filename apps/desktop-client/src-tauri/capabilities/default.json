@@ -9,7 +9,6 @@
     "core:window:allow-set-size",
     "core:window:allow-show",
     "core:window:allow-hide",
-    "dialog:allow-open",
     "clipboard-manager:allow-write-text"
   ]
 }

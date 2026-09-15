@@ -108,6 +108,8 @@ button:focus-visible, select:focus-visible { outline: 2px solid var(--focus); ou
 .panel-footer button { display: flex; min-height: 30px; align-items: center; gap: 5px; padding: 0 5px; border: 0; border-radius: 7px; background: transparent; cursor: pointer; font-size: 11px; }
 .panel-footer button:hover { background: var(--hover); }
 .panel-footer .icon { width: 14px; }
+.panel-footer .footer-quit-button { color: var(--danger); }
+.panel-footer .footer-quit-button:hover { background: var(--danger-bg); }
 
 .subpage-body { padding: 10px 13px 12px; }
 .workspace-list { max-height: 420px; overflow-y: auto; }

@@ -103,7 +103,7 @@ after preparation. Old versioned environments are retained for rollback/reuse;
 they are not included in app updates.
 
 For Cloudflare Quick Tunnel profiles, a missing `cloudflared` is handled the same
-way on macOS: Desktop 0.3.23 downloads the pinned, SHA-256-verified release into
+way on macOS: Desktop 0.3.25 downloads the pinned, SHA-256-verified release into
 the app-owned tools directory. The menu-bar **Environment & setup** page focuses on
 the coding runtime itself: MCP Runtime/core version, uv, and cloudflared readiness,
 plus prepare/repair actions. Homebrew, `/usr/local`, and system Python are not

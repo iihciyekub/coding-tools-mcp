@@ -1,5 +1,19 @@
 # Changelog
 
+## Desktop 0.3.25
+
+- Show the selected workspace position, such as `Workspace 1/3`, alongside its
+  path when multiple workspace profiles exist.
+- Open workspace selection as an independent, movable system dialog instead of
+  attaching it to the fixed menu-bar panel.
+
+## Desktop 0.3.24
+
+- Keep the compact panel visible while its native folder picker is open, restoring
+  the ability to add more workspace profiles.
+- Replace the home page's bottom-right refresh action with Quit; status refresh
+  remains available from More and Environment & setup.
+
 ## Desktop 0.3.23
 
 - Replace the primary native tray menu with a compact, fixed menu-bar panel for

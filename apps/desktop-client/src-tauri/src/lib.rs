@@ -267,6 +267,34 @@ fn set_language(
 }
 
 #[tauri::command]
+async fn pick_workspace_folder(
+    app: AppHandle,
+    state: tauri::State<'_, DesktopState>,
+) -> Result<Option<String>, String> {
+    let language = state
+        .store
+        .lock()
+        .map_err(|_| "Profile store is unavailable.".to_string())?
+        .language()
+        .to_string();
+    app.dialog()
+        .file()
+        .set_title(menu_text(
+            &language,
+            "Choose workspace folder",
+            "选择工作区文件夹",
+        ))
+        .blocking_pick_folder()
+        .map(|folder| {
+            folder
+                .into_path()
+                .map(|path| path.to_string_lossy().to_string())
+                .map_err(|error| error.to_string())
+        })
+        .transpose()
+}
+
+#[tauri::command]
 fn quit_app(app: AppHandle) {
     app.exit(0);
 }
@@ -1690,6 +1718,7 @@ pub fn run() {
             profile_logs,
             open_logs,
             set_language,
+            pick_workspace_folder,
             open_resource,
             install_resource,
             repair_dependencies,

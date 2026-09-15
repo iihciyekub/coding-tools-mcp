@@ -1,7 +1,7 @@
 {
   "name": "coding-tools-mcp-desktop",
   "private": true,
-  "version": "0.3.23",
+  "version": "0.3.25",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -16,7 +16,6 @@
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-clipboard-manager": "^2.0.0",
-    "@tauri-apps/plugin-dialog": "^2.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
