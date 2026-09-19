@@ -20,6 +20,9 @@ fn default_permission_mode() -> String {
 fn default_file_access_scope() -> String {
     "workspace".into()
 }
+fn default_allowed_paths() -> Vec<String> {
+    Vec::new()
+}
 fn default_port() -> u16 {
     28766
 }
@@ -108,6 +111,8 @@ pub struct RuntimeConfig {
     pub permission_mode: String,
     #[serde(default = "default_file_access_scope")]
     pub file_access_scope: String,
+    #[serde(default = "default_allowed_paths")]
+    pub allowed_paths: Vec<String>,
 }
 
 impl Default for RuntimeConfig {
@@ -116,6 +121,7 @@ impl Default for RuntimeConfig {
             local_port: default_port(),
             permission_mode: default_permission_mode(),
             file_access_scope: default_file_access_scope(),
+            allowed_paths: default_allowed_paths(),
         }
     }
 }
@@ -181,6 +187,22 @@ impl WorkspaceProfile {
             "workspace" | "home"
         ) {
             return Err("Unknown file access scope.".into());
+        }
+        for allowed in &self.runtime.allowed_paths {
+            let path = Path::new(allowed.trim());
+            if !path.is_absolute() {
+                return Err(format!(
+                    "Allowed folder must be an absolute path: {allowed}"
+                ));
+            }
+            if !path.is_dir() {
+                return Err(format!("Allowed folder does not exist: {allowed}"));
+            }
+            if path.parent().is_none() {
+                return Err(format!(
+                    "Filesystem root cannot be used as an allowed folder: {allowed}"
+                ));
+            }
         }
         if !matches!(self.auth.r#type.as_str(), "oauth" | "bearer") {
             return Err("Unknown authentication type.".into());

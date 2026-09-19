@@ -175,6 +175,17 @@ button:focus-visible, select:focus-visible { outline: 2px solid var(--focus); ou
 .segmented-control button.selected { background: var(--raised); box-shadow: 0 1px 4px rgba(0, 0, 0, .12); }
 .segmented-control button.selected.danger { color: var(--danger); }
 .scope-copy { margin-top: 14px; }
+.allowed-folder-list { margin-top: 8px; border-top: 1px solid var(--line); }
+.allowed-folder-row { display: grid; min-height: 43px; grid-template-columns: minmax(0, 1fr) 30px; gap: 8px; align-items: center; border-bottom: 1px solid var(--line); }
+.allowed-folder-row.fixed { grid-template-columns: minmax(0, 1fr) auto; }
+.allowed-folder-row > span { min-width: 0; }
+.allowed-folder-row small, .allowed-folder-row strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.allowed-folder-row small { color: var(--muted); font-size: 10px; }
+.allowed-folder-row strong { margin-top: 2px; font-size: 11px; font-weight: 550; user-select: text; }
+.allowed-folder-row em { color: var(--muted); font-size: 10px; font-style: normal; }
+.allowed-folder-row button { width: 28px; height: 28px; padding: 0; color: var(--muted); border: 0; border-radius: 6px; background: transparent; cursor: pointer; font-size: 17px; }
+.allowed-folder-row button:hover { color: var(--danger); background: var(--danger-bg); }
+.add-folder-button { width: 100%; margin-top: 8px; }
 .workspace-facts { margin: 12px 0; border-top: 1px solid var(--line); }
 .workspace-facts > span { display: grid; min-height: 42px; grid-template-columns: 72px minmax(0, 1fr); align-items: center; border-bottom: 1px solid var(--line); }
 .workspace-facts small { color: var(--muted); font-size: 12px; }

@@ -11,8 +11,8 @@ use runtime::{
     stop_all_workspaces, stop_workspace, DependencyStatus, RuntimeManager,
 };
 use serde::Serialize;
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -135,9 +135,10 @@ fn create_profile(
 
 #[tauri::command]
 fn save_profile(
-    profile: WorkspaceProfile,
+    mut profile: WorkspaceProfile,
     state: tauri::State<'_, DesktopState>,
 ) -> Result<WorkspaceProfile, String> {
+    normalize_allowed_paths(&mut profile)?;
     if state
         .runtime
         .lock()
@@ -152,6 +153,22 @@ fn save_profile(
         .lock()
         .map_err(|_| "Profile store is unavailable.")?
         .update(profile)
+}
+
+fn normalize_allowed_paths(profile: &mut WorkspaceProfile) -> Result<(), String> {
+    let workspace = std::fs::canonicalize(&profile.path).map_err(|error| error.to_string())?;
+    let mut seen = HashSet::<PathBuf>::new();
+    let mut normalized = Vec::new();
+    for raw in std::mem::take(&mut profile.runtime.allowed_paths) {
+        let path = std::fs::canonicalize(&raw)
+            .map_err(|error| format!("Could not resolve allowed folder {raw}: {error}"))?;
+        if path == workspace || !seen.insert(path.clone()) {
+            continue;
+        }
+        normalized.push(path.to_string_lossy().to_string());
+    }
+    profile.runtime.allowed_paths = normalized;
+    Ok(())
 }
 
 #[tauri::command]
@@ -319,6 +336,34 @@ async fn pick_workspace_folder(
             &language,
             "Choose workspace folder",
             "选择工作区文件夹",
+        ))
+        .blocking_pick_folder()
+        .map(|folder| {
+            folder
+                .into_path()
+                .map(|path| path.to_string_lossy().to_string())
+                .map_err(|error| error.to_string())
+        })
+        .transpose()
+}
+
+#[tauri::command]
+async fn pick_allowed_folder(
+    app: AppHandle,
+    state: tauri::State<'_, DesktopState>,
+) -> Result<Option<String>, String> {
+    let language = state
+        .store
+        .lock()
+        .map_err(|_| "Profile store is unavailable.".to_string())?
+        .language()
+        .to_string();
+    app.dialog()
+        .file()
+        .set_title(menu_text(
+            &language,
+            "Choose allowed folder",
+            "选择允许访问的文件夹",
         ))
         .blocking_pick_folder()
         .map(|folder| {
@@ -1759,6 +1804,7 @@ pub fn run() {
             open_logs,
             set_language,
             pick_workspace_folder,
+            pick_allowed_folder,
             open_resource,
             install_resource,
             repair_dependencies,
@@ -1810,5 +1856,28 @@ mod tests {
         assert_eq!(desktop_access_label("host", "en"), "Full Access");
         assert_eq!(desktop_access_label("safe", "en"), "Legacy · Safe");
         assert_eq!(desktop_access_label("dangerous", "zh-CN"), "旧模式 · 危险");
+    }
+
+    #[test]
+    fn allowed_paths_are_canonicalized_deduplicated_and_exclude_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let allowed = tempfile::tempdir().unwrap();
+        let mut profile =
+            WorkspaceProfile::new(workspace.path().to_string_lossy().to_string(), 28766).unwrap();
+        profile.runtime.allowed_paths = vec![
+            allowed.path().to_string_lossy().to_string(),
+            allowed.path().to_string_lossy().to_string(),
+            workspace.path().to_string_lossy().to_string(),
+        ];
+
+        normalize_allowed_paths(&mut profile).unwrap();
+
+        assert_eq!(
+            profile.runtime.allowed_paths,
+            vec![std::fs::canonicalize(allowed.path())
+                .unwrap()
+                .to_string_lossy()
+                .to_string()]
+        );
     }
 }

@@ -25,7 +25,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -1763,19 +1763,68 @@ class Workspace:
 class FileAccess:
     """Resolve ordinary file-tool paths without changing the project workspace.
 
-    Relative paths remain workspace-relative for compatibility. When a broader
-    home root is configured, callers can explicitly address it with ``~/...``.
-    Git, LSP, workflow state, project instructions, and command cwd continue to
-    use the project workspace.
+    Relative paths remain workspace-relative for compatibility. Operators may
+    add one or more explicit roots; absolute paths are accepted only when they
+    stay inside the workspace or one of those roots. ``~/...`` remains a
+    compatibility alias for the legacy primary file-access root.
+    Git, LSP, workflow state, and project instructions continue to use the
+    project workspace. Host-mode command cwd may additionally use this file
+    scope.
     """
 
-    def __init__(self, workspace: Workspace, home_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        workspace: Workspace,
+        home_root: Path | None = None,
+        allowed_roots: Sequence[Path] = (),
+    ) -> None:
         self.workspace = workspace
         self.home = Workspace(home_root, allow_home_root=True) if home_root is not None else None
+        roots: list[Workspace] = []
+        seen = {workspace.root}
+        if self.home is not None:
+            seen.add(self.home.root)
+            roots.append(self.home)
+        for raw_root in allowed_roots:
+            root = Workspace(raw_root, allow_home_root=True)
+            if root.root in seen:
+                continue
+            seen.add(root.root)
+            roots.append(root)
+        self.allowed = tuple(roots)
 
     @property
     def root(self) -> Path:
-        return self.home.root if self.home is not None else self.workspace.root
+        if self.home is not None:
+            return self.home.root
+        if self.allowed:
+            return self.allowed[0].root
+        return self.workspace.root
+
+    @property
+    def roots(self) -> tuple[Path, ...]:
+        return tuple(item.root for item in self.allowed)
+
+    def _absolute_scope(self, raw_path: str) -> tuple[Workspace, str, str]:
+        try:
+            candidate = Path(raw_path).expanduser().resolve(strict=False)
+        except OSError as exc:
+            raise ToolFailure("INVALID_ARGUMENT", f"Could not resolve path: {raw_path}", category="validation") from exc
+        choices = [self.workspace, *self.allowed]
+        choices.sort(key=lambda item: len(item.root.parts), reverse=True)
+        for scope in choices:
+            try:
+                relative = candidate.relative_to(scope.root)
+            except ValueError:
+                continue
+            label = "workspace" if scope is self.workspace else "external"
+            inner = relative.as_posix() if relative.parts else "."
+            return scope, inner, label
+        raise ToolFailure(
+            "PATH_OUTSIDE_FILE_SCOPE",
+            "Absolute path is outside the workspace and configured allowed folders.",
+            category="security",
+        )
 
     def _scope(self, raw_path: str) -> tuple[Workspace, str, str]:
         raw = raw_path or "."
@@ -1788,10 +1837,14 @@ class FileAccess:
                 )
             inner = raw[2:] if raw.startswith("~/") else "."
             return self.home, inner or ".", "home"
+        if Path(raw).expanduser().is_absolute() or re.match(r"^[A-Za-z]:[\\/]", raw):
+            return self._absolute_scope(raw)
         return self.workspace, raw, "workspace"
 
     @staticmethod
     def _decorate(resolved: ResolvedPath, scope: str) -> ResolvedPath:
+        if scope == "external":
+            return ResolvedPath(str(resolved.path), resolved.path, resolved.existed, resolved.root, "external")
         if scope != "home":
             return resolved
         display = "~" if resolved.display == "." else f"~/{resolved.display}"
@@ -1812,6 +1865,9 @@ class FileAccess:
     def workspace_for_resolved(self, resolved: ResolvedPath) -> Workspace:
         if resolved.scope == "home" and self.home is not None:
             return self.home
+        for scope in self.allowed:
+            if resolved.root == scope.root:
+                return scope
         return self.workspace
 
     def display_path(self, path: Path, resolved: ResolvedPath) -> str:
@@ -1819,6 +1875,8 @@ class FileAccess:
         rel = normalize_rel_display(path, root)
         if resolved.scope == "home":
             return "~" if rel == "." else f"~/{rel}"
+        if resolved.scope == "external":
+            return str(path)
         return rel
 
 
@@ -1896,6 +1954,7 @@ class Runtime:
         workspace: Path,
         *,
         file_access_root: Path | None = None,
+        file_access_roots: Sequence[Path] = (),
         enable_view_image: bool = True,
         enable_workflow_tools: bool = False,
         defer_workflow_tools: bool = False,
@@ -1915,7 +1974,7 @@ class Runtime:
         command_manager: WorkspaceCommandManager | None = None,
     ) -> None:
         self.workspace = Workspace(workspace)
-        self.file_access = FileAccess(self.workspace, file_access_root)
+        self.file_access = FileAccess(self.workspace, file_access_root, file_access_roots)
         self.enable_view_image = enable_view_image
         self.enable_workflow_tools = enable_workflow_tools
         self.defer_workflow_tools = bool(defer_workflow_tools and enable_workflow_tools)
@@ -2199,7 +2258,21 @@ class Runtime:
                 " Deferred tools stay outside tools/list: discover their input_schema, then call "
                 "tool_invoke with the exact name and matching arguments. No tools/list refresh is needed."
             )
-        return f"{guidance}\n\n{self.project_context.server_instructions()}"
+        file_scope = [str(self.workspace.root), *[str(path) for path in self.file_access.roots]]
+        scope_guidance = (
+            " Ordinary file tools and apply_patch may access the workspace plus these explicitly allowed "
+            f"folders: {file_scope}. Relative paths stay workspace-relative; absolute paths are allowed only "
+            "inside those folders."
+        )
+        if self.capabilities.host_environment:
+            scope_guidance += (
+                " Full Access is enabled for exec_command: when the user explicitly requests it, commands may "
+                "use the host environment, SSH, SCP, rsync, Git over SSH, and paths outside the workspace. "
+                "Do not claim SSH is unavailable without checking the execution environment or attempting the "
+                "requested non-interactive command. Use apply_patch rather than exec_command for local file edits "
+                "that fall inside the configured file scope."
+            )
+        return f"{guidance}{scope_guidance}\n\n{self.project_context.server_instructions()}"
 
     def discover_payload(self) -> dict[str, Any]:
         """Tell a client that never handshakes what this server can do.
@@ -2537,7 +2610,10 @@ class Runtime:
         return {
             "workspace": str(self.workspace.root),
             "file_access_root": str(self.file_access.root),
-            "file_access_scope": "home" if self.file_access.home is not None else "workspace",
+            "file_access_roots": [str(path) for path in self.file_access.roots],
+            "file_access_scope": (
+                "home" if self.file_access.home is not None else "extended" if self.file_access.roots else "workspace"
+            ),
             "permission_mode": self.permission_mode,
             "network_allowed": self.allow_network,
             "network_policy": {
@@ -3798,7 +3874,12 @@ class Runtime:
     def _commit_staged_files(self, staged: list[StagedFile]) -> None:
         self.patch_committer.commit(staged)
         for change in staged:
-            if change.display == "~" or change.display.startswith("~/"):
+            if (
+                change.display == "~"
+                or change.display.startswith("~/")
+                or Path(change.display).is_absolute()
+                or re.match(r"^[A-Za-z]:[\\/]", change.display)
+            ):
                 continue
             if change.display in self.patch_baselines:
                 continue
@@ -3877,7 +3958,11 @@ class Runtime:
         workdir_arg = args.get("workdir", args.get("cwd", "."))
         if "workdir" in args and "cwd" in args and str(args["workdir"]) != str(args["cwd"]):
             raise ToolFailure("INVALID_ARGUMENT", "workdir and cwd refer to different directories.", category="validation")
-        workdir = self.resolve_existing(str(workdir_arg))
+        workdir = (
+            self.resolve_file_existing(str(workdir_arg))
+            if self.capabilities.host_environment
+            else self.resolve_existing(str(workdir_arg))
+        )
         if not workdir.path.is_dir():
             raise ToolFailure("NOT_A_DIRECTORY", "workdir is not a directory.", category="validation")
         self._check_command_policy(cmd, args)
@@ -9316,15 +9401,23 @@ def build_runtime(
     command_manager: WorkspaceCommandManager | None = None,
 ) -> Runtime:
     workspace = Path(args.workspace or os.environ.get(f"{ENV_PREFIX}_WORKSPACE") or os.getcwd())
-    raw_file_access_root = (
-        getattr(args, "file_access_root", None)
-        or os.environ.get(f"{ENV_PREFIX}_FILE_ACCESS_ROOT")
-        or ""
-    ).strip()
-    file_access_root = Path(raw_file_access_root).expanduser() if raw_file_access_root else None
+    raw_cli_roots = getattr(args, "file_access_root", None) or []
+    if isinstance(raw_cli_roots, str):
+        raw_cli_roots = [raw_cli_roots]
+    raw_roots = [str(item).strip() for item in raw_cli_roots if str(item).strip()]
+    if not raw_roots:
+        legacy_env_root = (os.environ.get(f"{ENV_PREFIX}_FILE_ACCESS_ROOT") or "").strip()
+        if legacy_env_root:
+            raw_roots.append(legacy_env_root)
+    env_roots = (os.environ.get(f"{ENV_PREFIX}_FILE_ACCESS_ROOTS") or "").strip()
+    if env_roots:
+        raw_roots.extend(item for item in env_roots.split(os.pathsep) if item)
+    file_access_root = Path(raw_roots[0]).expanduser() if raw_roots else None
+    file_access_roots = tuple(Path(item).expanduser() for item in raw_roots[1:])
     runtime = Runtime(
         workspace,
         file_access_root=file_access_root,
+        file_access_roots=file_access_roots,
         enable_view_image=args.enable_view_image,
         enable_workflow_tools=bool(getattr(args, "enable_workflow_tools", False)),
         defer_workflow_tools=bool(getattr(args, "defer_workflow_tools", False)),
@@ -9578,10 +9671,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workspace", help="workspace root; defaults to CODING_TOOLS_MCP_WORKSPACE or cwd")
     parser.add_argument(
         "--file-access-root",
+        action="append",
         default=None,
         help=(
-            "optional broader root for ordinary file tools; relative paths stay workspace-relative, "
-            "and ~/... addresses this root; defaults to CODING_TOOLS_MCP_FILE_ACCESS_ROOT when set"
+            "additional allowed root for ordinary file tools and apply_patch; repeat for multiple folders. "
+            "Relative paths stay workspace-relative, absolute paths must stay inside the workspace or an allowed "
+            "root, and ~/... addresses the first configured root. Defaults to CODING_TOOLS_MCP_FILE_ACCESS_ROOT "
+            "or the path-separated CODING_TOOLS_MCP_FILE_ACCESS_ROOTS when set"
         ),
     )
     parser.add_argument(

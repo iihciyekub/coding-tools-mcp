@@ -16,6 +16,7 @@ export const api = {
   openLogs: (profileId: string) => invoke<void>("open_logs", { profileId }),
   setLanguage: (language: "en" | "zh-CN") => invoke<void>("set_language", { language }),
   pickWorkspaceFolder: () => invoke<string | null>("pick_workspace_folder"),
+  pickAllowedFolder: () => invoke<string | null>("pick_allowed_folder"),
   openResource: (target: "uv" | "cloudflared" | "github") => invoke<void>("open_resource", { target }),
   installResource: (target: "uv" | "cloudflared") => invoke<string>("install_resource", { target }),
   repairDependencies: () => invoke<string>("repair_dependencies"),

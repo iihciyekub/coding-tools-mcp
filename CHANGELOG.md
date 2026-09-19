@@ -1,5 +1,18 @@
 # Changelog
 
+## Desktop 0.3.31
+
+- Full Access now consistently exposes host command authority, SSH/SCP/rsync
+  and Git-over-SSH capability to MCP clients while keeping direct file tools
+  bounded to the selected workspace plus explicitly allowed folders.
+- Desktop profiles support multiple canonicalized allowed folders for ordinary
+  file reads, searches and patches, and macOS GUI launches recover the SSH agent
+  environment more reliably.
+- Added the canonical `desktop-v*` GitHub Actions release pipeline: Apple
+  Silicon Developer ID signing and Apple notarization, Windows x64 portable ZIP
+  packaging, immutable GitHub Release assets/checksums, and automatic Homebrew
+  Cask updates.
+
 ## Desktop 0.3.28
 
 - Each desktop-launched MCP service now receives a per-start name in the form

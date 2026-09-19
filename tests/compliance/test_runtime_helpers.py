@@ -390,6 +390,67 @@ class RuntimeHelperTests(unittest.TestCase):
                 runtime.resolve_existing("~/note.txt")
             self.assertEqual(error.exception.code, "NOT_FOUND")
 
+    def test_multiple_allowed_folders_support_absolute_file_reads_and_patches(self) -> None:
+        with TemporaryDirectory() as workspace_tmp, TemporaryDirectory() as allowed_tmp, TemporaryDirectory() as denied_tmp:
+            workspace = Path(workspace_tmp)
+            allowed = Path(allowed_tmp)
+            denied = Path(denied_tmp)
+            note = allowed / "note.txt"
+            note.write_text("before\n", encoding="utf-8")
+            blocked = denied / "blocked.txt"
+            blocked.write_text("blocked\n", encoding="utf-8")
+            runtime = Runtime(workspace, file_access_roots=(allowed,))
+
+            payload = runtime.read_file({"path": str(note)})
+            self.assertEqual(payload["path"], str(note.resolve()))
+            self.assertEqual(payload["content"], "before\n")
+            self.assertEqual(runtime.server_info_payload()["file_access_scope"], "extended")
+            self.assertEqual(runtime.server_info_payload()["file_access_roots"], [str(allowed.resolve())])
+
+            patch_payload = runtime.apply_patch(
+                {
+                    "patch": (
+                        "*** Begin Patch\n"
+                        f"*** Update File: {note}\n"
+                        "@@\n"
+                        "-before\n"
+                        "+after\n"
+                        "*** End Patch"
+                    )
+                }
+            )
+            self.assertTrue(patch_payload["clean"])
+            self.assertEqual(note.read_text(encoding="utf-8"), "after\n")
+
+            with self.assertRaises(ToolFailure) as error:
+                runtime.read_file({"path": str(blocked)})
+            self.assertEqual(error.exception.code, "PATH_OUTSIDE_FILE_SCOPE")
+
+    def test_host_instructions_explicitly_advertise_ssh_and_allowed_file_roots(self) -> None:
+        with TemporaryDirectory() as workspace_tmp, TemporaryDirectory() as allowed_tmp:
+            allowed = Path(allowed_tmp)
+            runtime = Runtime(
+                Path(workspace_tmp),
+                file_access_roots=(allowed,),
+                permission_mode="host",
+            )
+            instructions = runtime.tool_usage_instructions()
+            command = runtime.exec_command(
+                {
+                    "cmd": "pwd",
+                    "workdir": str(allowed),
+                    "yield_time_ms": 1000,
+                }
+            )
+
+        self.assertIn("SSH", instructions)
+        self.assertIn("SCP", instructions)
+        self.assertIn("rsync", instructions)
+        self.assertIn(str(allowed.resolve()), instructions)
+        self.assertNotIn("Use these tools only for coding operations inside the configured workspace.", instructions)
+        self.assertEqual(command["exit_code"], 0)
+        self.assertEqual(Path(command["stdout"].strip()).resolve(), allowed.resolve())
+
     def test_kill_command_keeps_unresponsive_command(self) -> None:
         class StillRunningProcess:
             def poll(self) -> None:

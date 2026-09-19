@@ -277,9 +277,10 @@ and bounded by file-count, scan-count, depth, per-file, and total-byte limits.
 - One server runtime owns one canonical workspace root and serves every client
   of it. Concurrent clients share the command pool, the retained output, and
   the patch baselines; this is a single trust domain by design.
-- Direct path inputs are workspace-relative and always resolve against the
-  workspace root. Absolute paths, `..` traversal, NUL bytes, and symlink
-  escapes are rejected.
+- Project-scoped path inputs remain workspace-relative. Ordinary file tools and
+  `apply_patch` additionally accept absolute paths only when they resolve inside
+  an explicitly configured file-access root. `..` traversal, NUL bytes, and
+  symlink escapes outside the selected root are rejected.
 - `apply_patch` parses and validates every operation before committing, under a
   lock that spans every client, so two clients patching one file cannot lose
   an update: the later one is answered with a conflict rather than silently

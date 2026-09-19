@@ -1,6 +1,6 @@
 # Desktop Release Maintenance Contract
 
-This document is the authoritative maintenance contract for the Coding Tools MCP macOS desktop distribution. It exists so that future maintainers, external contributors, and coding agents can evolve the project without silently changing the release topology, naming, signing, or Homebrew behavior.
+This document is the authoritative maintenance contract for the Coding Tools MCP desktop distribution. It exists so that future maintainers, external contributors, and coding agents can evolve the project without silently changing the release topology, naming, signing, notarization, Windows portable packaging, or Homebrew behavior.
 
 Changes to the desktop release pipeline MUST preserve this contract unless a pull request explicitly proposes and documents a contract change.
 
@@ -49,7 +49,13 @@ Apple Silicon desktop releases use this exact public asset name:
 Coding-Tools-MCP-<version>-arm64.dmg
 ```
 
-The local build may use Tauri's internal naming, but the GitHub Release asset consumed by Homebrew MUST use the public name above.
+Windows x64 portable releases use:
+
+```text
+Coding-Tools-MCP-<version>-win-x64-portable.zip
+```
+
+The local build may use Tauri's internal naming, but the GitHub Release assets MUST use the public names above. Homebrew consumes the arm64 DMG.
 
 `apps/desktop-client/create-dmg.sh` MUST derive the version from the desktop configuration instead of hard-coding a release number.
 
@@ -78,6 +84,8 @@ A desktop release is canonical only when it exists in `iihciyekub/coding-tools-m
 - tag `desktop-v<version>`;
 - target commit from the maintained fork;
 - signed, notarized and stapled DMG asset named `Coding-Tools-MCP-<version>-arm64.dmg`;
+- Windows x64 portable asset named `Coding-Tools-MCP-<version>-win-x64-portable.zip`;
+- `SHA256SUMS.txt` covering both public desktop assets;
 - a stable SHA-256 digest for that exact uploaded asset.
 
 Do not replace an already published stable DMG with different bytes under the same tag/version. If the artifact must change, publish a new desktop version.
@@ -111,24 +119,36 @@ The Cask MUST:
 
 ## 7. Release sequence
 
-For each stable desktop version, maintainers should follow this order:
+For each stable desktop version, `.github/workflows/desktop-release.yml` is the canonical automation. Pushing `desktop-v<version>` (or manually dispatching that existing tag) performs this sequence:
 
 ```text
 1. Update desktop version metadata
-2. Run desktop checks/builds
-3. Build the release app
-4. Sign the helper and app
-5. Notarize, staple and validate the app
-6. Create the final DMG
-7. Notarize, staple and validate the DMG
-8. Verify version, signatures, Gatekeeper and DMG integrity
-9. Publish desktop-v<version> in the maintained fork
-10. Upload Coding-Tools-MCP-<version>-arm64.dmg
-11. Let the Homebrew Cask workflow update the Tap
-12. Verify brew style, info, fetch and an isolated install
+2. Push desktop-v<version>
+3. Validate tag/version consistency
+4. Build the Apple Silicon release app
+5. Import the Developer ID certificate from Actions secrets
+6. Sign, notarize, staple and validate the app
+7. Create, sign, notarize, staple and validate the final DMG
+8. Build and verify the Windows x64 portable ZIP
+9. Publish the immutable GitHub Release plus SHA256SUMS.txt
+10. Invoke the Homebrew Cask workflow directly
+11. Verify brew style, info, fetch and an isolated install
 ```
 
 Publishing the Homebrew update before the final release asset is immutable is not allowed.
+
+The release workflow requires the following repository or protected environment secrets. Their values MUST never be committed:
+
+```text
+APPLE_CERTIFICATE
+APPLE_CERTIFICATE_PASSWORD
+APPLE_ID
+APPLE_PASSWORD
+APPLE_TEAM_ID
+HOMEBREW_TAP_DEPLOY_KEY
+```
+
+`APPLE_CERTIFICATE` is a base64-encoded Developer ID Application `.p12`. `APPLE_PASSWORD` is an Apple app-specific password. The Homebrew deploy key must remain scoped to `iihciyekub/homebrew-tap`.
 
 ## 8. Required validation after release-pipeline changes
 
@@ -168,6 +188,8 @@ Before considering a desktop release complete, confirm:
 - [ ] Desktop version metadata agrees across the desktop package and Tauri config.
 - [ ] The release uses `desktop-v<version>`.
 - [ ] The uploaded asset is `Coding-Tools-MCP-<version>-arm64.dmg`.
+- [ ] The Windows portable asset is `Coding-Tools-MCP-<version>-win-x64-portable.zip`.
+- [ ] `SHA256SUMS.txt` covers both desktop assets.
 - [ ] App and DMG notarization/stapling validation pass.
 - [ ] The uploaded asset SHA-256 is recorded by GitHub and matches the local final artifact.
 - [ ] The Cask points to the maintained fork and the exact release asset.

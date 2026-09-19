@@ -11,8 +11,10 @@ For production, expose the server only to trusted local clients, bind HTTP to lo
 ## Workspace Boundary
 
 - The workspace root is canonicalized once at startup.
-- Tool path inputs are workspace-relative.
-- Absolute paths, NUL bytes, `..`, and symlink escapes are rejected.
+- Project, Git, LSP, workflow, and hook path inputs remain workspace-relative.
+- Ordinary file tools and `apply_patch` may additionally use absolute paths that
+  resolve inside explicitly configured file-access roots.
+- NUL bytes, `..`, and symlink escapes outside the selected root are rejected.
 - Write paths validate the nearest existing parent before creating new files.
 - `apply_patch` refuses symlink writes and stages changes before committing them.
 
@@ -65,8 +67,8 @@ Operators should choose one of four permission modes:
 
 - `safe`: default mode. Workspace writes are allowed, system toolchain roots are read-only, `HOME`, `TMPDIR`, and `cache_dir` point under an external server-owned runtime directory, network-looking commands are denied, shell expansion and inline scripts are denied, secrets and loader/startup env are filtered, and Landlock is enabled when available.
 - `trusted`: local development mode. It allows network-looking commands, shell expansion, and inline scripts while still filtering secrets and blocking destructive commands and host-root writes. Runtime writes are scoped to the exact external runtime directory, not global `/tmp`.
-- `dangerous`: disables `exec_command` permission gates and Landlock. Use only inside an isolated container or VM. Workspace path boundaries for direct file and patch tools still apply.
-- `host`: explicit full-host development. It disables command gates and Landlock and preserves the real host `HOME`, temporary directories, SSH agent, Git credentials, and complete inherited environment. Direct file and patch tools remain workspace-confined, but commands can access anything available to the user running the server.
+- `dangerous`: disables `exec_command` permission gates and Landlock. Use only inside an isolated container or VM. Configured file-scope boundaries for direct file and patch tools still apply.
+- `host`: explicit full-host development. It disables command gates and Landlock and preserves the real host `HOME`, temporary directories, SSH agent, Git credentials, and complete inherited environment. Direct file and patch tools remain limited to the workspace plus explicitly allowed folders, while commands can access anything available to the user running the server, including remote systems through SSH.
 
 `--allow-network` remains a compatibility flag to open only the network-looking command gate. `--dangerously-skip-all-permissions` remains a compatibility alias for dangerous mode.
 

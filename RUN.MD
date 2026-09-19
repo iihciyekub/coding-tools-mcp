@@ -1,96 +1,67 @@
+# Desktop release
 
+Stable desktop releases are produced by GitHub Actions. The canonical workflow
+is `.github/workflows/desktop-release.yml`.
 
-```bash
-cd /Users/IIDEV/Documents/ii-research/coding-tools-mcp/apps/desktop-client
+## Release a new desktop version
 
-npm install
+1. Update the desktop version metadata (`package.json`, `Cargo.toml`,
+   `tauri.conf.json`, lockfiles, and the UI version constant).
+2. Run the desktop checks locally.
+3. Commit the release changes.
+4. Create and push the matching desktop tag.
 
-npm run tauri build -- --bundles app
-```
-
-如果构建成功，App 通常会在：
-
-```bash
-src-tauri/target/release/bundle/macos/Coding\ Tools\ MCP.app
-```
-
-然后用你的开发者签名：
+Example for Desktop 0.3.31:
 
 ```bash
-codesign --force --deep --options runtime --timestamp \
-  --sign "Developer ID Application: Yongjian Li (2NLAH5MYH8)" \
-  "src-tauri/target/release/bundle/macos/Coding Tools MCP.app"
+git tag desktop-v0.3.31
+git push origin desktop-v0.3.31
 ```
 
-验证签名：
+The cloud workflow then:
 
-```bash
-codesign --verify --deep --strict --verbose=2 \
-  "src-tauri/target/release/bundle/macos/Coding Tools MCP.app"
+- builds the Apple Silicon desktop app;
+- imports the Developer ID Application certificate from GitHub Actions Secrets;
+- signs, notarizes, staples and validates the app;
+- creates, signs, notarizes, staples and validates the DMG;
+- builds `Coding-Tools-MCP-<version>-win-x64-portable.zip` on Windows;
+- publishes both assets plus `SHA256SUMS.txt` to the GitHub Release;
+- updates `iihciyekub/homebrew-tap`;
+- verifies the Homebrew Cask can be fetched and installed on macOS arm64.
+
+Required GitHub Actions secrets:
+
+```text
+APPLE_CERTIFICATE
+APPLE_CERTIFICATE_PASSWORD
+APPLE_ID
+APPLE_PASSWORD
+APPLE_TEAM_ID
+HOMEBREW_TAP_DEPLOY_KEY
 ```
 
-先对 App 本体进行 Apple 公证并装订票据：
+`APPLE_CERTIFICATE` is the base64-encoded exported Developer ID Application
+`.p12`. `APPLE_PASSWORD` must be an Apple app-specific password. The Homebrew
+deploy key should have write access only to `iihciyekub/homebrew-tap`.
 
-```bash
-ditto -c -k --keepParent \
-  "src-tauri/target/release/bundle/macos/Coding Tools MCP.app" \
-  "src-tauri/target/release/bundle/macos/Coding Tools MCP_0.3.22.app.zip"
+The same existing tag can also be selected from **Actions → Desktop Release →
+Run workflow**. Published stable assets are immutable; if a release already
+exists for the tag, bump the desktop version and create a new tag instead.
 
-xcrun notarytool submit \
-  "src-tauri/target/release/bundle/macos/Coding Tools MCP_0.3.22.app.zip" \
-  --keychain-profile "WOSAide-Notary" \
-  --wait
-
-xcrun stapler staple "src-tauri/target/release/bundle/macos/Coding Tools MCP.app"
-xcrun stapler validate "src-tauri/target/release/bundle/macos/Coding Tools MCP.app"
-```
-
-再生成带标准拖拽安装界面的 DMG：
+## Local development build
 
 ```bash
 cd apps/desktop-client
-bash ./create-dmg.sh \
-  "src-tauri/target/release/bundle/macos/Coding Tools MCP.app" \
-  "src-tauri/target/release/bundle/dmg/Coding-Tools-MCP-0.3.22-arm64.dmg"
+npm ci
+npm run check
+npm run tauri build -- --bundles app --no-sign --ci
 ```
 
-该脚本会生成标准 macOS Finder 安装窗口：左侧为较大的 Coding Tools MCP 图标，右侧为 Applications 快捷方式，用户可直接拖拽安装。
-
-给 DMG 签名：
-
-```bash
-codesign --force --timestamp \
-  --sign "Developer ID Application: Yongjian Li (2NLAH5MYH8)" \
-  "src-tauri/target/release/bundle/dmg/Coding-Tools-MCP-0.3.22-arm64.dmg"
-```
-
-提交 Apple 公证：
-
-```bash
-xcrun notarytool submit \
-  "src-tauri/target/release/bundle/dmg/Coding-Tools-MCP-0.3.22-arm64.dmg" \
-  --keychain-profile "WOSAide-Notary" \
-  --wait
-```
-
-公证通过后：
-
-```bash
-xcrun stapler staple "src-tauri/target/release/bundle/dmg/Coding-Tools-MCP-0.3.22-arm64.dmg"
-xcrun stapler validate "src-tauri/target/release/bundle/dmg/Coding-Tools-MCP-0.3.22-arm64.dmg"
-```
-
-最关键的修正就两个：
+The unsigned local app is written to:
 
 ```text
-npm ci      ❌
-npm install ✅
+apps/desktop-client/src-tauri/target/release/bundle/macos/Coding Tools MCP.app
 ```
 
-以及：
-
-```text
-→   不要复制进 Terminal
-```
-
-你现在先从 `npm install` 开始即可。
+Local manual signing/notarization is a fallback only. Stable public releases
+must follow `docs/desktop-release-maintenance.md`.

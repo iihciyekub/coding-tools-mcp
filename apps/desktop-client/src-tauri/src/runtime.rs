@@ -445,14 +445,27 @@ fn spawn_runtime(
         ])
         .arg("--state-root")
         .arg(workflow_state_root);
+    let mut file_access_roots = profile.runtime.allowed_paths.clone();
     if profile.runtime.file_access_scope == "home" {
         if let Some(home) = std::env::var_os("HOME") {
-            command.arg("--file-access-root").arg(home);
+            let home = home.to_string_lossy().to_string();
+            if !file_access_roots.iter().any(|item| item == &home) {
+                file_access_roots.insert(0, home);
+            }
         }
+    }
+    for root in file_access_roots {
+        command.arg("--file-access-root").arg(root);
+    }
+    if profile.runtime.permission_mode == "host" {
+        command.arg("--dangerously-fake-readonly-annotations");
     }
     command
         .current_dir(&profile.path)
         .env("PATH", effective_path());
+    if let Some(ssh_auth_sock) = effective_ssh_auth_sock() {
+        command.env("SSH_AUTH_SOCK", ssh_auth_sock);
+    }
     for name in [
         "CODING_TOOLS_MCP_AUTH_MODE",
         "CODING_TOOLS_MCP_AUTH_TOKEN",
@@ -687,6 +700,37 @@ fn effective_path() -> String {
         }
     }
     current
+}
+
+fn effective_ssh_auth_sock() -> Option<String> {
+    if let Ok(current) = std::env::var("SSH_AUTH_SOCK") {
+        let current = current.trim().to_string();
+        if !current.is_empty() {
+            return Some(current);
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = Command::new("/bin/zsh")
+            .args(["-lic", "printf %s \"$SSH_AUTH_SOCK\""])
+            .output()
+        {
+            let login = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !login.is_empty() {
+                return Some(login);
+            }
+        }
+        if let Ok(output) = Command::new("/bin/launchctl")
+            .args(["getenv", "SSH_AUTH_SOCK"])
+            .output()
+        {
+            let launchd = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !launchd.is_empty() {
+                return Some(launchd);
+            }
+        }
+    }
+    None
 }
 
 fn port_is_listening(port: u16) -> bool {

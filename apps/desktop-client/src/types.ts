@@ -25,6 +25,7 @@ export interface RuntimeConfig {
   local_port: number;
   permission_mode: PermissionMode;
   file_access_scope: "workspace" | "home";
+  allowed_paths: string[];
 }
 
 export interface WorkspaceProfile {

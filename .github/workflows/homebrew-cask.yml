@@ -3,6 +3,15 @@ name: Update Homebrew Cask
 on:
   release:
     types: [published]
+  workflow_call:
+    inputs:
+      tag:
+        description: Desktop release tag
+        required: true
+        type: string
+    secrets:
+      HOMEBREW_TAP_DEPLOY_KEY:
+        required: true
   workflow_dispatch:
     inputs:
       tag:
@@ -81,3 +90,29 @@ jobs:
           git add Casks/coding-tools-mcp.rb
           git commit -m "Update Coding Tools MCP cask to ${VERSION}"
           git push origin HEAD:main
+
+  verify-cask:
+    name: Verify Homebrew install
+    needs: update-cask
+    runs-on: macos-14
+    steps:
+      - name: Tap maintained repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew tap iihciyekub/tap
+
+      - name: Validate, fetch and install Cask
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew style --cask iihciyekub/tap/coding-tools-mcp
+          brew info --cask iihciyekub/tap/coding-tools-mcp
+          brew fetch --cask iihciyekub/tap/coding-tools-mcp
+          brew install --cask iihciyekub/tap/coding-tools-mcp
+          test -d "/Applications/Coding Tools MCP.app"
+
+      - name: Remove verification install
+        if: always()
+        shell: bash
+        run: brew uninstall --cask coding-tools-mcp >/dev/null 2>&1 || true

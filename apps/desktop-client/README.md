@@ -14,9 +14,15 @@ API.
   trusted runtime, while **Full Access** maps to host mode for agent workflows that
   intentionally need the wider Mac environment. Legacy safe/dangerous profiles remain
   readable until the user explicitly chooses one of the two desktop modes.
-- Independent **File scope** control: keep ordinary file tools inside the workspace,
-  or allow explicit `~/...` access across the current user's Home folder without
-  expanding Git, LSP, workflow state, checks, or project-context roots.
+- Independent **Allowed folders** control: ordinary file tools and `apply_patch`
+  can use the workspace plus any folders the user explicitly adds. Relative paths
+  remain workspace-relative; absolute paths are accepted only inside those allowed
+  folders. Git, LSP, workflow state, checks, and project context stay anchored to
+  the workspace.
+- **Full Access** launches host mode with SSH/Git credentials and compatibility
+  annotations enabled for clients that otherwise refuse command tools. On macOS,
+  the launcher also recovers `SSH_AUTH_SOCK` from the GUI environment, login shell,
+  or launchd so desktop-started runtimes match terminal SSH behavior more closely.
 - Stable per-workspace accent backgrounds and in-place second-click confirmation for
   Stop and Quit, so multiple workspaces are easier to distinguish and accidental
   shutdowns are less likely.
@@ -52,6 +58,45 @@ the Python package's `v<version>` release series. The Homebrew Cask is maintaine
 in `iihciyekub/homebrew-tap`. Maintainers changing release naming, signing,
 notarization, GitHub Release assets, or Homebrew publishing must follow the
 [desktop release maintenance contract](../../docs/desktop-release-maintenance.md).
+
+Windows x64 desktop releases are attached to the same GitHub Release as
+`Coding-Tools-MCP-<version>-win-x64-portable.zip`. The ZIP is installation-free:
+extract it, then run `Coding Tools MCP.exe`. The executable and bundled runtime
+source payload are portable, while profiles, OS credentials, downloaded tools,
+and managed Python environments continue to use normal per-user application-data
+locations.
+
+## Automated desktop releases
+
+`.github/workflows/desktop-release.yml` is the canonical desktop release
+pipeline. Push an existing version-matched tag such as:
+
+```bash
+git tag desktop-v0.3.31
+git push origin desktop-v0.3.31
+```
+
+The workflow validates the tag against the desktop metadata, builds the Apple
+Silicon app on an arm64 macOS runner, imports the Developer ID certificate,
+signs and notarizes both the app and final DMG, builds the Windows x64 portable
+ZIP, publishes immutable GitHub Release assets and checksums, then updates the
+Homebrew Tap.
+
+The repository must provide these GitHub Actions secrets:
+
+```text
+APPLE_CERTIFICATE
+APPLE_CERTIFICATE_PASSWORD
+APPLE_ID
+APPLE_PASSWORD
+APPLE_TEAM_ID
+HOMEBREW_TAP_DEPLOY_KEY
+```
+
+`APPLE_CERTIFICATE` is the base64 representation of the exported Developer ID
+Application `.p12`; `APPLE_PASSWORD` is an Apple app-specific password. The
+signing identity is discovered from the imported certificate rather than being
+hard-coded into the workflow.
 
 ## Development
 
@@ -116,8 +161,9 @@ plus prepare/repair actions. Homebrew, `/usr/local`, and system Python are not
 modified. Other desktop platforms currently use an existing platform-installed
 Python/uv and cloudflared.
 
-For a Developer ID release, use the normal Tauri signing configuration for the
-application bundle and installer.
+Developer ID signing and notarization for stable releases are handled by the
+canonical `desktop-release.yml` workflow. Local signing remains a maintainer
+fallback only; do not publish an unsigned or unnotarized DMG as a stable release.
 
 The explicit runtime override remains user-managed and bypasses version checks.
 A PATH installation of a different core version is skipped instead of silently
