@@ -1,7 +1,7 @@
 use crate::models::{user_home_directory, EnvironmentVariable, WorkspaceProfile};
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -294,14 +294,19 @@ fn normalize_legacy_file_access(profiles: &mut [WorkspaceProfile]) -> bool {
             profile.runtime.file_access_scope = "workspace".into();
             changed = true;
         }
+        let workspace = std::fs::canonicalize(&profile.path).ok();
         let full_access = profile.runtime.permission_mode == "host";
+        let mut seen = HashSet::new();
         let before = profile.runtime.allowed_paths.len();
         profile.runtime.allowed_paths.retain(|raw| {
             let Ok(path) = std::fs::canonicalize(raw) else {
                 return true;
             };
-            home.as_ref()
-                .is_none_or(|home| path != *home && (!full_access || !path.starts_with(home)))
+            workspace
+                .as_ref()
+                .is_none_or(|workspace| !path.starts_with(workspace))
+                && (full_access || home.as_ref() != Some(&path))
+                && seen.insert(path)
         });
         changed |= profile.runtime.allowed_paths.len() != before;
     }
@@ -408,7 +413,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_home_access_is_removed_from_saved_profiles() {
+    fn legacy_home_access_and_workspace_duplicates_are_removed_from_standard_profiles() {
         let Some(home) = user_home_directory() else {
             return;
         };
@@ -424,7 +429,24 @@ mod tests {
             &mut profile
         )));
         assert_eq!(profile.runtime.file_access_scope, "workspace");
-        assert_eq!(profile.runtime.allowed_paths, vec![root.to_string_lossy()]);
+        assert!(profile.runtime.allowed_paths.is_empty());
+    }
+
+    #[test]
+    fn explicitly_allowed_home_is_preserved_for_full_access_profiles() {
+        let Some(home) = user_home_directory() else {
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        let mut profile =
+            WorkspaceProfile::new(root.path().to_string_lossy().into_owned(), 28766).unwrap();
+        profile.runtime.permission_mode = "host".into();
+        profile.runtime.allowed_paths = vec![home.to_string_lossy().into_owned()];
+
+        assert!(!normalize_legacy_file_access(std::slice::from_mut(
+            &mut profile
+        )));
+        assert_eq!(profile.runtime.allowed_paths, vec![home.to_string_lossy()]);
     }
 
     #[test]

@@ -1973,7 +1973,7 @@ class Runtime:
         transport: str = "stdio",
         command_manager: WorkspaceCommandManager | None = None,
     ) -> None:
-        self.workspace = Workspace(workspace)
+        self.workspace = Workspace(workspace, allow_home_root=permission_mode == "host")
         self.file_access = FileAccess(self.workspace, file_access_root, file_access_roots)
         self.enable_view_image = enable_view_image
         self.enable_workflow_tools = enable_workflow_tools

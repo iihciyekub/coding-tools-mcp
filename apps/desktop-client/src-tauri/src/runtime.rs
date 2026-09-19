@@ -622,16 +622,7 @@ fn spawn_runtime(
 }
 
 fn file_access_roots(profile: &WorkspaceProfile) -> Vec<String> {
-    let mut roots = profile.runtime.allowed_paths.clone();
-    if profile.runtime.permission_mode == "host" {
-        if let Some(home) = std::env::var_os("HOME") {
-            let home = home.to_string_lossy().to_string();
-            if !roots.iter().any(|item| item == &home) {
-                roots.insert(0, home);
-            }
-        }
-    }
-    roots
+    profile.runtime.allowed_paths.clone()
 }
 
 fn runtime_environment_variables(
@@ -1033,7 +1024,7 @@ while True:
     }
 
     #[test]
-    fn full_access_includes_home_and_keeps_extra_allowed_folders() {
+    fn full_access_uses_only_explicit_extra_allowed_folders() {
         let temporary = tempfile::tempdir().unwrap();
         let extra = temporary.path().join("Applications");
         fs::create_dir(&extra).unwrap();
@@ -1045,10 +1036,7 @@ while True:
 
         profile.runtime.permission_mode = "host".into();
         let roots = file_access_roots(&profile);
-        assert!(roots.contains(&extra.to_string_lossy().into_owned()));
-        if let Some(home) = std::env::var_os("HOME") {
-            assert_eq!(roots.first(), Some(&home.to_string_lossy().into_owned()));
-        }
+        assert_eq!(roots, vec![extra.to_string_lossy().into_owned()]);
     }
 
     #[test]

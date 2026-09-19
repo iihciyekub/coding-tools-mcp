@@ -137,26 +137,34 @@ fn create_profile(
 
 #[tauri::command]
 fn create_full_access_profile(
+    path: String,
     state: tauri::State<'_, DesktopState>,
 ) -> Result<WorkspaceProfile, String> {
     let mut store = state
         .store
         .lock()
         .map_err(|_| "Profile store is unavailable.")?;
-    create_full_access_profile_in_store(&mut store)
+    create_full_access_profile_in_store(&mut store, path)
 }
 
 fn create_full_access_profile_in_store(
     store: &mut ProfileStore,
+    path: String,
 ) -> Result<WorkspaceProfile, String> {
-    let home = models::user_home_directory().ok_or("Could not resolve the user home directory.")?;
+    let requested =
+        std::fs::canonicalize(&path).unwrap_or_else(|_| std::path::PathBuf::from(&path));
     if let Some(existing) = store.profiles().into_iter().find(|profile| {
-        profile.runtime.permission_mode == "host"
-            && std::fs::canonicalize(&profile.path).ok().as_ref() == Some(&home)
+        std::fs::canonicalize(&profile.path)
+            .unwrap_or_else(|_| std::path::PathBuf::from(&profile.path))
+            == requested
     }) {
-        return Ok(existing);
+        return if existing.runtime.permission_mode == "host" {
+            Ok(existing)
+        } else {
+            Err("This workspace already exists. Change its access mode to Full Access in Workspace settings.".into())
+        };
     }
-    let profile = WorkspaceProfile::new_full_access(store.next_port())?;
+    let profile = WorkspaceProfile::new_full_access(path, store.next_port())?;
     store.insert(profile)
 }
 
@@ -165,6 +173,18 @@ fn save_profile(
     mut profile: WorkspaceProfile,
     state: tauri::State<'_, DesktopState>,
 ) -> Result<WorkspaceProfile, String> {
+    let existing = state
+        .store
+        .lock()
+        .map_err(|_| "Profile store is unavailable.")?
+        .get(&profile.id);
+    let needs_full_access_defaults = profile.runtime.permission_mode == "host"
+        && existing.is_none_or(|existing| {
+            existing.runtime.permission_mode != "host" || existing.path != profile.path
+        });
+    if needs_full_access_defaults {
+        profile.enable_full_access();
+    }
     normalize_allowed_paths(&mut profile)?;
     if state
         .runtime
@@ -185,16 +205,23 @@ fn save_profile(
 fn normalize_allowed_paths(profile: &mut WorkspaceProfile) -> Result<(), String> {
     let workspace = std::fs::canonicalize(&profile.path).map_err(|error| error.to_string())?;
     let mut seen = HashSet::<PathBuf>::new();
-    let mut normalized = Vec::new();
+    let mut normalized = Vec::<PathBuf>::new();
     for raw in std::mem::take(&mut profile.runtime.allowed_paths) {
         let path = std::fs::canonicalize(&raw)
             .map_err(|error| format!("Could not resolve allowed folder {raw}: {error}"))?;
-        if path == workspace || !seen.insert(path.clone()) {
+        if path.starts_with(&workspace)
+            || !seen.insert(path.clone())
+            || normalized.iter().any(|root| path.starts_with(root))
+        {
             continue;
         }
-        normalized.push(path.to_string_lossy().to_string());
+        normalized.retain(|root| !root.starts_with(&path));
+        normalized.push(path);
     }
-    profile.runtime.allowed_paths = normalized;
+    profile.runtime.allowed_paths = normalized
+        .into_iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
     Ok(())
 }
 
@@ -1252,8 +1279,8 @@ fn add_workspace_from_menu(app: &AppHandle) {
     app.dialog()
         .message(menu_text(
             &language,
-            "Choose access before creating a profile. Standard asks for one workspace; Full Access uses your entire user home automatically.",
-            "请先选择访问模式。标准模式需要选择一个工作区；完全访问会自动使用整个用户主目录。",
+            "Choose access before creating a profile. Both modes ask you to select the workspace they use as project context.",
+            "请先选择访问模式。两种模式都会请你选择用作项目上下文的工作区。",
         ))
         .buttons(MessageDialogButtons::YesNoCancelCustom(
             standard_label.into(),
@@ -1262,29 +1289,16 @@ fn add_workspace_from_menu(app: &AppHandle) {
         ))
         .show_with_result(move |choice| match choice {
             MessageDialogResult::Custom(selected) if selected == standard_label => {
-                pick_standard_workspace_from_menu(&dialog_app, &language);
+                pick_workspace_from_menu(&dialog_app, &language, false);
             }
             MessageDialogResult::Custom(selected) if selected == full_label => {
-                let result = (|| {
-                    let state = callback_app.state::<DesktopState>();
-                    let mut store = state
-                        .store
-                        .lock()
-                        .map_err(|_| "Profile store is unavailable.".to_string())?;
-                    create_full_access_profile_in_store(&mut store)?;
-                    Ok::<(), String>(())
-                })();
-                if let Err(error) = result {
-                    show_error(&callback_app, error);
-                } else {
-                    refresh_tray_menu_on_main(callback_app);
-                }
+                pick_workspace_from_menu(&callback_app, &language, true);
             }
             _ => {}
         });
 }
 
-fn pick_standard_workspace_from_menu(app: &AppHandle, language: &str) {
+fn pick_workspace_from_menu(app: &AppHandle, language: &str, full_access: bool) {
     let callback_app = app.clone();
     app.dialog()
         .file()
@@ -1310,8 +1324,12 @@ fn pick_standard_workspace_from_menu(app: &AppHandle, language: &str) {
                     .store
                     .lock()
                     .map_err(|_| "Profile store is unavailable.".to_string())?;
-                let profile = WorkspaceProfile::new(path, store.next_port())?;
-                store.insert(profile)?;
+                if full_access {
+                    create_full_access_profile_in_store(&mut store, path)?;
+                } else {
+                    let profile = WorkspaceProfile::new(path, store.next_port())?;
+                    store.insert(profile)?;
+                }
                 drop(store);
                 Ok::<(), String>(())
             })();
@@ -1926,21 +1944,27 @@ mod tests {
 
     #[test]
     fn allowed_paths_are_canonicalized_deduplicated_and_exclude_workspace() {
-        let workspace = tempfile::tempdir().unwrap();
-        let allowed = tempfile::tempdir().unwrap();
+        let container = tempfile::tempdir().unwrap();
+        let workspace = container.path().join("workspace");
+        let child = workspace.join("child");
+        let allowed = container.path().join("allowed");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::create_dir(&allowed).unwrap();
         let mut profile =
-            WorkspaceProfile::new(workspace.path().to_string_lossy().to_string(), 28766).unwrap();
+            WorkspaceProfile::new(workspace.to_string_lossy().to_string(), 28766).unwrap();
         profile.runtime.allowed_paths = vec![
-            allowed.path().to_string_lossy().to_string(),
-            allowed.path().to_string_lossy().to_string(),
-            workspace.path().to_string_lossy().to_string(),
+            allowed.to_string_lossy().to_string(),
+            allowed.to_string_lossy().to_string(),
+            workspace.to_string_lossy().to_string(),
+            child.to_string_lossy().to_string(),
+            container.path().to_string_lossy().to_string(),
         ];
 
         normalize_allowed_paths(&mut profile).unwrap();
 
         assert_eq!(
             profile.runtime.allowed_paths,
-            vec![std::fs::canonicalize(allowed.path())
+            vec![std::fs::canonicalize(container.path())
                 .unwrap()
                 .to_string_lossy()
                 .to_string()]

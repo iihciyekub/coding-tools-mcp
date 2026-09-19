@@ -1,5 +1,6 @@
 use rand::distr::{Alphanumeric, SampleString};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -28,6 +29,47 @@ pub(crate) fn user_home_directory() -> Option<PathBuf> {
 }
 fn default_allowed_paths() -> Vec<String> {
     Vec::new()
+}
+
+fn common_full_access_paths(workspace: &Path) -> Vec<String> {
+    let workspace = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    let mut candidates = Vec::<PathBuf>::new();
+    if let Some(home) = user_home_directory() {
+        for name in ["Desktop", "Documents", "Downloads", "Developer", "Projects"] {
+            candidates.push(home.join(name));
+        }
+    }
+    if cfg!(target_os = "macos") {
+        candidates.extend([
+            PathBuf::from("/Applications"),
+            PathBuf::from("/Users/Shared"),
+            PathBuf::from("/Volumes"),
+            PathBuf::from("/opt/homebrew"),
+            PathBuf::from("/usr/local"),
+        ]);
+    } else if cfg!(windows) {
+        for name in ["ProgramFiles", "ProgramFiles(x86)", "ProgramData"] {
+            if let Some(path) = std::env::var_os(name) {
+                candidates.push(PathBuf::from(path));
+            }
+        }
+    } else {
+        candidates.extend([
+            PathBuf::from("/opt"),
+            PathBuf::from("/usr/local"),
+            PathBuf::from("/mnt"),
+            PathBuf::from("/media"),
+        ]);
+    }
+
+    let mut seen = HashSet::new();
+    candidates
+        .into_iter()
+        .filter_map(|path| std::fs::canonicalize(path).ok())
+        .filter(|path| path.parent().is_some() && !path.starts_with(&workspace))
+        .filter(|path| seen.insert(path.clone()))
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect()
 }
 fn default_environment_variables() -> Vec<EnvironmentVariable> {
     Vec::new()
@@ -185,12 +227,16 @@ impl WorkspaceProfile {
         })
     }
 
-    pub fn new_full_access(port: u16) -> Result<Self, String> {
-        let home = user_home_directory().ok_or("Could not resolve the user home directory.")?;
-        let mut profile = Self::new(home.to_string_lossy().into_owned(), port)?;
-        profile.name = "Full Access".into();
-        profile.runtime.permission_mode = "host".into();
+    pub fn new_full_access(path: String, port: u16) -> Result<Self, String> {
+        let mut profile = Self::new(path, port)?;
+        profile.enable_full_access();
         Ok(profile)
+    }
+
+    pub fn enable_full_access(&mut self) {
+        self.runtime.permission_mode = "host".into();
+        let mut defaults = common_full_access_paths(Path::new(&self.path));
+        self.runtime.allowed_paths.append(&mut defaults);
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -237,13 +283,10 @@ impl WorkspaceProfile {
                 ));
             }
             let resolved = std::fs::canonicalize(path).map_err(|error| error.to_string())?;
-            if let Some(home) = user_home_directory() {
-                if resolved == home {
-                    return Err("The user home directory cannot be added as an allowed folder. Full Access includes it automatically; Standard Access requires a specific folder.".into());
-                }
-                if self.runtime.permission_mode == "host" && resolved.starts_with(home) {
-                    return Err("This folder is already included automatically by Full Access. Add only locations outside your user home.".into());
-                }
+            if user_home_directory().is_some_and(|home| resolved == home)
+                && self.runtime.permission_mode != "host"
+            {
+                return Err("The user home directory can only be added as an allowed folder in Full Access mode.".into());
             }
         }
         let mut environment_names = std::collections::HashSet::new();
@@ -425,19 +468,32 @@ mod tests {
     }
 
     #[test]
-    fn full_access_profile_uses_home_without_folder_selection() {
-        let profile = WorkspaceProfile::new_full_access(28766).unwrap();
-        assert_eq!(profile.name, "Full Access");
+    fn full_access_profile_uses_selected_workspace_and_common_folders() {
+        let workspace = tempfile::tempdir().unwrap();
+        let profile = WorkspaceProfile::new_full_access(
+            workspace.path().to_string_lossy().into_owned(),
+            28766,
+        )
+        .unwrap();
+        assert_eq!(
+            profile.name,
+            workspace.path().file_name().unwrap().to_string_lossy()
+        );
         assert_eq!(profile.runtime.permission_mode, "host");
         assert_eq!(
             std::fs::canonicalize(&profile.path).unwrap(),
-            user_home_directory().unwrap()
+            std::fs::canonicalize(workspace.path()).unwrap()
         );
+        assert!(profile
+            .runtime
+            .allowed_paths
+            .iter()
+            .all(|path| Path::new(path).is_dir()));
         assert!(profile.validate().is_ok());
     }
 
     #[test]
-    fn home_cannot_be_an_explicit_allowed_folder() {
+    fn home_can_be_explicitly_allowed_only_for_full_access() {
         let Some(home) = user_home_directory() else {
             return;
         };
@@ -445,10 +501,9 @@ mod tests {
         let mut profile =
             WorkspaceProfile::new(temporary.path().to_string_lossy().into_owned(), 28766).unwrap();
         profile.runtime.allowed_paths = vec![home.to_string_lossy().into_owned()];
-        assert!(profile
-            .validate()
-            .unwrap_err()
-            .contains("Full Access includes it automatically"));
+        assert!(profile.validate().unwrap_err().contains("Full Access"));
+        profile.runtime.permission_mode = "host".into();
+        assert!(profile.validate().is_ok());
     }
 
     #[test]

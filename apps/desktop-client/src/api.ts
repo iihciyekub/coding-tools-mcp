@@ -6,7 +6,7 @@ export const api = {
   decideApproval: (profileId: string, approvalId: string, approved: boolean) =>
     invoke<void>("decide_approval", { profileId, approvalId, approved }),
   createProfile: (path: string) => invoke<WorkspaceProfile>("create_profile", { path }),
-  createFullAccessProfile: () => invoke<WorkspaceProfile>("create_full_access_profile"),
+  createFullAccessProfile: (path: string) => invoke<WorkspaceProfile>("create_full_access_profile", { path }),
   saveProfile: (profile: WorkspaceProfile) => invoke<WorkspaceProfile>("save_profile", { profile }),
   deleteProfile: (profileId: string) => invoke<void>("delete_profile", { profileId }),
   startProfile: (profileId: string) => invoke<RuntimeStatus>("start_profile", { profileId }),

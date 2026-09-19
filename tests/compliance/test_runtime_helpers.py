@@ -373,6 +373,41 @@ class RuntimeHelperTests(unittest.TestCase):
 
         self.assertEqual(runtime.workspace.root, Path(tmp).resolve())
 
+    def test_host_mode_accepts_home_as_workspace_for_full_access(self) -> None:
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp).resolve()
+            (home / "note.txt").write_text("home note\n", encoding="utf-8")
+            with patch.object(server_module.Path, "home", return_value=home):
+                runtime = Runtime(
+                    home,
+                    permission_mode="host",
+                    file_access_root=home,
+                    enable_workflow_tools=True,
+                    defer_workflow_tools=True,
+                    state_root=home / "state",
+                )
+                try:
+                    self.assertEqual(runtime.workspace.root, home)
+                    self.assertEqual(runtime.read_file({"path": "note.txt"})["content"], "home note\n")
+                    self.assertEqual(runtime.read_file({"path": str(home / "note.txt")})["content"], "home note\n")
+                finally:
+                    runtime.close()
+
+    def test_non_host_modes_still_reject_home_as_workspace(self) -> None:
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp).resolve()
+            with patch.object(server_module.Path, "home", return_value=home):
+                for mode in ("safe", "trusted", "dangerous"):
+                    with self.subTest(mode=mode), self.assertRaisesRegex(ToolFailure, "Unsafe workspace root"):
+                        Runtime(home, permission_mode=mode)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX filesystem root guard")
+    def test_all_modes_still_reject_filesystem_root_as_workspace(self) -> None:
+        root = Path("/").resolve()
+        for mode in ("safe", "trusted", "dangerous", "host"):
+            with self.subTest(mode=mode), self.assertRaisesRegex(ToolFailure, "Unsafe workspace root"):
+                Runtime(root, permission_mode=mode)
+
     def test_home_file_scope_expands_file_tools_without_expanding_project_scope(self) -> None:
         with TemporaryDirectory() as workspace_tmp, TemporaryDirectory() as home_tmp:
             workspace = Path(workspace_tmp)
