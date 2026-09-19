@@ -9,20 +9,27 @@ API.
 
 - Compact menu-bar panel with no macOS Dock icon
 - Multiple workspace profiles with one automatically assigned local port per workspace
+- Mode-first profile creation: Standard asks for a workspace folder, while Full
+  Access uses the user's home directory immediately and requires no folder picker.
+  Locations outside Home can still be added explicitly.
 - One-click OAuth runtime startup through Cloudflare Quick Tunnels
 - A simplified per-workspace access menu: **Standard** maps to the workspace-confined
   trusted runtime, while **Full Access** maps to host mode for agent workflows that
   intentionally need the wider Mac environment. Legacy safe/dangerous profiles remain
   readable until the user explicitly chooses one of the two desktop modes.
 - Independent **Allowed folders** control: ordinary file tools and `apply_patch`
-  can use the workspace plus any folders the user explicitly adds. Relative paths
-  remain workspace-relative; absolute paths are accepted only inside those allowed
-  folders. Git, LSP, workflow state, checks, and project context stay anchored to
-  the workspace.
+  can use the workspace plus any folders the user explicitly adds. Full Access
+  automatically includes the user's home directory, so this list only needs paths
+  outside Home such as `/Applications`; Standard remains workspace-scoped unless
+  specific folders are added. Relative paths remain workspace-relative. Git, LSP,
+  workflow state, checks, and project context stay anchored to the workspace.
 - **Full Access** launches host mode with SSH/Git credentials and compatibility
   annotations enabled for clients that otherwise refuse command tools. On macOS,
   the launcher also recovers `SSH_AUTH_SOCK` from the GUI environment, login shell,
   or launchd so desktop-started runtimes match terminal SSH behavior more closely.
+- Per-workspace environment variables and API keys can be added from Workspace
+  settings. Their values are stored in the operating-system keychain rather than
+  `profiles.json` and are injected only into that workspace's Full Access runtime.
 - Stable per-workspace accent backgrounds and in-place second-click confirmation for
   Stop and Quit, so multiple workspaces are easier to distinguish and accidental
   shutdowns are less likely.
@@ -72,8 +79,8 @@ locations.
 pipeline. Push an existing version-matched tag such as:
 
 ```bash
-git tag desktop-v0.3.31
-git push origin desktop-v0.3.31
+git tag desktop-v0.3.32
+git push origin desktop-v0.3.32
 ```
 
 The workflow validates the tag against the desktop metadata, builds the Apple
@@ -199,5 +206,6 @@ the custom MCP app address in ChatGPT after starting a new tunnel.
   allows authenticated MCP commands to act with the desktop user's authority.
 - Runtime and tunnel processes are placed in dedicated process groups and are
   stopped together on app exit.
-- Configuration is public metadata in `~/.coding-tools-mcp-desktop/profiles.json`;
-  credentials are stored in Keychain/Credential Manager/Secret Service.
+- Configuration and environment-variable names are public metadata in
+  `~/.coding-tools-mcp-desktop/profiles.json`; credential and environment-variable
+  values are stored in Keychain/Credential Manager/Secret Service.

@@ -1,6 +1,6 @@
 use rand::distr::{Alphanumeric, SampleString};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 pub const MCP_ENDPOINT_PATH: &str = "/mcp";
@@ -20,7 +20,16 @@ fn default_permission_mode() -> String {
 fn default_file_access_scope() -> String {
     "workspace".into()
 }
+
+pub(crate) fn user_home_directory() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .and_then(|home| std::fs::canonicalize(home).ok())
+}
 fn default_allowed_paths() -> Vec<String> {
+    Vec::new()
+}
+fn default_environment_variables() -> Vec<EnvironmentVariable> {
     Vec::new()
 }
 fn default_port() -> u16 {
@@ -92,6 +101,13 @@ pub struct AuthConfig {
     pub bearer_token: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct EnvironmentVariable {
+    pub name: String,
+    #[serde(default)]
+    pub value: String,
+}
+
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {
@@ -113,6 +129,8 @@ pub struct RuntimeConfig {
     pub file_access_scope: String,
     #[serde(default = "default_allowed_paths")]
     pub allowed_paths: Vec<String>,
+    #[serde(default = "default_environment_variables")]
+    pub environment_variables: Vec<EnvironmentVariable>,
 }
 
 impl Default for RuntimeConfig {
@@ -122,6 +140,7 @@ impl Default for RuntimeConfig {
             permission_mode: default_permission_mode(),
             file_access_scope: default_file_access_scope(),
             allowed_paths: default_allowed_paths(),
+            environment_variables: default_environment_variables(),
         }
     }
 }
@@ -166,9 +185,26 @@ impl WorkspaceProfile {
         })
     }
 
+    pub fn new_full_access(port: u16) -> Result<Self, String> {
+        let home = user_home_directory().ok_or("Could not resolve the user home directory.")?;
+        let mut profile = Self::new(home.to_string_lossy().into_owned(), port)?;
+        profile.name = "Full Access".into();
+        profile.runtime.permission_mode = "host".into();
+        Ok(profile)
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if !Path::new(&self.path).is_dir() {
             return Err(format!("Workspace directory does not exist: {}", self.path));
+        }
+        let workspace = std::fs::canonicalize(&self.path).map_err(|error| error.to_string())?;
+        if workspace.parent().is_none() {
+            return Err("Choose a project folder instead of the filesystem root.".into());
+        }
+        if user_home_directory().is_some_and(|home| workspace == home)
+            && self.runtime.permission_mode != "host"
+        {
+            return Err("Choose a project folder inside your home directory instead of the home directory itself.".into());
         }
         if self.name.trim().is_empty() {
             return Err("Workspace name cannot be empty.".into());
@@ -182,10 +218,7 @@ impl WorkspaceProfile {
         ) {
             return Err("Unknown permission mode.".into());
         }
-        if !matches!(
-            self.runtime.file_access_scope.as_str(),
-            "workspace" | "home"
-        ) {
+        if self.runtime.file_access_scope != "workspace" {
             return Err("Unknown file access scope.".into());
         }
         for allowed in &self.runtime.allowed_paths {
@@ -202,6 +235,62 @@ impl WorkspaceProfile {
                 return Err(format!(
                     "Filesystem root cannot be used as an allowed folder: {allowed}"
                 ));
+            }
+            let resolved = std::fs::canonicalize(path).map_err(|error| error.to_string())?;
+            if let Some(home) = user_home_directory() {
+                if resolved == home {
+                    return Err("The user home directory cannot be added as an allowed folder. Full Access includes it automatically; Standard Access requires a specific folder.".into());
+                }
+                if self.runtime.permission_mode == "host" && resolved.starts_with(home) {
+                    return Err("This folder is already included automatically by Full Access. Add only locations outside your user home.".into());
+                }
+            }
+        }
+        let mut environment_names = std::collections::HashSet::new();
+        for variable in &self.runtime.environment_variables {
+            let name = variable.name.trim();
+            if name.is_empty()
+                || !name.bytes().enumerate().all(|(index, byte)| {
+                    byte == b'_'
+                        || byte.is_ascii_alphanumeric() && (index > 0 || byte.is_ascii_alphabetic())
+                })
+            {
+                return Err(format!(
+                    "Invalid environment variable name: {}",
+                    variable.name
+                ));
+            }
+            let upper = name.to_ascii_uppercase();
+            let reserved = matches!(
+                upper.as_str(),
+                "PATH"
+                    | "HOME"
+                    | "USERPROFILE"
+                    | "SHELL"
+                    | "TMPDIR"
+                    | "TEMP"
+                    | "TMP"
+                    | "SSH_AUTH_SOCK"
+                    | "PYTHONPATH"
+                    | "PYTHONHOME"
+                    | "NODE_OPTIONS"
+                    | "RUBYOPT"
+                    | "BASH_ENV"
+                    | "ENV"
+                    | "ZDOTDIR"
+            ) || upper.starts_with("CODING_TOOLS_MCP_")
+                || upper.starts_with("DYLD_")
+                || upper.starts_with("LD_");
+            if reserved {
+                return Err(format!("Environment variable is reserved: {name}"));
+            }
+            if variable.value.is_empty() {
+                return Err(format!(
+                    "Environment variable value cannot be empty: {name}"
+                ));
+            }
+            if !environment_names.insert(upper) {
+                return Err(format!("Duplicate environment variable: {name}"));
             }
         }
         if !matches!(self.auth.r#type.as_str(), "oauth" | "bearer") {
@@ -285,7 +374,7 @@ pub struct RuntimeStatus {
 
 impl RuntimeStatus {
     pub fn is_active(&self) -> bool {
-        self.pid.is_some() || self.state == "starting"
+        self.pid.is_some() || matches!(self.state.as_str(), "starting" | "stopping")
     }
 
     pub fn stopped(port: u16) -> Self {
@@ -311,6 +400,98 @@ pub struct LogBundle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_validation_explains_home_root_rejection_but_accepts_children() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut profile =
+            WorkspaceProfile::new(temporary.path().to_string_lossy().into_owned(), 28766).unwrap();
+        assert!(profile.validate().is_ok());
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .unwrap();
+        profile.path = Path::new(&home).to_string_lossy().into_owned();
+        assert!(profile
+            .validate()
+            .unwrap_err()
+            .contains("home directory itself"));
+        let root = Path::new(&profile.path)
+            .ancestors()
+            .last()
+            .unwrap()
+            .to_path_buf();
+        profile.path = root.to_string_lossy().into_owned();
+        assert!(profile.validate().unwrap_err().contains("filesystem root"));
+    }
+
+    #[test]
+    fn full_access_profile_uses_home_without_folder_selection() {
+        let profile = WorkspaceProfile::new_full_access(28766).unwrap();
+        assert_eq!(profile.name, "Full Access");
+        assert_eq!(profile.runtime.permission_mode, "host");
+        assert_eq!(
+            std::fs::canonicalize(&profile.path).unwrap(),
+            user_home_directory().unwrap()
+        );
+        assert!(profile.validate().is_ok());
+    }
+
+    #[test]
+    fn home_cannot_be_an_explicit_allowed_folder() {
+        let Some(home) = user_home_directory() else {
+            return;
+        };
+        let temporary = tempfile::tempdir().unwrap();
+        let mut profile =
+            WorkspaceProfile::new(temporary.path().to_string_lossy().into_owned(), 28766).unwrap();
+        profile.runtime.allowed_paths = vec![home.to_string_lossy().into_owned()];
+        assert!(profile
+            .validate()
+            .unwrap_err()
+            .contains("Full Access includes it automatically"));
+    }
+
+    #[test]
+    fn environment_variable_validation_accepts_api_keys() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut profile =
+            WorkspaceProfile::new(temporary.path().to_string_lossy().into_owned(), 28766).unwrap();
+        profile.runtime.environment_variables = vec![EnvironmentVariable {
+            name: "OPENAI_API_KEY".into(),
+            value: "secret".into(),
+        }];
+        assert!(profile.validate().is_ok());
+    }
+
+    #[test]
+    fn environment_variable_validation_rejects_unsafe_or_duplicate_names() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut profile =
+            WorkspaceProfile::new(temporary.path().to_string_lossy().into_owned(), 28766).unwrap();
+        for name in [
+            "9INVALID",
+            "PATH",
+            "CODING_TOOLS_MCP_AUTH_TOKEN",
+            "DYLD_INSERT_LIBRARIES",
+        ] {
+            profile.runtime.environment_variables = vec![EnvironmentVariable {
+                name: name.into(),
+                value: "secret".into(),
+            }];
+            assert!(profile.validate().is_err(), "{name} should be rejected");
+        }
+        profile.runtime.environment_variables = vec![
+            EnvironmentVariable {
+                name: "API_KEY".into(),
+                value: "one".into(),
+            },
+            EnvironmentVariable {
+                name: "api_key".into(),
+                value: "two".into(),
+            },
+        ];
+        assert!(profile.validate().unwrap_err().contains("Duplicate"));
+    }
 
     #[test]
     fn public_urls_are_deterministic() {

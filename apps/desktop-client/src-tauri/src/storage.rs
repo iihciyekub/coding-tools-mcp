@@ -1,4 +1,4 @@
-use crate::models::WorkspaceProfile;
+use crate::models::{user_home_directory, EnvironmentVariable, WorkspaceProfile};
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -37,6 +37,8 @@ struct ProfileSecrets {
     oauth_token_secret: String,
     #[serde(default)]
     bearer_token: String,
+    #[serde(default)]
+    environment_variables: Vec<EnvironmentVariable>,
 }
 
 impl ProfileSecrets {
@@ -46,6 +48,7 @@ impl ProfileSecrets {
             oauth_password: profile.auth.oauth_password.clone(),
             oauth_token_secret: profile.auth.oauth_token_secret.clone(),
             bearer_token: profile.auth.bearer_token.clone(),
+            environment_variables: profile.runtime.environment_variables.clone(),
         }
     }
 
@@ -54,6 +57,7 @@ impl ProfileSecrets {
         profile.auth.oauth_password = self.oauth_password;
         profile.auth.oauth_token_secret = self.oauth_token_secret;
         profile.auth.bearer_token = self.bearer_token;
+        profile.runtime.environment_variables = self.environment_variables;
     }
 }
 
@@ -83,13 +87,14 @@ impl ProfileStore {
         } else {
             ProfileDocument::default()
         };
-        let mut normalized_legacy_auth = false;
+        let mut normalized_legacy_profiles = false;
         for profile in &mut document.profiles {
             if profile.auth.r#type == "noauth" {
                 profile.auth.r#type = "oauth".into();
-                normalized_legacy_auth = true;
+                normalized_legacy_profiles = true;
             }
         }
+        normalized_legacy_profiles |= normalize_legacy_file_access(&mut document.profiles);
 
         let legacy = Self::legacy_secrets(&home)?;
         let profile_ids = document
@@ -138,7 +143,7 @@ impl ProfileStore {
             language: normalize_language(&document.language).to_string(),
             profiles: document.profiles,
         };
-        if normalized_legacy_auth {
+        if normalized_legacy_profiles {
             store.persist()?;
         }
         Ok(store)
@@ -267,6 +272,9 @@ impl ProfileStore {
             profile.auth.oauth_password.clear();
             profile.auth.oauth_token_secret.clear();
             profile.auth.bearer_token.clear();
+            for variable in &mut profile.runtime.environment_variables {
+                variable.value.clear();
+            }
         }
         atomic_json(
             &self.home.join("profiles.json"),
@@ -276,6 +284,28 @@ impl ProfileStore {
             },
         )
     }
+}
+
+fn normalize_legacy_file_access(profiles: &mut [WorkspaceProfile]) -> bool {
+    let home = user_home_directory();
+    let mut changed = false;
+    for profile in profiles {
+        if profile.runtime.file_access_scope != "workspace" {
+            profile.runtime.file_access_scope = "workspace".into();
+            changed = true;
+        }
+        let full_access = profile.runtime.permission_mode == "host";
+        let before = profile.runtime.allowed_paths.len();
+        profile.runtime.allowed_paths.retain(|raw| {
+            let Ok(path) = std::fs::canonicalize(raw) else {
+                return true;
+            };
+            home.as_ref()
+                .is_none_or(|home| path != *home && (!full_access || !path.starts_with(home)))
+        });
+        changed |= profile.runtime.allowed_paths.len() != before;
+    }
+    changed
 }
 
 fn normalize_language(language: &str) -> &'static str {
@@ -376,6 +406,74 @@ fn restrict(_path: &Path, _mode: u32) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_home_access_is_removed_from_saved_profiles() {
+        let Some(home) = user_home_directory() else {
+            return;
+        };
+        let root = std::env::current_dir().unwrap();
+        let mut profile =
+            WorkspaceProfile::new(root.to_string_lossy().into_owned(), 28766).unwrap();
+        profile.runtime.file_access_scope = "home".into();
+        profile.runtime.allowed_paths = vec![
+            home.to_string_lossy().into_owned(),
+            root.to_string_lossy().into_owned(),
+        ];
+        assert!(normalize_legacy_file_access(std::slice::from_mut(
+            &mut profile
+        )));
+        assert_eq!(profile.runtime.file_access_scope, "workspace");
+        assert_eq!(profile.runtime.allowed_paths, vec![root.to_string_lossy()]);
+    }
+
+    #[test]
+    fn profile_secrets_restore_environment_variable_values() {
+        let root = std::env::current_dir().unwrap();
+        let mut profile =
+            WorkspaceProfile::new(root.to_string_lossy().into_owned(), 28766).unwrap();
+        profile.runtime.environment_variables = vec![EnvironmentVariable {
+            name: "OPENAI_API_KEY".into(),
+            value: "secret".into(),
+        }];
+        let secrets = ProfileSecrets::from_profile(&profile);
+        profile.runtime.environment_variables.clear();
+        secrets.apply(&mut profile);
+        assert_eq!(
+            profile.runtime.environment_variables[0].name,
+            "OPENAI_API_KEY"
+        );
+        assert_eq!(profile.runtime.environment_variables[0].value, "secret");
+    }
+
+    #[test]
+    fn persisted_profiles_keep_environment_names_but_redact_values() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = std::env::current_dir().unwrap();
+        let mut profile =
+            WorkspaceProfile::new(root.to_string_lossy().into_owned(), 28766).unwrap();
+        profile.runtime.environment_variables = vec![EnvironmentVariable {
+            name: "OPENAI_API_KEY".into(),
+            value: "secret".into(),
+        }];
+        let store = ProfileStore {
+            home: temporary.path().to_path_buf(),
+            language: "en".into(),
+            profiles: vec![profile],
+        };
+        store.persist().unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(temporary.path().join("profiles.json")).unwrap())
+                .unwrap();
+        let variable = &saved["profiles"][0]["runtime"]["environment_variables"][0];
+        assert_eq!(variable["name"], "OPENAI_API_KEY");
+        assert_eq!(variable["value"], "");
+        assert!(
+            !std::fs::read_to_string(temporary.path().join("profiles.json"))
+                .unwrap()
+                .contains("\"value\": \"secret\"")
+        );
+    }
 
     #[test]
     fn rejects_profile_id_traversal() {

@@ -7,16 +7,17 @@ import { detectLanguage, translator, type Language } from "./i18n";
 import type { DependencyStatus, LogBundle, PermissionMode, RuntimeStatus, WorkspaceProfile } from "./types";
 import { publicEndpoint, workspaceHue } from "./utils";
 
-const PANEL_WIDTH = 360;
-const APP_VERSION = "0.3.31";
-type Page = "home" | "workspaces" | "environment" | "logs" | "settings" | "workflow" | "more";
+const PANEL_WIDTH = 320;
+const APP_VERSION = "0.3.32";
+type Page = "home" | "new-access" | "workspaces" | "environment" | "logs" | "settings" | "workflow" | "more";
 type CopyAction = "server-name" | "server-url" | "credential" | "logs";
 type ConfirmAction = { kind: "stop"; profileId: string } | { kind: "stop-all" } | { kind: "quit" } | null;
-type WorkspaceAction = "starting" | "stopping";
+type WorkspaceAction = { state: "starting" | "stopping" };
 
 const stoppedStatus = (port: number): RuntimeStatus => ({ state: "stopped", pid: null, server_name: "", local_message: "Not running", public_message: "Unknown", public_url: "", local_url: `http://127.0.0.1:${port}/mcp` });
 const quickTunnelProfile = (profile: WorkspaceProfile): WorkspaceProfile => ({ ...profile, tunnel: { ...profile.tunnel, type: "cloudflare", cloudflare_mode: "quick", domain: "", public_url: "", frp_server: "", frp_subdomain: "", cloudflare_token: "" }, auth: { ...profile.auth, type: "oauth" } });
 const shortPath = (path: string) => path.split(/[\\/]/).filter(Boolean).slice(-2).join(" / ") || path;
+const isGlobalFullAccess = (profile: WorkspaceProfile) => profile.name === "Full Access" && profile.runtime.permission_mode === "host";
 
 function App() {
   const panelRef = useRef<HTMLElement>(null);
@@ -40,18 +41,21 @@ function App() {
   const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null);
   const [runtimeLogs, setRuntimeLogs] = useState<LogBundle | null>(null);
   const [installLog, setInstallLog] = useState<string[]>([]);
+  const [environmentName, setEnvironmentName] = useState("");
+  const [environmentValue, setEnvironmentValue] = useState("");
   const [error, setError] = useState("");
 
   const workspaceStatus = (profile: WorkspaceProfile) => {
     const current = statuses[profile.id] ?? stoppedStatus(profile.runtime.local_port);
     const action = workspaceActions[profile.id];
-    return action ? { ...current, state: action } : current;
+    return action ? { ...current, state: action.state } : current;
   };
   const selected = profiles.find((profile) => profile.id === selectedId) ?? null;
+  const selectedIsGlobalFullAccess = selected ? isGlobalFullAccess(selected) : false;
   const selectedPosition = selected ? profiles.findIndex((profile) => profile.id === selected.id) + 1 : 0;
   const selectedSubtitle = selected
-    ? shortPath(selected.path)
-    : t("Add a workspace to begin.");
+    ? selectedIsGlobalFullAccess ? t("Entire user home") : shortPath(selected.path)
+    : t("Choose an access mode to begin.");
   const status = selected ? workspaceStatus(selected) : null;
   const starting = status?.state === "starting";
   const stopping = status?.state === "stopping";
@@ -60,9 +64,7 @@ function App() {
   const credentialLabel = selected?.auth.type === "bearer" ? "Bearer Token" : t("OAuth authorization passcode");
   const credential = selected?.auth.type === "bearer" ? selected.auth.bearer_token : selected?.auth.oauth_password ?? "";
   const selectedWorkflow = selected ? workflow[selected.id] : undefined;
-  const allowedFolderCount = selected
-    ? selected.runtime.allowed_paths.length + (selected.runtime.file_access_scope === "home" ? 1 : 0)
-    : 0;
+  const allowedFolderCount = selected?.runtime.allowed_paths.length ?? 0;
   const environmentReady = dependencies.runtime_ready && dependencies.cloudflared;
   const activeWorkspaceCount = profiles.reduce((count, profile) => {
     const profileStatus = workspaceStatus(profile);
@@ -79,19 +81,19 @@ function App() {
       setStatuses(snapshot.statuses);
       setWorkflow(snapshot.workflow);
       setDependencies(snapshot.dependencies);
+      if (!snapshot.profiles.length) setPage("new-access");
       setSelectedId((current) => keepSelection && current && snapshot.profiles.some((profile) => profile.id === current) ? current : snapshot.profiles[0]?.id ?? null);
-      setError("");
     } catch (reason) { setError(String(reason)); }
   }, []);
 
   useEffect(() => { void refresh(false); const timer = window.setInterval(() => void refresh(), 2500); return () => window.clearInterval(timer); }, [refresh]);
-  useEffect(() => { selectedIdRef.current = selectedId; setRevealCredential(false); setConfirmDelete(false); setConfirmAction(null); setRuntimeLogs(null); }, [selectedId]);
+  useEffect(() => { selectedIdRef.current = selectedId; setRevealCredential(false); setConfirmDelete(false); setConfirmAction(null); setRuntimeLogs(null); setEnvironmentName(""); setEnvironmentValue(""); }, [selectedId]);
   useEffect(() => { if (!confirmAction) return; const timer = window.setTimeout(() => setConfirmAction(null), 4000); return () => window.clearTimeout(timer); }, [confirmAction]);
   useEffect(() => {
     const panel = panelRef.current;
     if (!panel || typeof ResizeObserver === "undefined") return;
     let frame = 0;
-    const resize = () => { window.cancelAnimationFrame(frame); frame = window.requestAnimationFrame(() => void getCurrentWindow().setSize(new LogicalSize(PANEL_WIDTH, Math.min(610, Math.max(186, Math.ceil(panel.scrollHeight)))))); };
+    const resize = () => { window.cancelAnimationFrame(frame); frame = window.requestAnimationFrame(() => void getCurrentWindow().setSize(new LogicalSize(PANEL_WIDTH, Math.min(544, Math.max(166, Math.ceil(panel.scrollHeight)))))); };
     const observer = new ResizeObserver(resize); observer.observe(panel); resize();
     return () => { window.cancelAnimationFrame(frame); observer.disconnect(); };
   }, []);
@@ -104,7 +106,7 @@ function App() {
     if (!value) return;
     try { await writeText(value); setCopied(action); window.setTimeout(() => setCopied((current) => current === action ? null : current), 1200); } catch (reason) { setError(String(reason)); }
   };
-  const addWorkspace = async () => {
+  const addStandardWorkspace = async () => {
     const appWindow = getCurrentWindow(); setError("");
     try {
       await appWindow.hide();
@@ -115,38 +117,48 @@ function App() {
       const profile = await api.createProfile(chosen); await refresh(false); setSelectedId(profile.id); setPage("home");
     } catch (reason) { setError(String(reason)); }
   };
-  const setWorkspaceAction = (profileId: string, action: WorkspaceAction | null, expected?: WorkspaceAction) => {
+  const addFullAccess = async () => {
+    setBusy("full-access-profile"); setError("");
+    try {
+      const profile = await api.createFullAccessProfile();
+      await refresh(false); setSelectedId(profile.id); setPage("home");
+    } catch (reason) { setError(String(reason)); } finally { setBusy(null); }
+  };
+  const setWorkspaceAction = (profileId: string, state: WorkspaceAction["state"] | null, expected?: WorkspaceAction) => {
     if (expected && workspaceActionsRef.current[profileId] !== expected) return;
     const next = { ...workspaceActionsRef.current };
+    const action = state ? { state } : undefined;
     if (action) next[profileId] = action;
     else delete next[profileId];
     workspaceActionsRef.current = next;
     setWorkspaceActions(next);
+    return action;
   };
   const startWorkspace = async (profile: WorkspaceProfile) => {
-    setWorkspaceAction(profile.id, "starting"); setError("");
+    const action = setWorkspaceAction(profile.id, "starting"); setError("");
     try {
       const saved = await api.saveProfile(quickTunnelProfile(profile));
       setProfiles((current) => current.map((item) => item.id === saved.id ? saved : item));
-      if (workspaceActionsRef.current[profile.id] !== "starting") return;
+      if (workspaceActionsRef.current[profile.id] !== action) return;
       const next = await api.startProfile(saved.id);
+      if (workspaceActionsRef.current[profile.id] !== action) return;
       setStatuses((current) => ({ ...current, [profile.id]: next }));
       const endpoint = next.state === "running" ? publicEndpoint(saved, next.public_url) : "";
       if (endpoint) await copy(endpoint, "server-url");
     } catch (reason) {
-      if (String(reason) !== "Workspace startup was cancelled.") setError(String(reason));
-    } finally { setWorkspaceAction(profile.id, null, "starting"); }
+      if (workspaceActionsRef.current[profile.id] === action && String(reason) !== "Workspace startup was cancelled.") setError(String(reason));
+    } finally { setWorkspaceAction(profile.id, null, action); }
   };
   const stopWorkspace = async (profileId: string) => {
-    setWorkspaceAction(profileId, "stopping"); setError("");
+    const action = setWorkspaceAction(profileId, "stopping"); setError("");
     try {
       const next = await api.stopProfile(profileId);
       setStatuses((current) => ({ ...current, [profileId]: next }));
     } catch (reason) { setError(String(reason)); }
-    finally { setWorkspaceAction(profileId, null, "stopping"); }
+    finally { setWorkspaceAction(profileId, null, action); }
   };
   const toggleWorkspace = () => {
-    if (!selected || !status || stopping) return;
+    if (!selected || !status || stopping || busy === "stop-all") return;
     if (starting) { setConfirmAction(null); void stopWorkspace(selected.id); return; }
     if (running) {
       if (confirmAction?.kind !== "stop" || confirmAction.profileId !== selected.id) { setConfirmAction({ kind: "stop", profileId: selected.id }); return; }
@@ -189,20 +201,40 @@ function App() {
       setProfiles((current) => current.map((profile) => profile.id === saved.id ? saved : profile)); setError("");
     } catch (reason) { setError(String(reason)); } finally { setBusy(null); }
   };
-  const removeLegacyHomeAccess = async () => {
-    if (!selected || running) return; setBusy("file-scope");
+  const saveEnvironmentVariable = async () => {
+    if (!selected || running || selected.runtime.permission_mode !== "host") return;
+    const name = environmentName.trim();
+    if (!name || !environmentValue) { setError(t("Enter a variable name and value.")); return; }
+    setBusy("environment-variable"); setError("");
     try {
-      const saved = await api.saveProfile({ ...selected, runtime: { ...selected.runtime, file_access_scope: "workspace" } });
-      setProfiles((current) => current.map((profile) => profile.id === saved.id ? saved : profile)); setError("");
+      const variables = selected.runtime.environment_variables.filter((item) => item.name.toUpperCase() !== name.toUpperCase());
+      const saved = await api.saveProfile({ ...selected, runtime: { ...selected.runtime, environment_variables: [...variables, { name, value: environmentValue }] } });
+      setProfiles((current) => current.map((profile) => profile.id === saved.id ? saved : profile));
+      setEnvironmentName(""); setEnvironmentValue("");
+    } catch (reason) { setError(String(reason)); } finally { setBusy(null); }
+  };
+  const removeEnvironmentVariable = async (name: string) => {
+    if (!selected || running) return;
+    setBusy("environment-variable"); setError("");
+    try {
+      const saved = await api.saveProfile({ ...selected, runtime: { ...selected.runtime, environment_variables: selected.runtime.environment_variables.filter((item) => item.name !== name) } });
+      setProfiles((current) => current.map((profile) => profile.id === saved.id ? saved : profile));
     } catch (reason) { setError(String(reason)); } finally { setBusy(null); }
   };
   const stopAllWorkspaces = async () => {
     if (!activeWorkspaceCount || busy === "stop-all") return;
     if (confirmAction?.kind !== "stop-all") { setConfirmAction({ kind: "stop-all" }); return; }
     setConfirmAction(null); setBusy("stop-all"); setError("");
+    const actions = profiles.filter((profile) => {
+      const current = workspaceStatus(profile);
+      return current.pid || current.state === "starting" || current.state === "stopping";
+    }).map((profile) => [profile.id, setWorkspaceAction(profile.id, "stopping")] as const);
     try { setStatuses(await api.stopAllProfiles()); }
     catch (reason) { setError(String(reason)); }
-    finally { setBusy(null); }
+    finally {
+      for (const [id, action] of actions) setWorkspaceAction(id, null, action);
+      setBusy(null);
+    }
   };
   const quitApp = async () => { if (confirmAction?.kind !== "quit") { setConfirmAction({ kind: "quit" }); return; } setConfirmAction(null); await api.quit(); };
   const removeWorkspace = async () => {
@@ -223,24 +255,30 @@ function App() {
   };
   const openSubpage = (next: Page, back: Page) => { setBackTarget(back); setPage(next); };
 
-  const pageTitle: Record<Page, string> = { home: "", workspaces: t("Workspaces"), environment: t("Environment & setup"), logs: t("Runtime logs"), settings: t("Workspace settings"), workflow: t("Workflow activity"), more: t("More") };
+  const pageTitle: Record<Page, string> = { home: "", "new-access": t("Choose access mode"), workspaces: t("Access profiles"), environment: t("Environment & setup"), logs: t("Runtime logs"), settings: t("Workspace settings"), workflow: t("Workflow activity"), more: t("More") };
   const backPage = page === "logs" || page === "settings" || page === "workflow" ? backTarget : "home";
 
   return <main className="panel" ref={panelRef}>
     {page === "home" ? <Header /> : <header className="subpage-header"><button className="icon-button" type="button" aria-label={t("Back")} onClick={() => setPage(backPage)}><BackIcon /></button><strong>{pageTitle[page]}</strong></header>}
-    {error && <div className="error-banner" role="alert"><span>{error}</span><button type="button" onClick={() => setError("")} aria-label={t("Dismiss")}>×</button></div>}
+    {error && <div className="error-banner" role="alert"><span>{t(error)}</span><button type="button" onClick={() => setError("")} aria-label={t("Dismiss")}>×</button></div>}
 
     {page === "home" && <>
       <section className={`workspace-hero ${selected ? "tinted" : ""}`} style={selected ? { "--workspace-hue": workspaceHue(selectedPosition) } as React.CSSProperties : undefined}>
-        <div className="workspace-picker-row"><button className="workspace-picker" type="button" disabled={!profiles.length} onClick={() => setPage("workspaces")}><FolderIcon /><span><strong>{selected?.name ?? t("No workspace")}</strong><small>{selectedSubtitle}</small></span>{profiles.length > 1 && <SwitchIcon />}</button><button className="icon-button" type="button" aria-label={t("Add workspace")} onClick={() => void addWorkspace()}><PlusIcon /></button></div>
+        <div className="workspace-picker-row"><button className="workspace-picker" type="button" disabled={!profiles.length} onClick={() => setPage("workspaces")}>{selectedIsGlobalFullAccess ? <ShieldIcon /> : <FolderIcon />}<span><strong>{selected ? t(selected.name) : t("No access profile")}</strong><small>{selectedSubtitle}</small></span>{profiles.length > 1 && <SwitchIcon />}</button><button className="icon-button" type="button" aria-label={t("Add access profile")} onClick={() => setPage("new-access")}><PlusIcon /></button></div>
         {selected && <div className="status-row"><span className="status-copy"><i className={`status-dot ${status?.state ?? "stopped"}`} />{profiles.length > 1 && <b className="status-index">[{selectedPosition}/{profiles.length}]</b>}{starting ? t("Preparing runtime dependencies…") : stopping ? t("Stopping…") : status?.state === "running" ? t("Running · public tunnel ready") : status?.state === "error" ? t("Connection error") : t("Workspace stopped")}</span><button className={`power-button ${running && !starting ? "danger" : ""} ${confirmAction?.kind === "stop" && confirmAction.profileId === selected.id ? "confirm" : ""}`} type="button" disabled={stopping} onClick={toggleWorkspace}>{starting || stopping ? <SpinnerIcon /> : null}{stopping ? t("Stopping…") : starting ? t("Cancel startup") : confirmAction?.kind === "stop" && confirmAction.profileId === selected.id ? t("Click again to stop") : t(running ? "Stop" : "Start")}</button></div>}
       </section>
       {selected && <section className="connection-block"><ValueButton label={t("MCP name")} copyLabel={t("Copy")} value={status?.server_name || t("Start the workspace to create an MCP name")} disabled={!status?.server_name} copied={copied === "server-name"} onClick={() => void copy(status?.server_name ?? "", "server-name")} /><ValueButton label="Server URL" copyLabel={t("Copy")} value={serverUrl || t("Start the workspace to create a public URL")} disabled={!serverUrl} copied={copied === "server-url"} onClick={() => void copy(serverUrl, "server-url")} /><ValueButton label={credentialLabel} copyLabel={t("Copy")} value={revealCredential ? credential : "••••••••••••"} disabled={!credential} copied={copied === "credential"} onClick={() => void copy(credential, "credential")} after={<button className="reveal-button" type="button" aria-label={t(revealCredential ? "Hide authorization passcode" : "Show authorization passcode")} onClick={(event) => { event.stopPropagation(); setRevealCredential((current) => !current); }}>{revealCredential ? <EyeOffIcon /> : <EyeIcon />}</button>} /></section>}
       <nav className="menu-list" aria-label={t("Manage")}><MenuRow icon={<PackageIcon />} label={t("Environment & setup")} detail={environmentReady ? t("Ready") : t("Setup needed")} onClick={() => setPage("environment")} /><MenuRow icon={<LogIcon />} label={t("Runtime logs")} disabled={!selected || busy === "logs"} onClick={() => { setBackTarget("home"); void loadLogs(); }} /><MenuRow icon={<MoreIcon />} label={t("More")} onClick={() => setPage("more")} /></nav>
-      <footer className="panel-footer"><button type="button" disabled={!selected} onClick={() => openSubpage("settings", "home")}><ShieldIcon /><span>{selected?.runtime.permission_mode === "host" ? t("Full Access") : t("Standard access")}{allowedFolderCount ? ` · ${allowedFolderCount} ${t("folders")}` : ""}</span></button><button className={`footer-quit-button ${confirmAction?.kind === "quit" ? "confirm" : ""}`} type="button" onClick={() => void quitApp()}><PowerIcon /><span>{confirmAction?.kind === "quit" ? t("Click again to quit") : t("Quit Coding Tools MCP")}</span></button></footer>
+      <footer className="panel-footer"><button type="button" disabled={!selected} onClick={() => openSubpage("settings", "home")}><ShieldIcon /><span>{selected?.runtime.permission_mode === "host" ? t("Full Access") : t("Standard access")}{selected?.runtime.permission_mode !== "host" && allowedFolderCount ? ` · ${allowedFolderCount} ${t("folders")}` : ""}</span></button><button className={`footer-quit-button ${confirmAction?.kind === "quit" ? "confirm" : ""}`} type="button" onClick={() => void quitApp()}><PowerIcon /><span>{confirmAction?.kind === "quit" ? t("Click again to quit") : t("Quit Coding Tools MCP")}</span></button></footer>
     </>}
 
-    {page === "workspaces" && <section className="subpage-body"><div className="workspace-list">{profiles.map((profile, index) => { const profileStatus = workspaceStatus(profile); return <button style={{ "--workspace-hue": workspaceHue(index + 1) } as React.CSSProperties} className={`workspace-choice ${profile.id === selectedId ? "selected" : ""}`} type="button" key={profile.id} onClick={() => { setSelectedId(profile.id); setPage("home"); }}><i className={`status-dot ${profileStatus.state}`} /><span><strong>{profile.name}</strong><small>{shortPath(profile.path)}</small></span>{profile.id === selectedId && <CheckIcon />}</button>; })}</div><button className="primary-button" type="button" onClick={() => void addWorkspace()}><PlusIcon />{t("Add workspace")}</button><button className="secondary-button workspace-action-button" type="button" disabled={!selected} onClick={() => openSubpage("settings", "workspaces")}><SettingsIcon />{t("Workspace settings")}</button><button className={`stop-all-button ${confirmAction?.kind === "stop-all" ? "confirm" : ""}`} type="button" disabled={!activeWorkspaceCount || busy === "stop-all"} onClick={() => void stopAllWorkspaces()}>{busy === "stop-all" ? <SpinnerIcon /> : <StopIcon />}{busy === "stop-all" ? t("Stopping all…") : confirmAction?.kind === "stop-all" ? t("Click again to stop all") : t("Stop all")}{activeWorkspaceCount > 1 && busy !== "stop-all" && confirmAction?.kind !== "stop-all" ? <small>{activeWorkspaceCount}</small> : null}</button></section>}
+    {page === "new-access" && <section className="subpage-body access-mode-page">
+      <p className="access-mode-intro">{t("Choose access before creating a profile.")}</p>
+      <button className="access-mode-choice" type="button" onClick={() => void addStandardWorkspace()}><span className="access-mode-icon"><FolderIcon /></span><span><strong>{t("Standard")}</strong><small>{t("Choose one workspace. Commands and files stay inside it unless you add specific folders.")}</small></span><ChevronIcon /></button>
+      <button className="access-mode-choice full" type="button" disabled={busy === "full-access-profile"} onClick={() => void addFullAccess()}><span className="access-mode-icon"><ShieldIcon /></span><span><strong>{t("Full Access")}</strong><small>{t("Uses your entire user home automatically. No workspace selection is required; outside folders remain optional.")}</small></span>{busy === "full-access-profile" ? <SpinnerIcon /> : <ChevronIcon />}</button>
+    </section>}
+
+    {page === "workspaces" && <section className="subpage-body workspace-page"><div className="workspace-list">{profiles.map((profile, index) => { const profileStatus = workspaceStatus(profile); const globalFullAccess = isGlobalFullAccess(profile); return <button style={{ "--workspace-hue": workspaceHue(index + 1) } as React.CSSProperties} className={`workspace-choice ${profile.id === selectedId ? "selected" : ""}`} type="button" key={profile.id} onClick={() => { setSelectedId(profile.id); setPage("home"); }}><i className={`status-dot ${profileStatus.state}`} /><span><strong>{t(profile.name)}</strong><small>{globalFullAccess ? t("Entire user home") : shortPath(profile.path)}</small></span>{profile.id === selectedId && <CheckIcon />}</button>; })}</div><button className="primary-button" type="button" onClick={() => setPage("new-access")}><PlusIcon />{t("Add access profile")}</button><button className="secondary-button workspace-action-button" type="button" disabled={!selected} onClick={() => openSubpage("settings", "workspaces")}><SettingsIcon />{t("Workspace settings")}</button><button className={`stop-all-button ${confirmAction?.kind === "stop-all" ? "confirm" : ""}`} type="button" disabled={!activeWorkspaceCount || busy === "stop-all"} onClick={() => void stopAllWorkspaces()}>{busy === "stop-all" ? <SpinnerIcon /> : <StopIcon />}{busy === "stop-all" ? t("Stopping all…") : confirmAction?.kind === "stop-all" ? t("Click again to stop all") : t("Stop all")}{activeWorkspaceCount > 1 && busy !== "stop-all" && confirmAction?.kind !== "stop-all" ? <small>{activeWorkspaceCount}</small> : null}</button></section>}
 
     {page === "environment" && <section className="subpage-body environment-page">
       <div className="environment-summary"><span><strong>{environmentReady ? t("Runtime environment is ready") : t("Runtime environment needs setup")}</strong><small>{t("Installed in the app's private directory")}</small></span><small>{navigator.platform.includes("Mac") ? "macOS" : navigator.platform}</small></div>
@@ -251,7 +289,27 @@ function App() {
 
     {page === "logs" && <section className="subpage-body logs-page">{installLog.length > 0 && <LogSection title={t("Installation log")} text={installLog.join("\n")} />}{runtimeLogs && <><LogSection title="stdout" text={runtimeLogs.stdout} /><LogSection title="stderr" text={runtimeLogs.stderr} /><LogSection title="cloudflared" text={runtimeLogs.cloudflared} /></>}{!installLog.length && !runtimeLogs && <p className="empty-copy">{t("No logs yet.")}</p>}<div className="button-row">{selected && <button className="secondary-button" type="button" onClick={() => void api.openLogs(selected.id)}>{t("Open logs folder")}</button>}<button className="secondary-button" type="button" onClick={() => void copy([installLog.join("\n"), runtimeLogs ? `stdout\n${runtimeLogs.stdout}\n\nstderr\n${runtimeLogs.stderr}\n\ncloudflared\n${runtimeLogs.cloudflared}` : ""].filter(Boolean).join("\n\n"), "logs")}>{copied === "logs" ? t("Copied") : t("Copy logs")}</button></div></section>}
 
-    {page === "settings" && selected && <section className="subpage-body settings-page"><div className="field-copy"><strong>{t("Access")}</strong><small>{t("Standard stays inside the workspace. Full Access enables host commands, SSH, and remote access.")}</small></div><div className="segmented-control"><button type="button" className={selected.runtime.permission_mode !== "host" ? "selected" : ""} disabled={running || busy === "permission"} onClick={() => void savePermission("trusted")}>{t("Standard")}</button><button type="button" className={selected.runtime.permission_mode === "host" ? "selected danger" : ""} disabled={running || busy === "permission"} onClick={() => void savePermission("host")}>{t("Full Access")}</button></div><div className="field-copy scope-copy"><strong>{t("Allowed folders")}</strong><small>{t("File tools can always use the workspace plus the folders you explicitly allow here. Full Access commands remain host-level.")}</small></div><div className="allowed-folder-list"><div className="allowed-folder-row fixed"><span><small>{t("Workspace")}</small><strong title={selected.path}>{selected.path}</strong></span><em>{t("Always allowed")}</em></div>{selected.runtime.file_access_scope === "home" && <div className="allowed-folder-row"><span><small>{t("Legacy Home access")}</small><strong>~/</strong></span><button type="button" disabled={running || busy === "file-scope"} onClick={() => void removeLegacyHomeAccess()} aria-label={t("Remove allowed folder")}>×</button></div>}{selected.runtime.allowed_paths.map((path) => <div className="allowed-folder-row" key={path}><span><small>{t("Allowed folder")}</small><strong title={path}>{path}</strong></span><button type="button" disabled={running || busy === "file-scope"} onClick={() => void removeAllowedFolder(path)} aria-label={t("Remove allowed folder")}>×</button></div>)}</div><button className="secondary-button add-folder-button" type="button" disabled={running || busy === "file-scope"} onClick={() => void addAllowedFolder()}><PlusIcon />{t("Add allowed folder")}</button>{running && <p className="hint-copy">{t("Stop the workspace before changing settings.")}</p>}<div className="workspace-facts"><span><small>{t("Name")}</small><strong>{selected.name}</strong></span><span><small>{t("Path")}</small><strong>{selected.path}</strong></span><span><small>{t("Allowed folders")}</small><strong>{allowedFolderCount ? String(allowedFolderCount) : t("Workspace only")}</strong></span><span><small>{t("Local port")}</small><strong>{selected.runtime.local_port}</strong></span></div><button className={`secondary-button remove-button ${confirmDelete ? "confirm" : ""}`} type="button" disabled={running || busy === "delete"} onClick={() => void removeWorkspace()}>{confirmDelete ? t("Click again to remove workspace") : t("Remove workspace")}</button><p className="hint-copy">{t("This removes the profile, not the workspace directory.")}</p></section>}
+    {page === "settings" && selected && <section className="subpage-body settings-page">
+      <div className="field-copy"><strong>{t("Access")}</strong><small>{t("Standard stays inside the workspace. Full Access enables host commands, SSH, and remote access.")}</small></div>
+      <div className="segmented-control"><button type="button" className={selected.runtime.permission_mode !== "host" ? "selected" : ""} disabled={selectedIsGlobalFullAccess || running || busy === "permission"} onClick={() => void savePermission("trusted")}>{t("Standard")}</button><button type="button" className={selected.runtime.permission_mode === "host" ? "selected danger" : ""} disabled={selectedIsGlobalFullAccess || running || busy === "permission"} onClick={() => void savePermission("host")}>{t("Full Access")}</button></div>
+      <div className="field-copy scope-copy"><strong>{t(selected.runtime.permission_mode === "host" ? "Full Access coverage" : "Allowed folders")}</strong><small>{t(selected.runtime.permission_mode === "host" ? "Your entire user home is already available. No folder selection is required. You can optionally add locations outside Home, such as Applications." : "Standard Access includes the workspace. Add only the specific extra folders it needs.")}</small></div>
+      <div className="allowed-folder-list">
+        {!selectedIsGlobalFullAccess && <div className="allowed-folder-row fixed"><span><small>{t("Workspace")}</small><strong title={selected.path}>{selected.path}</strong></span><em>{t("Always allowed")}</em></div>}
+        {selected.runtime.permission_mode === "host" && <div className="allowed-folder-row fixed"><span><small>{t("User home")}</small><strong>~/</strong></span><em>{t("Full Access")}</em></div>}
+        {selected.runtime.allowed_paths.map((path) => <div className="allowed-folder-row" key={path}><span><small>{t("Allowed folder")}</small><strong title={path}>{path}</strong></span><button type="button" disabled={running || busy === "file-scope"} onClick={() => void removeAllowedFolder(path)} aria-label={t("Remove allowed folder")}>×</button></div>)}
+      </div>
+      <button className="secondary-button add-folder-button" type="button" disabled={running || busy === "file-scope"} onClick={() => void addAllowedFolder()}><PlusIcon />{t(selected.runtime.permission_mode === "host" ? "Add folder outside Home (optional)" : "Add allowed folder")}</button>
+      <div className="field-copy scope-copy"><strong>{t("Environment variables / API keys")}</strong><small>{t(selected.runtime.permission_mode === "host" ? "Values are stored in the system keychain and injected only into this workspace's Full Access runtime." : "Switch to Full Access to add API keys for this workspace's runtime.")}</small></div>
+      {selected.runtime.environment_variables.length > 0 && <div className="environment-variable-list">{selected.runtime.environment_variables.map((variable) => <div className="environment-variable-row" key={variable.name}><span><strong>{variable.name}</strong><small>••••••••</small></span><button type="button" disabled={running || busy === "environment-variable"} onClick={() => void removeEnvironmentVariable(variable.name)} aria-label={t("Remove environment variable")}>×</button></div>)}</div>}
+      <form className="environment-variable-form" onSubmit={(event) => { event.preventDefault(); void saveEnvironmentVariable(); }}>
+        <input aria-label={t("Variable name")} autoCapitalize="none" autoComplete="off" spellCheck={false} placeholder="OPENAI_API_KEY" value={environmentName} disabled={running || busy === "environment-variable" || selected.runtime.permission_mode !== "host"} onChange={(event) => setEnvironmentName(event.target.value)} />
+        <input aria-label={t("Variable value")} autoComplete="off" placeholder={t("Secret value")} type="password" value={environmentValue} disabled={running || busy === "environment-variable" || selected.runtime.permission_mode !== "host"} onChange={(event) => setEnvironmentValue(event.target.value)} />
+        <button className="secondary-button" type="submit" disabled={running || busy === "environment-variable" || selected.runtime.permission_mode !== "host" || !environmentName.trim() || !environmentValue}>{t("Add or replace")}</button>
+      </form>
+      {running && <p className="hint-copy">{t("Stop the workspace before changing settings.")}</p>}
+      <div className="workspace-facts"><span><small>{t("Name")}</small><strong>{t(selected.name)}</strong></span><span><small>{t(selectedIsGlobalFullAccess ? "Base access" : "Path")}</small><strong>{selectedIsGlobalFullAccess ? t("Entire user home") : selected.path}</strong></span><span><small>{t("Extra folders")}</small><strong>{allowedFolderCount ? String(allowedFolderCount) : t("None")}</strong></span><span><small>{t("Local port")}</small><strong>{selected.runtime.local_port}</strong></span></div>
+      <button className={`secondary-button remove-button ${confirmDelete ? "confirm" : ""}`} type="button" disabled={running || busy === "delete"} onClick={() => void removeWorkspace()}>{confirmDelete ? t("Click again to remove workspace") : t("Remove workspace")}</button><p className="hint-copy">{t("This removes the profile, not the workspace directory.")}</p>
+    </section>}
 
     {page === "workflow" && <section className="subpage-body workflow-page">{!selectedWorkflow?.available ? <p className="empty-copy">{selectedWorkflow?.warning || t("No workflow activity yet.")}</p> : <>{selectedWorkflow.approvals.filter((item) => item.status === "pending").map((approval) => <div className="approval-item" key={approval.approval_id}><span><strong>{approval.reason}</strong><small>{approval.tool_name} · {approval.permission}</small></span><div><button type="button" disabled={busy === approval.approval_id} onClick={() => void decideApproval(approval.approval_id, false)}>{t("Deny")}</button><button className="approve" type="button" disabled={busy === approval.approval_id} onClick={() => void decideApproval(approval.approval_id, true)}>{t("Approve")}</button></div></div>)}{selectedWorkflow.tasks.slice(0, 5).map((task) => <ActivityRow key={task.task_id} label={t("Task")} title={task.title} detail={`${task.status} · r${task.revision}`} />)}{selectedWorkflow.checks.slice(0, 3).map((check) => <ActivityRow key={check.check_run_id} label={t("Check")} title={check.check_id} detail={check.status} />)}{!selectedWorkflow.approvals.length && !selectedWorkflow.tasks.length && !selectedWorkflow.checks.length && <p className="empty-copy">{t("No workflow activity yet.")}</p>}</>}</section>}
 

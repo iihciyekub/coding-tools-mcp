@@ -7,7 +7,7 @@ mod workflow;
 use models::{LogBundle, RuntimeStatus, WorkspaceProfile};
 use resource_installer::managed_version;
 use runtime::{
-    prepare_runtime as prepare_runtime_environment, read_logs, start_workspace,
+    prepare_runtime as prepare_runtime_environment, read_logs, shutdown, start_workspace,
     stop_all_workspaces, stop_workspace, DependencyStatus, RuntimeManager,
 };
 use serde::Serialize;
@@ -24,7 +24,9 @@ use tauri::{
     AppHandle, Manager, PhysicalPosition, Rect, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_clipboard_manager::ClipboardExt;
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tauri_plugin_dialog::{
+    DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
+};
 use workflow::{
     decide_approval as decide_workflow_approval, read_snapshot as read_workflow_snapshot,
     WorkflowSnapshot,
@@ -130,6 +132,31 @@ fn create_profile(
         return Ok(existing);
     }
     let profile = WorkspaceProfile::new(path, store.next_port())?;
+    store.insert(profile)
+}
+
+#[tauri::command]
+fn create_full_access_profile(
+    state: tauri::State<'_, DesktopState>,
+) -> Result<WorkspaceProfile, String> {
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|_| "Profile store is unavailable.")?;
+    create_full_access_profile_in_store(&mut store)
+}
+
+fn create_full_access_profile_in_store(
+    store: &mut ProfileStore,
+) -> Result<WorkspaceProfile, String> {
+    let home = models::user_home_directory().ok_or("Could not resolve the user home directory.")?;
+    if let Some(existing) = store.profiles().into_iter().find(|profile| {
+        profile.runtime.permission_mode == "host"
+            && std::fs::canonicalize(&profile.path).ok().as_ref() == Some(&home)
+    }) {
+        return Ok(existing);
+    }
+    let profile = WorkspaceProfile::new_full_access(store.next_port())?;
     store.insert(profile)
 }
 
@@ -1217,12 +1244,52 @@ fn add_workspace_from_menu(app: &AppHandle) {
         .lock()
         .map(|store| store.language().to_string())
         .unwrap_or_else(|_| "en".to_string());
-    let app = app.clone();
+    let standard_label = menu_text(&language, "Standard", "标准");
+    let full_label = menu_text(&language, "Full Access", "完全访问");
+    let cancel_label = menu_text(&language, "Cancel", "取消");
+    let dialog_app = app.clone();
+    let callback_app = app.clone();
+    app.dialog()
+        .message(menu_text(
+            &language,
+            "Choose access before creating a profile. Standard asks for one workspace; Full Access uses your entire user home automatically.",
+            "请先选择访问模式。标准模式需要选择一个工作区；完全访问会自动使用整个用户主目录。",
+        ))
+        .buttons(MessageDialogButtons::YesNoCancelCustom(
+            standard_label.into(),
+            full_label.into(),
+            cancel_label.into(),
+        ))
+        .show_with_result(move |choice| match choice {
+            MessageDialogResult::Custom(selected) if selected == standard_label => {
+                pick_standard_workspace_from_menu(&dialog_app, &language);
+            }
+            MessageDialogResult::Custom(selected) if selected == full_label => {
+                let result = (|| {
+                    let state = callback_app.state::<DesktopState>();
+                    let mut store = state
+                        .store
+                        .lock()
+                        .map_err(|_| "Profile store is unavailable.".to_string())?;
+                    create_full_access_profile_in_store(&mut store)?;
+                    Ok::<(), String>(())
+                })();
+                if let Err(error) = result {
+                    show_error(&callback_app, error);
+                } else {
+                    refresh_tray_menu_on_main(callback_app);
+                }
+            }
+            _ => {}
+        });
+}
+
+fn pick_standard_workspace_from_menu(app: &AppHandle, language: &str) {
     let callback_app = app.clone();
     app.dialog()
         .file()
         .set_title(menu_text(
-            &language,
+            language,
             "Choose workspace folder",
             "选择工作区文件夹",
         ))
@@ -1740,7 +1807,7 @@ pub fn run() {
             let panel =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                     .title("Coding Tools MCP")
-                    .inner_size(360.0, 420.0)
+                    .inner_size(320.0, 374.0)
                     .minimizable(false)
                     .maximizable(false)
                     .closable(false)
@@ -1752,11 +1819,11 @@ pub fn run() {
                     .visible_on_all_workspaces(true)
                     .skip_taskbar(true)
                     .accept_first_mouse(true)
-                    .visible(false)
+                    .visible(cfg!(debug_assertions))
                     .build()?;
             let focus_panel = panel.clone();
             panel.on_window_event(move |event| {
-                if matches!(event, WindowEvent::Focused(false)) {
+                if !cfg!(debug_assertions) && matches!(event, WindowEvent::Focused(false)) {
                     let _ = focus_panel.hide();
                 }
             });
@@ -1794,6 +1861,7 @@ pub fn run() {
             desktop_snapshot,
             decide_approval,
             create_profile,
+            create_full_access_profile,
             save_profile,
             delete_profile,
             start_profile,
@@ -1815,9 +1883,7 @@ pub fn run() {
         .expect("error while building Coding Tools MCP Desktop")
         .run(move |_app, event| match event {
             tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. } => {
-                if let Ok(mut runtime) = cleanup.lock() {
-                    runtime.stop_all();
-                }
+                let _ = shutdown(&cleanup);
             }
             _ => {}
         });

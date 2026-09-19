@@ -24,8 +24,14 @@ export interface AuthConfig {
 export interface RuntimeConfig {
   local_port: number;
   permission_mode: PermissionMode;
-  file_access_scope: "workspace" | "home";
+  file_access_scope: "workspace";
   allowed_paths: string[];
+  environment_variables: EnvironmentVariable[];
+}
+
+export interface EnvironmentVariable {
+  name: string;
+  value: string;
 }
 
 export interface WorkspaceProfile {

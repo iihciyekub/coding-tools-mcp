@@ -12,7 +12,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -31,9 +31,11 @@ impl ManagedChild {
     }
 
     fn terminate(&mut self) {
-        if !self.is_running() {
+        if self.group_id == 0 {
             return;
         }
+        // A launcher may exit before its server. Always terminate the owned
+        // process group, even when the direct child has already been reaped.
         #[cfg(unix)]
         unsafe {
             libc::kill(-(self.group_id as i32), libc::SIGTERM);
@@ -46,7 +48,11 @@ impl ManagedChild {
         }
         let deadline = Instant::now() + Duration::from_secs(3);
         while Instant::now() < deadline {
-            if !self.is_running() {
+            let running = self.is_running();
+            #[cfg(unix)]
+            let running = running || unsafe { libc::kill(-(self.group_id as i32), 0) == 0 };
+            if !running {
+                self.group_id = 0;
                 return;
             }
             thread::sleep(Duration::from_millis(100));
@@ -57,6 +63,46 @@ impl ManagedChild {
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
+        #[cfg(unix)]
+        {
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while unsafe { libc::kill(-(self.group_id as i32), 0) == 0 }
+                && Instant::now() < deadline
+            {
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+        self.group_id = 0;
+    }
+}
+
+impl Drop for ManagedChild {
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
+#[derive(Default)]
+struct PendingOperation {
+    cancelled: AtomicBool,
+    finished: Mutex<bool>,
+    completion: Condvar,
+}
+
+impl PendingOperation {
+    fn finish(&self) {
+        *self.finished.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.completion.notify_all();
+    }
+
+    fn wait(&self) {
+        let mut finished = self.finished.lock().unwrap_or_else(|e| e.into_inner());
+        while !*finished {
+            finished = self
+                .completion
+                .wait(finished)
+                .unwrap_or_else(|e| e.into_inner());
+        }
     }
 }
 
@@ -77,7 +123,9 @@ fn new_server_name(workspace_sequence: usize) -> String {
 
 pub struct RuntimeManager {
     sessions: HashMap<String, ManagedSession>,
-    preparing: HashMap<String, Arc<AtomicBool>>,
+    preparing: HashMap<String, Arc<PendingOperation>>,
+    stopping: HashMap<String, Arc<PendingOperation>>,
+    shutting_down: bool,
     resource_dir: PathBuf,
     data_dir: PathBuf,
     runtime_ready_hint: bool,
@@ -96,6 +144,8 @@ impl RuntimeManager {
         Self {
             sessions: HashMap::new(),
             preparing: HashMap::new(),
+            stopping: HashMap::new(),
+            shutting_down: false,
             resource_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources"),
             data_dir: PathBuf::new(),
             runtime_ready_hint: false,
@@ -123,6 +173,12 @@ impl RuntimeManager {
     }
 
     pub fn status(&mut self, profile: &WorkspaceProfile) -> RuntimeStatus {
+        if self.stopping.contains_key(&profile.id) {
+            let mut status = RuntimeStatus::stopped(profile.runtime.local_port);
+            status.state = "stopping".into();
+            status.local_message = "Stopping runtime processes".into();
+            return status;
+        }
         if self.preparing.contains_key(&profile.id) {
             let mut status = RuntimeStatus::stopped(profile.runtime.local_port);
             status.state = "starting".into();
@@ -178,18 +234,6 @@ impl RuntimeManager {
         }
     }
 
-    pub fn stop_all(&mut self) {
-        for (_, cancelled) in self.preparing.drain() {
-            cancelled.store(true, Ordering::Relaxed);
-        }
-        for (_, mut session) in self.sessions.drain() {
-            if let Some(tunnel) = session.tunnel.as_mut() {
-                tunnel.terminate();
-            }
-            session.runtime.terminate();
-        }
-    }
-
     pub fn workflow_state_root(&self) -> PathBuf {
         self.data_dir.join("workflow")
     }
@@ -202,11 +246,18 @@ pub fn start_workspace(
     workspace_sequence: usize,
 ) -> Result<RuntimeStatus, String> {
     profile.validate()?;
-    let cancelled = Arc::new(AtomicBool::new(false));
+    let operation = Arc::new(PendingOperation::default());
+    let cancelled = &operation.cancelled;
     let (resources, data) = {
         let mut state = manager
             .lock()
             .map_err(|_| "Runtime manager is unavailable")?;
+        if state.shutting_down {
+            return Err("The desktop app is shutting down.".into());
+        }
+        if state.stopping.contains_key(&profile.id) {
+            return Err("This workspace is still stopping. Please retry shortly.".into());
+        }
         let status = state.status(profile);
         if status.pid.is_some() {
             return Ok(status);
@@ -216,15 +267,15 @@ pub fn start_workspace(
         }
         state
             .preparing
-            .insert(profile.id.clone(), Arc::clone(&cancelled));
+            .insert(profile.id.clone(), Arc::clone(&operation));
         (state.resource_dir.clone(), state.data_dir.clone())
     };
     // Resolve dependencies and launch processes without holding the UI/status mutex.
-    let resolved = environment::resolve(&resources, &data, log_dir, &effective_path(), &cancelled);
+    let resolved = environment::resolve(&resources, &data, log_dir, &effective_path(), cancelled);
     let runtime_ready = resolved.is_ok();
     let startup = resolved.and_then(|resolved| {
         if profile.tunnel.r#type == "cloudflare" && resolve_cloudflared(&data).is_err() {
-            resource_installer::install("cloudflared", &data, &cancelled)?;
+            resource_installer::install("cloudflared", &data, cancelled)?;
         }
         start_session(
             profile,
@@ -232,7 +283,7 @@ pub fn start_workspace(
             resolved,
             &data,
             workspace_sequence,
-            &cancelled,
+            cancelled,
         )
     });
     let mut state = manager
@@ -241,10 +292,7 @@ pub fn start_workspace(
     let owns_start = state
         .preparing
         .get(&profile.id)
-        .is_some_and(|signal| Arc::ptr_eq(signal, &cancelled));
-    if owns_start {
-        state.preparing.remove(&profile.id);
-    }
+        .is_some_and(|signal| Arc::ptr_eq(signal, &operation));
     if runtime_ready {
         state.runtime_ready_hint = true;
     }
@@ -253,8 +301,17 @@ pub fn start_workspace(
         if let Ok(session) = startup {
             terminate_session(session);
         }
+        let mut state = manager
+            .lock()
+            .map_err(|_| "Runtime manager is unavailable")?;
+        if owns_start {
+            state.preparing.remove(&profile.id);
+        }
+        operation.finish();
         return Err("Workspace startup was cancelled.".into());
     }
+    state.preparing.remove(&profile.id);
+    operation.finish();
     let session = startup?;
     state.sessions.insert(profile.id.clone(), session);
     Ok(state.status(profile))
@@ -264,37 +321,98 @@ pub fn stop_workspace(
     manager: &Arc<Mutex<RuntimeManager>>,
     profile: &WorkspaceProfile,
 ) -> Result<RuntimeStatus, String> {
-    let session = {
+    let request = {
         let mut state = manager
             .lock()
             .map_err(|_| "Runtime manager is unavailable")?;
-        if let Some(cancelled) = state.preparing.remove(&profile.id) {
-            cancelled.store(true, Ordering::Relaxed);
-        }
-        state.sessions.remove(&profile.id)
+        begin_stop(&mut state, &profile.id)
     };
-    if let Some(session) = session {
-        terminate_session(session);
-    }
+    finish_stop(manager, request)?;
     Ok(RuntimeStatus::stopped(profile.runtime.local_port))
 }
 
 pub fn stop_all_workspaces(manager: &Arc<Mutex<RuntimeManager>>) -> Result<(), String> {
-    let sessions = {
+    let requests = {
         let mut state = manager
             .lock()
             .map_err(|_| "Runtime manager is unavailable")?;
-        for (_, cancelled) in state.preparing.drain() {
-            cancelled.store(true, Ordering::Relaxed);
-        }
-        state
+        let ids = state
             .sessions
-            .drain()
-            .map(|(_, session)| session)
+            .keys()
+            .chain(state.preparing.keys())
+            .chain(state.stopping.keys())
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        ids.iter()
+            .map(|id| begin_stop(&mut state, id))
             .collect::<Vec<_>>()
     };
-    for session in sessions {
-        terminate_session(session);
+    for request in requests {
+        finish_stop(manager, request)?;
+    }
+    Ok(())
+}
+
+pub fn shutdown(manager: &Arc<Mutex<RuntimeManager>>) -> Result<(), String> {
+    manager
+        .lock()
+        .map_err(|_| "Runtime manager is unavailable")?
+        .shutting_down = true;
+    stop_all_workspaces(manager)
+}
+
+enum StopRequest {
+    Wait(Arc<PendingOperation>),
+    Cleanup {
+        id: String,
+        completion: Arc<PendingOperation>,
+        startup: Option<Arc<PendingOperation>>,
+        session: Option<ManagedSession>,
+    },
+}
+
+fn begin_stop(state: &mut RuntimeManager, id: &str) -> StopRequest {
+    if let Some(completion) = state.stopping.get(id) {
+        return StopRequest::Wait(Arc::clone(completion));
+    }
+    let startup = state.preparing.get(id).cloned();
+    if let Some(startup) = &startup {
+        startup.cancelled.store(true, Ordering::Relaxed);
+    }
+    let completion = Arc::new(PendingOperation::default());
+    state
+        .stopping
+        .insert(id.to_string(), Arc::clone(&completion));
+    StopRequest::Cleanup {
+        id: id.to_string(),
+        completion,
+        startup,
+        session: state.sessions.remove(id),
+    }
+}
+
+fn finish_stop(manager: &Arc<Mutex<RuntimeManager>>, request: StopRequest) -> Result<(), String> {
+    match request {
+        StopRequest::Wait(completion) => completion.wait(),
+        StopRequest::Cleanup {
+            id,
+            completion,
+            startup,
+            session,
+        } => {
+            if let Some(startup) = startup {
+                startup.wait();
+            }
+            if let Some(session) = session {
+                terminate_session(session);
+            }
+            manager
+                .lock()
+                .map_err(|_| "Runtime manager is unavailable")?
+                .stopping
+                .remove(&id);
+            completion.finish();
+        }
     }
     Ok(())
 }
@@ -383,7 +501,7 @@ pub fn prepare_runtime(
         (
             state.resource_dir.clone(),
             state.data_dir.clone(),
-            !state.sessions.is_empty() || !state.preparing.is_empty(),
+            !state.sessions.is_empty() || !state.preparing.is_empty() || !state.stopping.is_empty(),
         )
     };
     if repair && active {
@@ -445,16 +563,7 @@ fn spawn_runtime(
         ])
         .arg("--state-root")
         .arg(workflow_state_root);
-    let mut file_access_roots = profile.runtime.allowed_paths.clone();
-    if profile.runtime.file_access_scope == "home" {
-        if let Some(home) = std::env::var_os("HOME") {
-            let home = home.to_string_lossy().to_string();
-            if !file_access_roots.iter().any(|item| item == &home) {
-                file_access_roots.insert(0, home);
-            }
-        }
-    }
-    for root in file_access_roots {
+    for root in file_access_roots(profile) {
         command.arg("--file-access-root").arg(root);
     }
     if profile.runtime.permission_mode == "host" {
@@ -475,6 +584,9 @@ fn spawn_runtime(
         "CODING_TOOLS_MCP_SERVER_NAME",
     ] {
         command.env_remove(name);
+    }
+    for variable in runtime_environment_variables(profile) {
+        command.env(variable.name.trim(), &variable.value);
     }
     command.env("CODING_TOOLS_MCP_SERVER_NAME", server_name);
     match profile.auth.r#type.as_str() {
@@ -509,6 +621,29 @@ fn spawn_runtime(
     Ok(ManagedChild { child, group_id })
 }
 
+fn file_access_roots(profile: &WorkspaceProfile) -> Vec<String> {
+    let mut roots = profile.runtime.allowed_paths.clone();
+    if profile.runtime.permission_mode == "host" {
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = home.to_string_lossy().to_string();
+            if !roots.iter().any(|item| item == &home) {
+                roots.insert(0, home);
+            }
+        }
+    }
+    roots
+}
+
+fn runtime_environment_variables(
+    profile: &WorkspaceProfile,
+) -> &[crate::models::EnvironmentVariable] {
+    if profile.runtime.permission_mode == "host" {
+        &profile.runtime.environment_variables
+    } else {
+        &[]
+    }
+}
+
 fn spawn_cloudflare(
     profile: &WorkspaceProfile,
     log_dir: &Path,
@@ -538,6 +673,12 @@ fn spawn_cloudflare(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    let log = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(log_dir.join("cloudflared.log"))
+        .map_err(|error| error.to_string())?;
     configure_process_group(&mut command);
     let mut child = command
         .spawn()
@@ -545,12 +686,6 @@ fn spawn_cloudflare(
     let group_id = child.id();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let log = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(log_dir.join("cloudflared.log"))
-        .map_err(|error| error.to_string())?;
     let log = Arc::new(Mutex::new(log));
     let (sender, receiver) = mpsc::channel::<TunnelEvent>();
     if let Some(stream) = stdout {
@@ -766,6 +901,131 @@ fn configure_process_group(command: &mut Command) {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    fn orphaned_listener() -> (ManagedChild, u16) {
+        let mut command = Command::new("python3");
+        command
+            .args([
+                "-c",
+                r#"
+import os, signal, socket, sys, time
+listener = socket.socket()
+listener.bind(('127.0.0.1', 0))
+listener.listen()
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+print(listener.getsockname()[1], flush=True)
+if os.fork():
+    os._exit(0)
+while True:
+    time.sleep(1)
+"#,
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        configure_process_group(&mut command);
+        let mut child = command.spawn().unwrap();
+        let mut port = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut port)
+            .unwrap();
+        let group_id = child.id();
+        child.wait().unwrap();
+        (
+            ManagedChild { child, group_id },
+            port.trim().parse().unwrap(),
+        )
+    }
+
+    #[cfg(unix)]
+    fn direct_listener() -> (ManagedChild, u16) {
+        let mut command = Command::new("python3");
+        command
+            .args([
+                "-c",
+                r#"
+import socket, time
+listener = socket.socket()
+listener.bind(('127.0.0.1', 0))
+listener.listen()
+print(listener.getsockname()[1], flush=True)
+while True:
+    time.sleep(1)
+"#,
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        configure_process_group(&mut command);
+        let mut child = command.spawn().unwrap();
+        let mut port = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut port)
+            .unwrap();
+        let group_id = child.id();
+        (
+            ManagedChild { child, group_id },
+            port.trim().parse().unwrap(),
+        )
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn termination_releases_port_after_launcher_exits() {
+        let (mut process, port) = orphaned_listener();
+        let group_id = process.group_id;
+        assert!(port_is_listening(port));
+        process.terminate();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while port_is_listening(port) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        let released = !port_is_listening(port);
+        // Clean the fixture up even when exercising the old broken implementation.
+        if !released {
+            unsafe {
+                libc::kill(-(group_id as i32), libc::SIGKILL);
+            }
+        }
+        assert!(
+            released,
+            "The launcher exited, but its child still owns the local port"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn stop_and_shutdown_terminate_runtime_and_tunnel_processes() {
+        for use_shutdown in [false, true] {
+            let temporary = tempfile::tempdir().unwrap();
+            let profile =
+                WorkspaceProfile::new(temporary.path().to_string_lossy().into_owned(), 28766)
+                    .unwrap();
+            let (runtime, runtime_port) = direct_listener();
+            let (tunnel, tunnel_port) = direct_listener();
+            let manager = Arc::new(Mutex::new(RuntimeManager::new()));
+            manager.lock().unwrap().sessions.insert(
+                profile.id.clone(),
+                ManagedSession {
+                    runtime,
+                    tunnel: Some(tunnel),
+                    public_url: Arc::new(Mutex::new(String::new())),
+                    server_name: "cleanup-test".into(),
+                },
+            );
+            assert!(port_is_listening(runtime_port));
+            assert!(port_is_listening(tunnel_port));
+
+            if use_shutdown {
+                shutdown(&manager).unwrap();
+            } else {
+                stop_workspace(&manager, &profile).unwrap();
+            }
+
+            assert!(!port_is_listening(runtime_port));
+            assert!(!port_is_listening(tunnel_port));
+            assert!(manager.lock().unwrap().sessions.is_empty());
+        }
+    }
+
     #[test]
     fn server_names_include_second_precision_and_workspace_sequence() {
         let name = new_server_name(7);
@@ -773,22 +1033,197 @@ mod tests {
     }
 
     #[test]
-    fn stopping_preparation_cancels_its_start_intent() {
+    fn full_access_includes_home_and_keeps_extra_allowed_folders() {
+        let temporary = tempfile::tempdir().unwrap();
+        let extra = temporary.path().join("Applications");
+        fs::create_dir(&extra).unwrap();
+        let mut profile =
+            WorkspaceProfile::new(temporary.path().to_string_lossy().into_owned(), 28766).unwrap();
+        profile.runtime.allowed_paths = vec![extra.to_string_lossy().into_owned()];
+
+        assert_eq!(file_access_roots(&profile), profile.runtime.allowed_paths);
+
+        profile.runtime.permission_mode = "host".into();
+        let roots = file_access_roots(&profile);
+        assert!(roots.contains(&extra.to_string_lossy().into_owned()));
+        if let Some(home) = std::env::var_os("HOME") {
+            assert_eq!(roots.first(), Some(&home.to_string_lossy().into_owned()));
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn environment_variables_are_injected_only_for_full_access() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut profile =
+            WorkspaceProfile::new(temporary.path().to_string_lossy().into_owned(), 28766).unwrap();
+        for (permission_mode, expected) in [("trusted", "missing"), ("host", "secret")] {
+            let capture = temporary.path().join(format!("{permission_mode}.txt"));
+            let script = temporary
+                .path()
+                .join(format!("capture-{permission_mode}.py"));
+            fs::write(
+                &script,
+                format!(
+                    "import os\nopen({:?}, 'w').write(os.environ.get('TEST_API_KEY', 'missing'))\n",
+                    capture.to_string_lossy()
+                ),
+            )
+            .unwrap();
+            profile.runtime.permission_mode = permission_mode.into();
+            profile.runtime.environment_variables = vec![crate::models::EnvironmentVariable {
+                name: "TEST_API_KEY".into(),
+                value: "secret".into(),
+            }];
+            let log_dir = temporary.path().join(format!("logs-{permission_mode}"));
+            fs::create_dir(&log_dir).unwrap();
+            let mut process = spawn_runtime(
+                &profile,
+                &log_dir,
+                (
+                    which::which("python3").unwrap(),
+                    vec![script.to_string_lossy().into_owned()],
+                ),
+                temporary.path(),
+                "test-server",
+            )
+            .unwrap();
+            assert!(process.child.wait().unwrap().success());
+            assert_eq!(fs::read_to_string(capture).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn stopping_preparation_waits_for_cleanup_before_allowing_restart() {
         let temporary = tempfile::tempdir().unwrap();
         let profile =
             WorkspaceProfile::new(temporary.path().to_string_lossy().into_owned(), 28766).unwrap();
         let manager = Arc::new(Mutex::new(RuntimeManager::new()));
-        let cancelled = Arc::new(AtomicBool::new(false));
+        let operation = Arc::new(PendingOperation::default());
         manager
             .lock()
             .unwrap()
             .preparing
-            .insert(profile.id.clone(), Arc::clone(&cancelled));
+            .insert(profile.id.clone(), Arc::clone(&operation));
         assert_eq!(manager.lock().unwrap().status(&profile).state, "starting");
         assert!(manager.lock().unwrap().status(&profile).is_active());
-        stop_workspace(&manager, &profile).unwrap();
-        assert!(cancelled.load(Ordering::Relaxed));
+        let stopping_manager = Arc::clone(&manager);
+        let stopping_profile = profile.clone();
+        let stopper = thread::spawn(move || stop_workspace(&stopping_manager, &stopping_profile));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !operation.cancelled.load(Ordering::Relaxed) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let status = manager.lock().unwrap().status(&profile);
+        let restart = start_workspace(&manager, &profile, temporary.path(), 1);
+        let finished_early = stopper.is_finished();
+        // Complete the simulated startup cleanup before assertions so failures
+        // cannot leave a waiting test thread behind.
+        manager.lock().unwrap().preparing.remove(&profile.id);
+        operation.finish();
+        stopper.join().unwrap().unwrap();
+        assert!(operation.cancelled.load(Ordering::Relaxed));
+        assert!(!finished_early);
+        assert_eq!(status.state, "stopping");
+        assert!(status.is_active());
+        assert!(restart.unwrap_err().contains("still stopping"));
         assert_eq!(manager.lock().unwrap().status(&profile).state, "stopped");
+    }
+
+    #[test]
+    fn shutdown_waits_for_startup_cleanup_and_rejects_new_starts() {
+        let temporary = tempfile::tempdir().unwrap();
+        let profile =
+            WorkspaceProfile::new(temporary.path().to_string_lossy().into_owned(), 28766).unwrap();
+        let manager = Arc::new(Mutex::new(RuntimeManager::new()));
+        let operation = Arc::new(PendingOperation::default());
+        manager
+            .lock()
+            .unwrap()
+            .preparing
+            .insert(profile.id.clone(), Arc::clone(&operation));
+        let shutdown_manager = Arc::clone(&manager);
+        let exiting = thread::spawn(move || shutdown(&shutdown_manager));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !operation.cancelled.load(Ordering::Relaxed) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let finished_early = exiting.is_finished();
+        let restart = start_workspace(&manager, &profile, temporary.path(), 1);
+        manager.lock().unwrap().preparing.remove(&profile.id);
+        operation.finish();
+        exiting.join().unwrap().unwrap();
+        assert!(!finished_early);
+        assert!(operation.cancelled.load(Ordering::Relaxed));
+        assert!(restart.unwrap_err().contains("shutting down"));
+        assert!(manager.lock().unwrap().stopping.is_empty());
+    }
+
+    #[test]
+    fn stopped_and_reopened_workspaces_can_reuse_the_port() {
+        let temporary = tempfile::tempdir().unwrap();
+        let parent = temporary.path().join("project");
+        let nested = parent.join("child");
+        let same_name = temporary.path().join("other/project");
+        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir_all(&same_name).unwrap();
+        let script = temporary.path().join("listener.py");
+        fs::write(
+            &script,
+            r#"
+import argparse, socket, time
+parser = argparse.ArgumentParser()
+parser.add_argument('--port', type=int)
+args, _ = parser.parse_known_args()
+listener = socket.socket()
+listener.bind(('127.0.0.1', args.port))
+listener.listen(64)
+while True:
+    connection, _ = listener.accept()
+    connection.close()
+"#,
+        )
+        .unwrap();
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let mut manager = Arc::new(Mutex::new(RuntimeManager::new()));
+        for (index, path) in [&parent, &parent, &same_name, &nested]
+            .into_iter()
+            .enumerate()
+        {
+            let mut profile =
+                WorkspaceProfile::new(path.to_string_lossy().into_owned(), port).unwrap();
+            profile.tunnel.r#type = "frp".into();
+            profile.tunnel.frp_server = "example.test".into();
+            profile.tunnel.frp_subdomain = "test".into();
+            profile.validate().unwrap();
+            let session = start_session(
+                &profile,
+                &temporary.path().join(format!("logs-{index}")),
+                (
+                    which::which("python3").unwrap(),
+                    vec![script.to_string_lossy().into_owned()],
+                ),
+                temporary.path(),
+                index + 1,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            manager
+                .lock()
+                .unwrap()
+                .sessions
+                .insert(profile.id.clone(), session);
+            assert_eq!(manager.lock().unwrap().status(&profile).state, "running");
+            if index % 2 == 0 {
+                stop_workspace(&manager, &profile).unwrap();
+            } else {
+                shutdown(&manager).unwrap();
+                manager = Arc::new(Mutex::new(RuntimeManager::new()));
+            }
+            assert!(!port_is_listening(port));
+        }
     }
 
     #[test]
