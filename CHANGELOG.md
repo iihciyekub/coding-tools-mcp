@@ -8,6 +8,9 @@
 
 ## 0.4.2 - 2026-09-22
 
+- Split release compliance into the stable full portable suite on Ubuntu plus a
+  focused macOS 15 Runtime smoke for Apple/Swift/SourceKit paths; Desktop
+  build/sign/notarize remains the authoritative macOS release gate.
 - Enhanced command recovery/status with non-destructive activity health signals:
   running commands now report last output time, idle duration, runtime duration,
   activity state, and a long-silent attention marker without auto-killing quiet

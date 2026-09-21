@@ -111,11 +111,14 @@ Main workflow:
 .github/workflows/compliance.yml
 ```
 
-The main compliance workflow runs on macOS 15, matching the supported/tested
-product platform. It also runs `make check-tool-surface` so tool-count and JSON
-schema growth cannot silently expand the model-visible MCP surface. The Desktop
-workflow is likewise macOS-only; Windows/Linux behavior is best-effort rather
-than a CI compatibility target.
+The main full compliance suite runs on Ubuntu, where the broad cross-platform
+runtime/protocol test matrix is stable and deterministic. The same workflow also
+runs a bounded `macos-15` runtime smoke that probes the Apple toolchain and
+executes the Swift/SourceKit/Xcode-specific runtime tests. This keeps macOS as
+the supported product target without making every portable unit test depend on
+hosted-macOS runner behavior. The Desktop workflow remains macOS-only and is the
+authoritative build/sign/notarize gate. `make check-tool-surface` prevents the
+model-visible MCP surface from silently growing.
 
 Manual SWE-bench workflow:
 

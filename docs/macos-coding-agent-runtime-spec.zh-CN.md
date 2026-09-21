@@ -382,16 +382,18 @@ windows-msvc-smoke
 
 ### 8.2 macOS 主 Gate
 
-后续建议 compliance 主 Gate 切到：
+完整通用 Runtime compliance 保持在 Ubuntu runner，以保证协议、文件、Git、
+命令、workflow 等大量可移植测试的稳定性。另设独立 `macos-15` Runtime smoke：
 
-```text
-runs-on: macos-15
-```
+- metadata-only Apple toolchain probe；
+- Swift / SourceKit-LSP discovery；
+- Apple workspace metadata；
+- Apple structured diagnostics；
+- runtime doctor Apple metadata。
 
-第一步可以先保留现有 Linux compliance，同时新增 macOS-specific gate；
-确认稳定后再将 macOS 变成发布权威 Gate。
-
-避免一次性大改 CI，以免影响 0.4.x 发布链。
+Desktop build/sign/notarize/release workflow 继续以 macOS runner 为权威发布 Gate。
+这样 macOS 仍是正式产品平台，同时避免把全部可移植单测绑定到 hosted-macOS
+runner 的进程/PTY/网络行为。
 
 ## 9. 外部 MCP / Agent 边界
 
@@ -589,7 +591,7 @@ macOS runner：
 - `checks_discover` 发现 SwiftPM build/test 与保守的 `xcodebuild -list -json` metadata check；
 - Structured Diagnostics 支持 Swift/Clang/XCTest/Xcode/codesign/notarytool 高信号错误；
 - `scripts/check_tool_surface_budget.py` 和 `make check-tool-surface` 已加入 CI；
-- 主 compliance 与 Desktop CI 均以 macOS 15 为权威 runner；
+- 完整 Runtime compliance 使用稳定的 Ubuntu runner，并有独立 macOS 15 Runtime smoke；Desktop CI/release 继续以 macOS 为权威 runner；
 - Windows 专属 MSVC compliance gate 已移除；当前 Desktop release source 已通过 `releasePlatforms: ["macos"]` 选择 macOS 发布；
 - 公共 MCP tool 总数仍为 71。
 

@@ -10,7 +10,7 @@ on:
 
 jobs:
   compliance:
-    runs-on: macos-15
+    runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - name: Check out repository
@@ -78,6 +78,47 @@ jobs:
           path: |
             reports/compliance/**
             reports/benchmark/**
+
+  macos-runtime-smoke:
+    name: macOS runtime smoke
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v6.2.0
+        with:
+          python-version: "3.11"
+
+      - name: Install runtime and test tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Probe Apple toolchain
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from coding_tools_mcp.apple_toolchain import probe
+
+          info = probe(cwd=Path.cwd(), env=dict(os.environ), include_sdks=False)
+          assert info["is_macos"], info
+          assert info["xcrun"], info
+          assert info["swift_available"], info
+          assert info["sourcekit_lsp"], info
+          print(info)
+          PY
+
+      - name: Run macOS-specific runtime tests
+        run: |
+          python -m unittest \
+            tests.test_workflow_tools.WorkflowToolTests.test_swift_lsp_uses_package_root_and_xcrun_discovery \
+            tests.test_workflow_tools.WorkflowToolTests.test_apple_workspace_metadata_and_checks_are_cli_first \
+            tests.test_check_diagnostics.CheckDiagnosticsTests.test_parses_apple_toolchain_failures \
+            tests.compliance.test_runtime_helpers.RuntimeHelperTests.test_runtime_doctor_reports_python_alias_and_network_policy
             reports/dogfood/**
             docs/dogfood/**
           if-no-files-found: ignore

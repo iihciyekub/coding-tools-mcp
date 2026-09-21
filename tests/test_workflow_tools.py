@@ -288,7 +288,13 @@ class WorkflowToolTests(unittest.TestCase):
                 },
             ), mock.patch(
                 "coding_tools_mcp.workspace_insight.shutil.which",
-                side_effect=lambda name, path=None: "/usr/bin/xcodebuild" if name == "xcodebuild" else None,
+                side_effect=lambda name, path=None: (
+                    "/usr/bin/xcodebuild"
+                    if name == "xcodebuild"
+                    else "/usr/bin/git"
+                    if name == "git"
+                    else None
+                ),
             ):
                 overview = self.payload(runtime, "workspace_overview", {})
                 checks = self.payload(runtime, "checks_discover", {})
