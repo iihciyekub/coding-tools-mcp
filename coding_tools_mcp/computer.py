@@ -375,12 +375,12 @@ class ComputerService:
         if isinstance(scope, dict) and scope.get("provider") == "codex":
             if self.codex_observer is None:
                 raise ToolFailure("CODEX_CAPABILITY_UNAVAILABLE", "Codex Computer provider is unavailable.", category="runtime")
-            handle: BinaryIO | None = None
+            codex_handle: BinaryIO | None = None
             if scope.get("access") == "control":
                 app_scope = scope.get("app")
                 if not isinstance(app_scope, dict):
                     raise ToolFailure("APPROVAL_SCOPE_MISMATCH", "Codex control approval has no app identity.", category="permission")
-                handle = self._acquire_control_lock(app_scope)
+                codex_handle = self._acquire_control_lock(app_scope)
             session_id: str | None = None
             try:
                 result = self.codex_observer.start_session(str(args["approval_id"]))
@@ -403,8 +403,8 @@ class ComputerService:
                             float(result["created_at"]),
                         ),
                     )
-                if handle is not None:
-                    self.locks[session_id] = handle
+                if codex_handle is not None:
+                    self.locks[session_id] = codex_handle
                 return {**result, "app": app}
             except BaseException:
                 if session_id is not None:
@@ -412,8 +412,8 @@ class ComputerService:
                         self.codex_observer.stop_session(session_id)
                     except ToolFailure:
                         pass
-                if handle is not None:
-                    handle.close()
+                if codex_handle is not None:
+                    codex_handle.close()
                 raise
         with self.lock:
             if approval["tool_name"] != "computer_session_start":
