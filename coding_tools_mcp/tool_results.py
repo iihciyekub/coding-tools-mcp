@@ -39,7 +39,14 @@ def render_tool_text(tool_name: str, payload: dict[str, Any], *, is_error: bool)
         return render_computer_result(payload)
     renderer = _RENDERERS.get(tool_name)
     if renderer is not None:
-        return renderer(payload)
+        text = renderer(payload)
+        if payload.get("repo_root"):
+            text = f"Repository: {payload['repo_root']} | path base: {payload.get('path_base', 'repo_root')}\n{text}"
+        elif payload.get("diff_source") == "patch_baseline":
+            text = "Not a Git diff; comparing runtime patch baselines only.\n" + text
+        if payload.get("workdir"):
+            text = f"Working directory: {payload['workdir']}\n{text}"
+        return text
     summary = payload.get("summary")
     if isinstance(summary, str) and summary:
         return summary
@@ -373,6 +380,8 @@ def _render_command_status(payload: dict[str, Any]) -> str:
     command_id = payload.get("command_id") or "pending"
     operation_id = payload.get("operation_id")
     parts = [f"Command {command_id}: {payload.get('status', 'unknown')}"]
+    if payload.get("workdir"):
+        parts.append(f"workdir={payload['workdir']}")
     if operation_id:
         parts.append(f"operation_id={operation_id}")
     if payload.get("exit_code") is not None:
@@ -405,7 +414,8 @@ def _render_command_list(payload: dict[str, Any]) -> str:
         suffix = f" operation_id={operation_id}" if operation_id else ""
         exit_code = item.get("exit_code")
         exit_text = f" exit={exit_code}" if exit_code is not None else ""
-        lines.append(f"{item.get('status', 'unknown')} {command_id}{suffix}{exit_text}")
+        directory = f" workdir={item['workdir']}" if item.get("workdir") else ""
+        lines.append(f"{item.get('status', 'unknown')} {command_id}{suffix}{exit_text}{directory}")
     if payload.get("truncated"):
         lines.append("… command list truncated; raise max_results or filter by operation_id.")
     return "\n".join(lines)
@@ -690,13 +700,21 @@ def _render_image(payload: dict[str, Any]) -> str:
 
 def _render_workspace_overview(payload: dict[str, Any]) -> str:
     lines = [str(payload.get("summary") or "Workspace overview.")]
+    if "path" in payload:
+        lines.append(f"Scope: {payload['path']} (workspace-relative paths).")
     for key in ("manifests", "languages", "top_level", "entrypoints"):
         value = payload.get(key)
         if isinstance(value, list) and value:
             lines.append(f"{key}: {_bounded_json(value, 12000)}")
     instructions = payload.get("instructions")
     if isinstance(instructions, dict):
-        lines.append(f"instructions: {_bounded_json(instructions, 8000)}")
+        lines.append(f"startup instruction discovery: {_bounded_json(instructions, 8000)}")
+    applicable = payload.get("applicable_instructions")
+    if isinstance(applicable, dict):
+        rules = [item.get("path") for item in applicable.get("instructions", []) if isinstance(item, dict)]
+        lines.append(f"Current applicable rules: {_bounded_json(rules, 8000)}")
+        lines.append("Read: " + _render_tool_call("project_instructions", {"path": payload.get("path", ".")}))
+        lines.extend(f"Warning: {warning}" for warning in applicable.get("warnings", []))
     if payload.get("truncated"):
         lines.append("… workspace scan truncated; raise max_files for broader coverage.")
     return "\n".join(lines)
@@ -725,14 +743,16 @@ def _render_repo_map(payload: dict[str, Any]) -> str:
 
 def _render_project_instructions(payload: dict[str, Any]) -> str:
     instructions = payload.get("instructions")
-    if not isinstance(instructions, list) or not instructions:
-        return "No applicable project instructions found."
     lines: list[str] = []
-    for item in instructions:
+    for item in instructions if isinstance(instructions, list) else []:
         if not isinstance(item, dict):
             continue
         suffix = " [truncated]" if item.get("truncated") else ""
         lines.append(f"## {item.get('path', '')}{suffix}\n{item.get('content', '')}")
+    if not lines:
+        lines.append("No applicable project instructions found.")
+    for warning in payload.get("warnings", []):
+        lines.append(f"Warning: {warning}")
     return "\n\n".join(lines)
 
 

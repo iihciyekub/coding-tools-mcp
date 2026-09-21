@@ -36,6 +36,9 @@ dev = [
 image = [
   "Pillow>=10.0",
 ]
+browser = [
+  "playwright>=1.58,<2",
+]
 
 [project.scripts]
 coding-tools-mcp = "coding_tools_mcp.server:main"

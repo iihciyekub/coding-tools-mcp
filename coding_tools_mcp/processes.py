@@ -179,6 +179,7 @@ class CommandRun:
     pty_master_fd: int | None = None
     on_evict: Any = None
     _stdin_closed: bool = False
+    workdir: str | None = None
 
     @property
     def head_buffer_limit(self) -> int:

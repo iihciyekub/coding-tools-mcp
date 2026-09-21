@@ -93,7 +93,8 @@ from .protocol import (
     validate_modern_meta,
     validate_rpc_envelope,
 )
-from .project_context import ProjectContext, load_project_context
+from .project_context import ProjectContext, instructions_for_path, load_project_context
+from .repositories import RepositoryContext, discover_repository, git_environment, repository_write_lock
 from .computer import Backend, ComputerService
 from .computer_contract import COMPUTER_TOOLS
 from .telemetry import SessionTelemetry
@@ -741,7 +742,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "read_file": ToolSpec(
         title="Read file",
-        description="Read a UTF-8 text file slice inside the configured file scope. Relative paths are workspace-relative; ~/... uses Home scope when enabled.",
+        description="Read a UTF-8 text file slice inside the configured file scope. Relative paths are workspace-relative; host mode also accepts host absolute and ~/... paths.",
         read_only=True,
         idempotent=True,
     ),
@@ -1647,11 +1648,17 @@ class OperationRecord:
 
 
 class Workspace:
-    def __init__(self, root: Path, *, allow_home_root: bool = False) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        allow_home_root: bool = False,
+        allow_filesystem_root: bool = False,
+    ) -> None:
         self.root = root.expanduser().resolve(strict=True)
         if not self.root.is_dir():
             raise ToolFailure("INVALID_ARGUMENT", "Workspace root must be a directory.", category="validation")
-        unsafe_roots = {"/"}
+        unsafe_roots = set() if allow_filesystem_root else {"/"}
         try:
             if not allow_home_root:
                 unsafe_roots.add(str(Path.home().resolve()))
@@ -1775,9 +1782,11 @@ class FileAccess:
     """Resolve ordinary file-tool paths without changing the project workspace.
 
     Relative paths remain workspace-relative for compatibility. Operators may
-    add one or more explicit roots; absolute paths are accepted only when they
-    stay inside the workspace or one of those roots. ``~/...`` remains a
-    compatibility alias for the legacy primary file-access root.
+    add one or more explicit roots in non-host modes; absolute paths are then
+    accepted only when they stay inside the workspace or one of those roots.
+    Host mode instead exposes the host filesystem to ordinary file tools while
+    keeping relative paths workspace-relative. ``~/...`` remains a compatibility
+    alias for the legacy primary file-access root outside host mode.
     Git, LSP, workflow state, and project instructions continue to use the
     project workspace. Host-mode command cwd may additionally use this file
     scope.
@@ -1788,8 +1797,12 @@ class FileAccess:
         workspace: Workspace,
         home_root: Path | None = None,
         allowed_roots: Sequence[Path] = (),
+        *,
+        host_filesystem: bool = False,
     ) -> None:
         self.workspace = workspace
+        self.host_filesystem = host_filesystem
+        self._host_scopes: dict[Path, Workspace] = {}
         self.home = Workspace(home_root, allow_home_root=True) if home_root is not None else None
         roots: list[Workspace] = []
         seen = {workspace.root}
@@ -1806,6 +1819,9 @@ class FileAccess:
 
     @property
     def root(self) -> Path:
+        if self.host_filesystem:
+            anchor = Path(self.workspace.root.anchor or os.sep)
+            return anchor.resolve(strict=True)
         if self.home is not None:
             return self.home.root
         if self.allowed:
@@ -1821,6 +1837,15 @@ class FileAccess:
             candidate = Path(raw_path).expanduser().resolve(strict=False)
         except OSError as exc:
             raise ToolFailure("INVALID_ARGUMENT", f"Could not resolve path: {raw_path}", category="validation") from exc
+        if self.host_filesystem:
+            anchor = Path(candidate.anchor or self.workspace.root.anchor or os.sep).resolve(strict=True)
+            scope = self._host_scopes.get(anchor)
+            if scope is None:
+                scope = Workspace(anchor, allow_home_root=True, allow_filesystem_root=True)
+                self._host_scopes[anchor] = scope
+            relative = candidate.relative_to(scope.root)
+            inner = relative.as_posix() if relative.parts else "."
+            return scope, inner, "host"
         choices = [self.workspace, *self.allowed]
         choices.sort(key=lambda item: len(item.root.parts), reverse=True)
         for scope in choices:
@@ -1840,6 +1865,8 @@ class FileAccess:
     def _scope(self, raw_path: str) -> tuple[Workspace, str, str]:
         raw = raw_path or "."
         if raw == "~" or raw.startswith("~/"):
+            if self.host_filesystem:
+                return self._absolute_scope(str(Path(raw).expanduser()))
             if self.home is None:
                 raise ToolFailure(
                     "PATH_OUTSIDE_FILE_SCOPE",
@@ -1854,6 +1881,8 @@ class FileAccess:
 
     @staticmethod
     def _decorate(resolved: ResolvedPath, scope: str) -> ResolvedPath:
+        if scope == "host":
+            return ResolvedPath(str(resolved.path), resolved.path, resolved.existed, resolved.root, "host")
         if scope == "external":
             return ResolvedPath(str(resolved.path), resolved.path, resolved.existed, resolved.root, "external")
         if scope != "home":
@@ -1874,6 +1903,13 @@ class FileAccess:
         scope.reject_write_symlink(inner)
 
     def workspace_for_resolved(self, resolved: ResolvedPath) -> Workspace:
+        if resolved.scope == "host":
+            root = resolved.path if resolved.path.is_dir() else resolved.path.parent
+            return Workspace(
+                root,
+                allow_home_root=True,
+                allow_filesystem_root=root.parent == root,
+            )
         if resolved.scope == "home" and self.home is not None:
             return self.home
         for scope in self.allowed:
@@ -1887,6 +1923,8 @@ class FileAccess:
         if resolved.scope == "home":
             return "~" if rel == "." else f"~/{rel}"
         if resolved.scope == "external":
+            return str(path)
+        if resolved.scope == "host":
             return str(path)
         return rel
 
@@ -1959,6 +1997,16 @@ class WorkspaceCommandManager:
             shutil.rmtree(self.fallback_runtime_dir, ignore_errors=True)
 
 
+def guarded_git_write(method: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
+    @functools.wraps(method)
+    def guarded(runtime: Any, args: dict[str, Any]) -> dict[str, Any]:
+        repo = runtime._git_repository(args, required=True)
+        assert repo is not None
+        with repository_write_lock(repo):
+            return method(runtime, args, repo)
+    return guarded
+
+
 class Runtime:
     def __init__(
         self,
@@ -1988,7 +2036,12 @@ class Runtime:
         command_manager: WorkspaceCommandManager | None = None,
     ) -> None:
         self.workspace = Workspace(workspace, allow_home_root=permission_mode == "host")
-        self.file_access = FileAccess(self.workspace, file_access_root, file_access_roots)
+        self.file_access = FileAccess(
+            self.workspace,
+            file_access_root,
+            file_access_roots,
+            host_filesystem=permission_mode == "host",
+        )
         self.enable_view_image = enable_view_image
         self.enable_workflow_tools = enable_workflow_tools
         self.enable_computer_tools = enable_computer_tools
@@ -2290,19 +2343,21 @@ class Runtime:
                 " Deferred tools stay outside tools/list: discover their input_schema, then call "
                 "tool_invoke with the exact name and matching arguments. No tools/list refresh is needed."
             )
-        file_scope = [str(self.workspace.root), *[str(path) for path in self.file_access.roots]]
-        scope_guidance = (
-            " Ordinary file tools and apply_patch may access the workspace plus these explicitly allowed "
-            f"folders: {file_scope}. Relative paths stay workspace-relative; absolute paths are allowed only "
-            "inside those folders."
-        )
         if self.capabilities.host_environment:
-            scope_guidance += (
-                " Full Access is enabled for exec_command: when the user explicitly requests it, commands may "
-                "use the host environment, SSH, SCP, rsync, Git over SSH, and paths outside the workspace. "
-                "Do not claim SSH is unavailable without checking the execution environment or attempting the "
-                "requested non-interactive command. Use apply_patch rather than exec_command for local file edits "
-                "that fall inside the configured file scope."
+            scope_guidance = (
+                " Full Access is enabled: ordinary file tools and apply_patch may access the host filesystem, "
+                "while relative paths remain workspace-relative so project context stays stable. exec_command may "
+                "use the host environment, SSH, SCP, rsync, Git over SSH, installed developer tools, and paths "
+                "outside the workspace. Do not claim a host tool is unavailable without checking the execution "
+                "environment or attempting the requested non-interactive command. Git, LSP, checks, reviews, and "
+                "project instructions remain anchored to the configured workspace unless their tool contract says otherwise."
+            )
+        else:
+            file_scope = [str(self.workspace.root), *[str(path) for path in self.file_access.roots]]
+            scope_guidance = (
+                " Ordinary file tools and apply_patch may access the workspace plus these explicitly allowed "
+                f"folders: {file_scope}. Relative paths stay workspace-relative; absolute paths are allowed only "
+                "inside those folders."
             )
         return f"{guidance}{scope_guidance}\n\n{self.project_context.server_instructions()}"
 
@@ -2644,7 +2699,13 @@ class Runtime:
             "file_access_root": str(self.file_access.root),
             "file_access_roots": [str(path) for path in self.file_access.roots],
             "file_access_scope": (
-                "home" if self.file_access.home is not None else "extended" if self.file_access.roots else "workspace"
+                "host"
+                if self.file_access.host_filesystem
+                else "home"
+                if self.file_access.home is not None
+                else "extended"
+                if self.file_access.roots
+                else "workspace"
             ),
             "permission_mode": self.permission_mode,
             "network_allowed": self.allow_network,
@@ -3404,8 +3465,7 @@ class Runtime:
                 ):
                     continue
                 entry = entry_for_path(child, file_workspace.root)
-                if resolved.scope == "home":
-                    entry["path"] = "~" if entry["path"] == "." else f"~/{entry['path']}"
+                entry["path"] = self.file_access.display_path(child, resolved)
                 entries.append(entry)
                 if len(entries) >= max_entries:
                     truncated = True
@@ -3470,7 +3530,7 @@ class Runtime:
                     git_ignored=ignored,
                 ):
                     continue
-                display_rel = f"~/{rel}" if resolved.scope == "home" else rel
+                display_rel = self.file_access.display_path(path, resolved)
                 files.append(file_entry(path, display_rel, path.lstat()))
                 if len(files) >= max_results:
                     truncated = True
@@ -3496,8 +3556,7 @@ class Runtime:
         max_results: int,
         sort_key: str,
     ) -> dict[str, Any] | None:
-        if resolved.scope == "home":
-            return None
+        file_workspace = self.file_access.workspace_for_resolved(resolved)
         fd = cached_which("fd", "fdfind")
         if not fd or not resolved.path.is_dir():
             return None
@@ -3523,7 +3582,7 @@ class Runtime:
         for pattern in exclude_patterns:
             args_base.extend(["--exclude", pattern])
 
-        paths: dict[str, Path] = {}
+        paths: dict[str, tuple[Path, str]] = {}
         for pattern in patterns:
             effective = pattern
             args = list(args_base)
@@ -3550,20 +3609,21 @@ class Runtime:
                 if not rel_to_search:
                     continue
                 path = resolved.path / rel_to_search
-                if path.is_symlink() and not self.workspace.is_safe_existing_path(path):
+                if path.is_symlink() and not file_workspace.is_safe_existing_path(path):
                     continue
-                rel = normalize_rel_display(path, self.workspace.root)
-                if matches_any_glob(rel, exclude_patterns):
+                rel = normalize_rel_display(path, file_workspace.root)
+                if matches_any_glob(rel_to_search, exclude_patterns):
                     continue
-                paths[rel] = path
+                display = self.file_access.display_path(path, resolved)
+                paths[display] = (path, rel)
                 if len(paths) >= max_results:
                     break
             if len(paths) >= max_results:
                 break
-        ignored = set() if include_ignored else self.workspace.git_ignored_paths(list(paths))
+        ignored = set() if include_ignored else file_workspace.git_ignored_paths([rel for _, rel in paths.values()])
         files: list[dict[str, Any]] = []
-        for rel, path in paths.items():
-            if self.workspace.is_ignored_path(
+        for display, (path, rel) in paths.items():
+            if file_workspace.is_ignored_path(
                 path,
                 include_hidden=include_hidden,
                 include_ignored=include_ignored,
@@ -3574,7 +3634,7 @@ class Runtime:
                 stat = path.lstat()
             except OSError:
                 continue
-            files.append(file_entry(path, rel, stat))
+            files.append(file_entry(path, display, stat))
         files.sort(key=lambda item: item["modified"] if sort_key == "modified" else item["path"])
         truncated = len(paths) >= max_results
         return {
@@ -3668,7 +3728,7 @@ class Runtime:
                         continue
                     before = lines[max(0, index - context_lines) : index]
                     after = lines[index + 1 : index + 1 + context_lines]
-                    display_rel = f"~/{rel}" if resolved.scope == "home" else rel
+                    display_rel = self.file_access.display_path(path, resolved)
                     matches.append(search_match_item(display_rel, index + 1, column, line, before, after, max_preview_bytes))
         return {
             "query": query,
@@ -3691,8 +3751,6 @@ class Runtime:
         max_results: int,
         max_preview_bytes: int,
     ) -> dict[str, Any] | None:
-        if resolved.scope == "home":
-            return None
         rg = cached_which("rg")
         if not rg:
             return None
@@ -3707,12 +3765,13 @@ class Runtime:
             args.extend(["--glob", pattern])
         for pattern in exclude_globs:
             args.extend(["--glob", f"!{pattern}"])
-        search_path = resolved.display if resolved.display != "." else "."
+        search_root = resolved.path if resolved.path.is_dir() else resolved.path.parent
+        search_path = "." if resolved.path.is_dir() else resolved.path.name
         args.extend(["--", query, search_path])
         try:
             process = subprocess.Popen(
                 args,
-                cwd=str(self.workspace.root),
+                cwd=str(search_root),
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
@@ -3755,24 +3814,25 @@ class Runtime:
                     truncated = True
                     process.terminate()
                     break
-                rel = normalize_rel_display((self.workspace.root / path_text).resolve(), self.workspace.root)
+                path = (search_root / path_text).resolve()
+                display = self.file_access.display_path(path, resolved)
                 submatches = data.get("submatches") if isinstance(data.get("submatches"), list) else []
                 first_submatch = submatches[0] if submatches and isinstance(submatches[0], dict) else {}
                 column = int(first_submatch.get("start", 0)) + 1
                 sanitized = str(line_text).replace("\r\n", "\n").replace("\r", "").rstrip("\n")
                 lines: list[str] = []
                 if context_lines > 0:
-                    lines = file_cache.get(rel, [])
-                    if rel not in file_cache:
+                    lines = file_cache.get(display, [])
+                    if display not in file_cache:
                         try:
-                            lines = (self.workspace.root / rel).read_text(encoding="utf-8").splitlines()
+                            lines = path.read_text(encoding="utf-8").splitlines()
                         except OSError:
                             lines = []
-                        file_cache[rel] = lines
+                        file_cache[display] = lines
                 index = line_number - 1
                 before = lines[max(0, index - context_lines) : index] if lines else []
                 after = lines[index + 1 : index + 1 + context_lines] if lines else []
-                matches.append(search_match_item(rel, line_number, column, sanitized, before, after, max_preview_bytes))
+                matches.append(search_match_item(display, line_number, column, sanitized, before, after, max_preview_bytes))
         finally:
             timeout.cancel()
             try:
@@ -3956,6 +4016,7 @@ class Runtime:
             "ok": True,
             "command_id": command.command_id,
             "operation_id": command.operation_id,
+            "workdir": command.workdir,
             "status": command.status_name(),
             "exit_code": command.exit_code,
             "signal": command.signal_name,
@@ -4125,6 +4186,7 @@ class Runtime:
             )
             command = self._make_command(
                 process,
+                workdir=str(workdir.path),
                 operation_id=operation_id,
                 timeout_at=deadline,
                 warnings=[landlock_warning] if landlock_warning else None,
@@ -4422,7 +4484,42 @@ class Runtime:
         return env
 
     def _git_env(self) -> dict[str, str]:
-        return self._command_env({})
+        return git_environment(self._command_env({}))
+
+    def _git_repository(self, args: dict[str, Any], *, required: bool = False) -> RepositoryContext | None:
+        """Resolve once from explicit selection or unambiguous workspace paths."""
+        git = require_git()
+        env = self._git_env()
+        paths = []
+        if isinstance(args.get("path"), str):
+            paths.append(str(args["path"]))
+        paths.extend(str(path) for path in args.get("paths", []))
+        explicit = args.get("repo_path")
+        repo: RepositoryContext | None = None
+        if explicit is not None:
+            target = self.resolve_existing(str(explicit)).path
+            repo = discover_repository(self.workspace.root, target, git=git, env=env, required=True)
+        for raw_path in paths:
+            target = self.workspace.root if raw_path == "." else self.resolve_for_write(raw_path).path
+            found = discover_repository(self.workspace.root, target, git=git, env=env, required=required or explicit is not None)
+            if found is not None:
+                if repo is not None and found.root != repo.root:
+                    raise ToolFailure(
+                        "GIT_REPOSITORY_MISMATCH", "Paths belong to different Git worktrees.", category="validation",
+                        details={"repo_root": str(repo.root), "path": raw_path, "actual_repo_root": str(found.root),
+                                 "retry_hint": "Use a separate call per repository; paths remain workspace-relative."},
+                    )
+                repo = found
+        if repo is None and not paths:
+            repo = discover_repository(self.workspace.root, self.workspace.root, git=git, env=env, required=required)
+        if repo is not None:
+            for raw_path in paths:
+                target = self.workspace.root if raw_path == "." else self.resolve_for_write(raw_path).path
+                if not target.is_relative_to(repo.root):
+                    raise ToolFailure("GIT_REPOSITORY_MISMATCH", "A path is outside the selected repository.", category="validation")
+        if required and repo is None:
+            raise ToolFailure("GIT_NOT_REPOSITORY", "Target is not a Git worktree. Pass repo_path.", category="validation")
+        return repo
 
     def _run_git_text(
         self, cmd: list[str], *, timeout: int | None = None, env: dict[str, str] | None = None
@@ -4465,9 +4562,11 @@ class Runtime:
         completed = self._run_git_text([require_git(), "-C", str(path), "rev-parse", rev], env=env)
         return completed.stdout.strip() if completed.returncode == 0 else ""
 
-    def _git_index_fingerprint(self, *, env: dict[str, str] | None = None) -> str:
+    def _git_index_fingerprint(self, repo: RepositoryContext | None = None, *, env: dict[str, str] | None = None) -> str:
+        repo = repo or self._git_repository({}, required=True)
+        assert repo is not None
         completed = self._run_git_bytes(
-            [require_git(), "-C", str(self.workspace.root), "ls-files", "--stage", "-z"],
+            [require_git(), "-C", str(repo.root), "ls-files", "--stage", "-z"],
             timeout=10,
             env=env,
         )
@@ -4477,14 +4576,15 @@ class Runtime:
                 completed.stderr.decode("utf-8", errors="replace").strip() or "git ls-files failed",
                 category="runtime",
             )
-        return hashlib.sha256(completed.stdout).hexdigest()
+        return hashlib.sha256(str(repo.git_dir).encode("utf-8", errors="surrogateescape") + b"\0" + completed.stdout).hexdigest()
 
-    def _git_write_state(self, *, env: dict[str, str] | None = None) -> dict[str, str]:
-        if not self._is_git_repo(self.workspace.root, env=env):
-            raise ToolFailure("GIT_NOT_REPOSITORY", "Workspace is not a Git repository.", category="validation")
+    def _git_write_state(self, repo: RepositoryContext | None = None, *, env: dict[str, str] | None = None) -> dict[str, str]:
+        repo = repo or self._git_repository({}, required=True)
+        assert repo is not None
         return {
-            "head": self._git_rev_parse(self.workspace.root, "HEAD", env=env),
-            "index_fingerprint": self._git_index_fingerprint(env=env),
+            **repo.metadata(),
+            "head": self._git_rev_parse(repo.root, "HEAD", env=env),
+            "index_fingerprint": self._git_index_fingerprint(repo, env=env),
         }
 
     def _require_git_write_state(
@@ -4492,9 +4592,10 @@ class Runtime:
         expected_head: str,
         expected_index_fingerprint: str | None = None,
         *,
+        repo: RepositoryContext | None = None,
         env: dict[str, str] | None = None,
     ) -> dict[str, str]:
-        current = self._git_write_state(env=env)
+        current = self._git_write_state(repo, env=env)
         if current["head"] != expected_head:
             raise ToolFailure(
                 "GIT_STATE_CONFLICT",
@@ -4516,13 +4617,16 @@ class Runtime:
             )
         return current
 
-    def _git_path_filters(self, args: dict[str, Any]) -> list[str]:
+    def _git_path_filters(self, args: dict[str, Any], repo: RepositoryContext | None = None) -> list[str]:
         path_filters: list[str] = []
         if isinstance(args.get("path"), str):
             path_filters.append(str(args["path"]))
         if isinstance(args.get("paths"), list):
             path_filters.extend(str(item) for item in args["paths"])
-        return [self.git_path_filter(path) for path in path_filters]
+        if repo is None:
+            return [self.git_path_filter(path) for path in path_filters]
+        return [(self.workspace.root if path == "." else self.resolve_for_write(path).path).relative_to(repo.root).as_posix()
+                for path in path_filters]
 
     def _base_command_env(self) -> dict[str, str]:
         if self.shell_env_policy.inherit == "none":
@@ -4539,6 +4643,7 @@ class Runtime:
         self,
         process: subprocess.Popen[bytes],
         *,
+        workdir: str | None = None,
         operation_id: str | None = None,
         timeout_at: float | None = None,
         warnings: list[str] | None = None,
@@ -4548,6 +4653,7 @@ class Runtime:
         return CommandRun(
             command_id=secrets.token_urlsafe(18),
             process=process,
+            workdir=workdir or str(self.workspace.root),
             operation_id=operation_id,
             timeout_at=timeout_at,
             warnings=warnings or [],
@@ -4673,6 +4779,10 @@ class Runtime:
         self._prune_commands()
         max_results = int(args.get("max_results", 100))
         requested_operation_id = str(args.get("operation_id") or "").strip()
+        requested_workdir = None
+        if args.get("workdir"):
+            resolver = self.resolve_file_existing if self.capabilities.host_environment else self.resolve_existing
+            requested_workdir = str(resolver(str(args["workdir"])).path)
         with self.commands_lock:
             command_by_id = {**self.output_commands, **self.commands}
             operations = dict(self.command_manager.operations)
@@ -4684,11 +4794,14 @@ class Runtime:
         ):
             if requested_operation_id and command.operation_id != requested_operation_id:
                 continue
+            if requested_workdir and command.workdir != requested_workdir:
+                continue
             command.refresh_status()
             items.append(
                 {
                     "command_id": command.command_id,
                     "operation_id": command.operation_id,
+                    "workdir": command.workdir,
                     "status": command.status_name(),
                     "exit_code": command.exit_code,
                     "timed_out": command.timed_out,
@@ -4706,6 +4819,7 @@ class Runtime:
                 for operation_id, record in operations.items()
                 if record.command_id is None
                 and (not requested_operation_id or requested_operation_id == operation_id)
+                and requested_workdir is None
             ]
             for operation_id, record in sorted(
                 pending,
@@ -4730,12 +4844,14 @@ class Runtime:
         total_candidates = sum(
             1
             for command in command_by_id.values()
-            if not requested_operation_id or command.operation_id == requested_operation_id
+            if (not requested_operation_id or command.operation_id == requested_operation_id)
+            and (requested_workdir is None or command.workdir == requested_workdir)
         ) + sum(
             1
             for operation_id, record in operations.items()
             if record.command_id is None
             and (not requested_operation_id or requested_operation_id == operation_id)
+            and requested_workdir is None
         )
         return {
             "ok": True,
@@ -4745,6 +4861,7 @@ class Runtime:
         }
 
     def _format_command_output(self, command: CommandRun, payload: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
+        payload["workdir"] = command.workdir
         terminal = payload.get("status") != "running"
         if terminal:
             self._complete_command(command)
@@ -5047,29 +5164,30 @@ class Runtime:
         return command
 
     def git_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        resolved = self.resolve_existing(str(args.get("path", ".")))
+        repo = self._git_repository(args)
         max_entries = int(args.get("max_entries", 1000))
         include_untracked = bool(args.get("include_untracked", True))
         git = require_git()
         git_env = self._git_env()
-        root_check = self._run_git_text(
-            [git, "-C", str(resolved.path), "rev-parse", "--show-toplevel"], env=git_env
-        )
-        if root_check.returncode != 0:
-            return self._git_status_not_repo(root_check)
-        status_cmd = [git, "-C", str(resolved.path), "status", "--porcelain=v1", "-b"]
+        if repo is None:
+            resolved = self.resolve_existing(str(args.get("path", ".")))
+            root_check = self._run_git_text(
+                [git, "-C", str(resolved.path), "rev-parse", "--show-toplevel"], timeout=10, env=git_env
+            )
+            return {**self._git_status_not_repo(root_check), "repo_root": None, "path_base": "workspace"}
+        status_cmd = [git, "-C", str(repo.root), "status", "--porcelain=v1", "-b", "-z"]
         if not include_untracked:
             status_cmd.append("--untracked-files=no")
         completed = self._run_git_text(status_cmd, timeout=10, env=git_env)
         if completed.returncode != 0:
             raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git status failed", category="runtime")
-        lines = completed.stdout.splitlines()
+        records = iter(completed.stdout.split("\0"))
         branch = ""
         upstream = ""
         ahead = 0
         behind = 0
         entries: list[dict[str, Any]] = []
-        for line in lines:
+        for line in records:
             if line.startswith("## "):
                 branch, upstream, ahead, behind = parse_branch_line(line[3:])
                 continue
@@ -5077,8 +5195,8 @@ class Runtime:
                 continue
             path_text = line[3:]
             original = None
-            if " -> " in path_text:
-                original, path_text = path_text.split(" -> ", 1)
+            if line[0] in "RC" or line[1] in "RC":
+                original = next(records, "")
             entries.append(
                 {
                     "path": path_text,
@@ -5087,36 +5205,38 @@ class Runtime:
                     "worktree_status": line[1],
                 }
             )
-            if len(entries) >= max_entries:
+            if len(entries) > max_entries:
                 break
         return {
             "is_repo": True,
+            **repo.metadata(),
             "branch": branch,
-            "head": self._git_rev_parse(resolved.path, "HEAD", env=git_env),
-            "index_fingerprint": self._git_index_fingerprint(env=git_env),
+            "head": self._git_rev_parse(repo.root, "HEAD", env=git_env),
+            "index_fingerprint": self._git_index_fingerprint(repo, env=git_env),
             "upstream": upstream,
             "ahead": ahead,
             "behind": behind,
             "clean": not entries,
-            "entries": entries,
-            "truncated": len(entries) >= max_entries and len(lines) > max_entries + 1,
+            "entries": entries[:max_entries],
+            "truncated": len(entries) > max_entries,
         }
 
     def git_diff(self, args: dict[str, Any]) -> dict[str, Any]:
+        repo = self._git_repository(args)
         git = require_git()
         git_env = self._git_env()
         staged = bool(args.get("staged", False))
         unstaged = bool(args.get("unstaged", True))
         context = int(args.get("context_lines", 3))
         max_bytes = int(args.get("max_bytes", 262144))
-        path_filters = self._git_path_filters(args)
-        if not self._is_git_repo(self.workspace.root, env=git_env):
+        path_filters = self._git_path_filters(args, repo)
+        if repo is None:
             return self._fallback_diff(path_filters, max_bytes)
         chunks: list[bytes] = []
         if unstaged:
-            chunks.append(self._run_git_diff(git, context, path_filters, cached=False, env=git_env))
+            chunks.append(self._run_git_diff(git, context, path_filters, cached=False, env=git_env, repo=repo))
         if staged:
-            chunks.append(self._run_git_diff(git, context, path_filters, cached=True, env=git_env))
+            chunks.append(self._run_git_diff(git, context, path_filters, cached=True, env=git_env, repo=repo))
         combined = b""
         for chunk in chunks:
             if combined and chunk and not combined.endswith(b"\n"):
@@ -5126,6 +5246,9 @@ class Runtime:
         diff_text = diff_truncation.content
         truncated = diff_truncation.truncated
         return {
+            "is_repo": True,
+            "diff_source": "git",
+            **repo.metadata(),
             "diff": diff_text,
             "files": parse_diff_files(diff_text),
             **truncation_fields(diff_truncation),
@@ -5133,9 +5256,10 @@ class Runtime:
         }
 
     def _run_git_diff(
-        self, git: str, context: int, path_filters: list[str], *, cached: bool, env: dict[str, str] | None = None
+        self, git: str, context: int, path_filters: list[str], *, cached: bool, env: dict[str, str] | None = None,
+        repo: RepositoryContext | None = None,
     ) -> bytes:
-        cmd = [git, "-C", str(self.workspace.root), "diff", f"--unified={context}"]
+        cmd = [git, "-C", str(repo.root if repo else self.workspace.root), "diff", "--no-ext-diff", f"--unified={context}"]
         if cached:
             cmd.append("--cached")
         if path_filters:
@@ -5153,7 +5277,7 @@ class Runtime:
         with self.patch_lock:
             baselines = sorted(self.patch_baselines.items())
         for rel, before in baselines:
-            if selected and rel not in selected:
+            if selected and not any(path == "." or rel == path or rel.startswith(path.rstrip("/") + "/") for path in selected):
                 continue
             current_path = self.resolve_for_write(rel).path
             after = read_text_preserve_newlines(current_path) if current_path.exists() and not current_path.is_dir() else None
@@ -5179,6 +5303,10 @@ class Runtime:
         diff_text = diff_truncation.content
         truncated = diff_truncation.truncated
         return {
+            "is_repo": False,
+            "repo_root": None,
+            "path_base": "workspace",
+            "diff_source": "patch_baseline",
             "diff": diff_text,
             "files": files,
             **truncation_fields(diff_truncation),
@@ -5186,20 +5314,20 @@ class Runtime:
         }
 
     def git_log(self, args: dict[str, Any]) -> dict[str, Any]:
+        repo = self._git_repository(args)
         git = require_git()
         git_env = self._git_env()
-        requested_path = str(args.get("path", "."))
-        resolved = self.resolve_existing(requested_path)
-        if not self._is_git_repo(resolved.path, env=git_env):
+        if repo is None:
             return {"is_repo": False, "commits": [], "truncated": False, "warnings": []}
         ref = validate_git_ref(str(args.get("ref", "HEAD")))
         max_count = int(args.get("max_count", 20))
         skip = int(args.get("skip", 0))
-        path_filter = resolved.display
+        filters = self._git_path_filters(args, repo)
+        path_filter = filters[0] if filters else "."
         cmd = [
             git,
             "-C",
-            str(self.workspace.root),
+            str(repo.root),
             "log",
             f"--max-count={max_count + 1}",
             f"--skip={skip}",
@@ -5230,6 +5358,7 @@ class Runtime:
         truncated = len(commits) > max_count
         result = {
             "is_repo": True,
+            **repo.metadata(),
             "ref": ref,
             "path": path_filter,
             "max_count": max_count,
@@ -5242,7 +5371,7 @@ class Runtime:
             result["next_action"] = {
                 "tool": "git_log",
                 "arguments": {
-                    "path": requested_path,
+                    **args,
                     "ref": ref,
                     "max_count": max_count,
                     "skip": skip + max_count,
@@ -5251,19 +5380,20 @@ class Runtime:
         return result
 
     def git_show(self, args: dict[str, Any]) -> dict[str, Any]:
+        repo = self._git_repository(args)
         git = require_git()
         git_env = self._git_env()
-        if not self._is_git_repo(self.workspace.root, env=git_env):
+        if repo is None:
             return {"is_repo": False, "content": "", "files": [], "truncated": False, "warnings": []}
         rev = validate_git_ref(str(args.get("rev", "HEAD")))
         context = int(args.get("context_lines", 3))
         max_bytes = int(args.get("max_bytes", 262144))
         include_diff = bool(args.get("include_diff", True))
-        normalized_filters = self._git_path_filters(args)
+        normalized_filters = self._git_path_filters(args, repo)
         cmd = [
             git,
             "-C",
-            str(self.workspace.root),
+            str(repo.root),
             "show",
             "--no-ext-diff",
             "--format=fuller",
@@ -5282,6 +5412,7 @@ class Runtime:
         content = truncation.content
         return {
             "is_repo": True,
+            **repo.metadata(),
             "rev": rev,
             "content": content,
             "files": parse_diff_files(content),
@@ -5290,13 +5421,14 @@ class Runtime:
         }
 
     def git_blame(self, args: dict[str, Any]) -> dict[str, Any]:
+        repo = self._git_repository(args)
         git = require_git()
         git_env = self._git_env()
         requested_path = str(args.get("path", ""))
         resolved = self.resolve_existing(requested_path)
         if resolved.path.is_dir():
             raise ToolFailure("IS_DIRECTORY", "Path is a directory.", category="validation")
-        if not self._is_git_repo(self.workspace.root, env=git_env):
+        if repo is None:
             return {"is_repo": False, "path": resolved.display, "lines": [], "truncated": False, "warnings": []}
         ref_arg = args.get("rev")
         ref = validate_git_ref(str(ref_arg)) if isinstance(ref_arg, str) and ref_arg else None
@@ -5315,7 +5447,7 @@ class Runtime:
         cmd = [
             git,
             "-C",
-            str(self.workspace.root),
+            str(repo.root),
             "blame",
             "--line-porcelain",
             "-L",
@@ -5323,7 +5455,7 @@ class Runtime:
         ]
         if ref:
             cmd.append(ref)
-        cmd.extend(["--", resolved.display])
+        cmd.extend(["--", resolved.path.relative_to(repo.root).as_posix()])
         completed = self._run_git_text(cmd, timeout=10, env=git_env)
         if completed.returncode != 0:
             raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git blame failed", category="runtime")
@@ -5333,6 +5465,8 @@ class Runtime:
             truncated = True
         result = {
             "is_repo": True,
+            **repo.metadata(),
+            "path_base": "workspace",
             "path": resolved.display,
             "rev": ref,
             "start_line": start_line,
@@ -5344,6 +5478,7 @@ class Runtime:
         }
         if truncated and final_line < requested_final_line:
             next_arguments: dict[str, Any] = {
+                **args,
                 "path": requested_path,
                 "start_line": final_line + 1,
                 "end_line": requested_final_line,
@@ -5357,8 +5492,8 @@ class Runtime:
             }
         return result
 
-    def _git_explicit_paths(self, args: dict[str, Any]) -> list[str]:
-        paths = self._git_path_filters(args)
+    def _git_explicit_paths(self, args: dict[str, Any], repo: RepositoryContext | None = None) -> list[str]:
+        paths = self._git_path_filters(args, repo)
         if not paths or any(path == "." for path in paths):
             raise ToolFailure(
                 "GIT_PATH_SCOPE_REQUIRED",
@@ -5370,15 +5505,17 @@ class Runtime:
         return paths
 
     def git_branch_list(self, args: dict[str, Any]) -> dict[str, Any]:
+        repo = self._git_repository(args, required=True)
+        assert repo is not None
         git = require_git()
         git_env = self._git_env()
-        state = self._git_write_state(env=git_env)
+        state = self._git_write_state(repo, env=git_env)
         max_results = int(args.get("max_results", 200))
         completed = self._run_git_text(
             [
                 git,
                 "-C",
-                str(self.workspace.root),
+                str(repo.root),
                 "for-each-ref",
                 f"--count={max_results + 1}",
                 "--sort=-committerdate",
@@ -5414,24 +5551,25 @@ class Runtime:
             "summary": f"Found {min(len(branches), max_results)} local branches.",
         }
 
-    def git_branch_create(self, args: dict[str, Any]) -> dict[str, Any]:
+    @guarded_git_write
+    def git_branch_create(self, args: dict[str, Any], repo: RepositoryContext) -> dict[str, Any]:
         git = require_git()
         git_env = self._git_env()
         expected_head = str(args["expected_head"])
         expected_index = str(args["expected_index_fingerprint"])
-        self._require_git_write_state(expected_head, expected_index, env=git_env)
+        self._require_git_write_state(expected_head, expected_index, repo=repo, env=git_env)
         name = str(args["name"])
         valid = self._run_git_text([git, "check-ref-format", "--branch", name], timeout=5, env=git_env)
         if valid.returncode != 0:
             raise ToolFailure("INVALID_GIT_BRANCH", "Invalid Git branch name.", category="validation")
         start_point = validate_git_ref(str(args.get("start_point", "HEAD")))
         checkout = bool(args.get("checkout", False))
-        command = [git, "-C", str(self.workspace.root)]
+        command = [git, "-C", str(repo.root)]
         command.extend(["switch", "-c", name, start_point] if checkout else ["branch", name, start_point])
         completed = self._run_git_text(command, timeout=30, env=git_env)
         if completed.returncode != 0:
             raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git branch creation failed", category="runtime")
-        state = self._git_write_state(env=git_env)
+        state = self._git_write_state(repo, env=git_env)
         return {
             "ok": True,
             "name": name,
@@ -5440,27 +5578,31 @@ class Runtime:
             "summary": f"Created branch {name}{' and checked it out' if checkout else ''}.",
         }
 
-    def _managed_worktree_root(self, *, create: bool = False) -> Path:
+    def _managed_worktree_root(self, repo: RepositoryContext | None = None, *, create: bool = False) -> Path:
         root = self._workflow_store().root / "worktrees"
+        if repo is not None and repo.common_dir != (self.workspace.root / ".git").resolve():
+            root = root / hashlib.sha256(str(repo.common_dir).encode()).hexdigest()[:20]
         if create:
             root.mkdir(parents=True, exist_ok=True, mode=0o700)
         return root.resolve()
 
     def git_worktree_list(self, args: dict[str, Any]) -> dict[str, Any]:
+        repo = self._git_repository(args, required=True)
+        assert repo is not None
         git = require_git()
         git_env = self._git_env()
-        self._git_write_state(env=git_env)
+        self._git_write_state(repo, env=git_env)
         completed = self._run_git_text(
-            [git, "-C", str(self.workspace.root), "worktree", "list", "--porcelain"],
+            [git, "-C", str(repo.root), "worktree", "list", "--porcelain", "-z"],
             timeout=10,
             env=git_env,
         )
         if completed.returncode != 0:
             raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git worktree list failed", category="runtime")
-        managed_root = self._managed_worktree_root()
+        managed_root = self._managed_worktree_root(repo)
         worktrees: list[dict[str, Any]] = []
         current: dict[str, Any] = {}
-        for line in [*completed.stdout.splitlines(), ""]:
+        for line in [*completed.stdout.split("\0"), ""]:
             if not line:
                 if current:
                     path = Path(str(current["path"])).resolve()
@@ -5482,16 +5624,19 @@ class Runtime:
                 current["prunable"] = value or True
         return {
             "ok": True,
+            **repo.metadata(),
+            "path_base": "absolute",
             "worktrees": worktrees,
             "count": len(worktrees),
             "summary": f"Found {len(worktrees)} Git worktrees.",
         }
 
-    def git_worktree_create(self, args: dict[str, Any]) -> dict[str, Any]:
+    @guarded_git_write
+    def git_worktree_create(self, args: dict[str, Any], repo: RepositoryContext) -> dict[str, Any]:
         git = require_git()
         git_env = self._git_env()
         self._require_git_write_state(
-            str(args["expected_head"]), str(args["expected_index_fingerprint"]), env=git_env
+            str(args["expected_head"]), str(args["expected_index_fingerprint"]), repo=repo, env=git_env
         )
         worktree_id = str(args["worktree_id"])
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", worktree_id):
@@ -5504,12 +5649,12 @@ class Runtime:
         valid = self._run_git_text([git, "check-ref-format", "--branch", branch], timeout=5, env=git_env)
         if valid.returncode != 0:
             raise ToolFailure("INVALID_GIT_BRANCH", "Invalid Git branch name.", category="validation")
-        destination = self._managed_worktree_root(create=True) / worktree_id
+        destination = self._managed_worktree_root(repo, create=True) / worktree_id
         if destination.exists():
             raise ToolFailure("GIT_WORKTREE_EXISTS", f"Managed worktree already exists: {worktree_id}", category="conflict")
         create_branch = bool(args.get("create_branch", True))
         start_point = validate_git_ref(str(args.get("start_point", "HEAD")))
-        command = [git, "-C", str(self.workspace.root), "worktree", "add"]
+        command = [git, "-C", str(repo.root), "worktree", "add"]
         if create_branch:
             command.extend(["-b", branch, str(destination), start_point])
         else:
@@ -5519,6 +5664,8 @@ class Runtime:
             raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git worktree creation failed", category="runtime")
         return {
             "ok": True,
+            **repo.metadata(),
+            "path_base": "absolute",
             "worktree_id": worktree_id,
             "path": str(destination),
             "branch": branch,
@@ -5526,15 +5673,23 @@ class Runtime:
             "summary": f"Created managed worktree {worktree_id} on branch {branch}.",
         }
 
-    def git_worktree_remove(self, args: dict[str, Any]) -> dict[str, Any]:
+    @guarded_git_write
+    def git_worktree_remove(self, args: dict[str, Any], repo: RepositoryContext) -> dict[str, Any]:
         git = require_git()
         git_env = self._git_env()
         worktree_id = str(args["worktree_id"])
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", worktree_id):
             raise ToolFailure("INVALID_ARGUMENT", "Invalid managed worktree id.", category="validation")
-        destination = (self._managed_worktree_root() / worktree_id).resolve()
-        if not destination.is_relative_to(self._managed_worktree_root()) or not destination.is_dir():
+        managed_root = self._managed_worktree_root(repo)
+        requested = managed_root / worktree_id
+        destination = requested.resolve()
+        if requested.is_symlink() or not destination.is_relative_to(managed_root) or not destination.is_dir():
             raise ToolFailure("GIT_WORKTREE_NOT_FOUND", f"Managed worktree not found: {worktree_id}", category="not_found")
+        ownership = self._run_git_text(
+            [git, "-C", str(destination), "rev-parse", "--git-common-dir"], timeout=10, env=git_env
+        )
+        if ownership.returncode != 0 or (destination / ownership.stdout.removesuffix("\n")).resolve() != repo.common_dir:
+            raise ToolFailure("GIT_REPOSITORY_MISMATCH", "Managed worktree belongs to a different repository.", category="validation")
         status = self._run_git_text(
             [git, "-C", str(destination), "status", "--porcelain", "--untracked-files=all"],
             timeout=10,
@@ -5550,7 +5705,7 @@ class Runtime:
                 details={"worktree_id": worktree_id},
             )
         completed = self._run_git_text(
-            [git, "-C", str(self.workspace.root), "worktree", "remove", "--", str(destination)],
+            [git, "-C", str(repo.root), "worktree", "remove", "--", str(destination)],
             timeout=60,
             env=git_env,
         )
@@ -5558,17 +5713,21 @@ class Runtime:
             raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git worktree removal failed", category="runtime")
         return {
             "ok": True,
+            **repo.metadata(),
+            "path_base": "absolute",
             "worktree_id": worktree_id,
             "path": str(destination),
             "summary": f"Removed managed worktree {worktree_id}; its Git branch was preserved.",
         }
 
     def git_conflicts(self, args: dict[str, Any]) -> dict[str, Any]:
+        repo = self._git_repository(args, required=True)
+        assert repo is not None
         git = require_git()
         git_env = self._git_env()
-        state = self._git_write_state(env=git_env)
+        state = self._git_write_state(repo, env=git_env)
         completed = self._run_git_bytes(
-            [git, "-C", str(self.workspace.root), "ls-files", "--unmerged", "-z"],
+            [git, "-C", str(repo.root), "ls-files", "--unmerged", "-z"],
             timeout=10,
             env=git_env,
         )
@@ -5596,47 +5755,50 @@ class Runtime:
             "summary": f"Found {len(conflicts)} unmerged paths.",
         }
 
-    def git_stage(self, args: dict[str, Any]) -> dict[str, Any]:
+    @guarded_git_write
+    def git_stage(self, args: dict[str, Any], repo: RepositoryContext) -> dict[str, Any]:
         git = require_git()
         git_env = self._git_env()
-        paths = self._git_explicit_paths(args)
+        paths = self._git_explicit_paths(args, repo)
         self._require_git_write_state(
-            str(args["expected_head"]), str(args["expected_index_fingerprint"]), env=git_env
+            str(args["expected_head"]), str(args["expected_index_fingerprint"]), repo=repo, env=git_env
         )
         completed = self._run_git_text(
-            [git, "-C", str(self.workspace.root), "add", "--", *paths], timeout=30, env=git_env
+            [git, "-C", str(repo.root), "add", "--", *paths], timeout=30, env=git_env
         )
         if completed.returncode != 0:
             raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git add failed", category="runtime")
-        state = self._git_write_state(env=git_env)
+        state = self._git_write_state(repo, env=git_env)
         return {"ok": True, "paths": paths, **state, "summary": f"Staged {len(paths)} explicit paths."}
 
-    def git_unstage(self, args: dict[str, Any]) -> dict[str, Any]:
+    @guarded_git_write
+    def git_unstage(self, args: dict[str, Any], repo: RepositoryContext) -> dict[str, Any]:
         git = require_git()
         git_env = self._git_env()
-        paths = self._git_explicit_paths(args)
+        paths = self._git_explicit_paths(args, repo)
         self._require_git_write_state(
-            str(args["expected_head"]), str(args["expected_index_fingerprint"]), env=git_env
+            str(args["expected_head"]), str(args["expected_index_fingerprint"]), repo=repo, env=git_env
         )
         completed = self._run_git_text(
-            [git, "-C", str(self.workspace.root), "restore", "--staged", "--", *paths],
+            [git, "-C", str(repo.root), "restore", "--staged", "--", *paths],
             timeout=30,
             env=git_env,
         )
         if completed.returncode != 0:
             raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git restore --staged failed", category="runtime")
-        state = self._git_write_state(env=git_env)
+        state = self._git_write_state(repo, env=git_env)
         return {"ok": True, "paths": paths, **state, "summary": f"Unstaged {len(paths)} explicit paths."}
 
-    def git_commit(self, args: dict[str, Any]) -> dict[str, Any]:
+    @guarded_git_write
+    def git_commit(self, args: dict[str, Any], repo: RepositoryContext) -> dict[str, Any]:
         git = require_git()
         git_env = self._git_env()
-        paths = self._git_explicit_paths(args)
+        paths = self._git_explicit_paths(args, repo)
         self._require_git_write_state(
-            str(args["expected_head"]), str(args["expected_index_fingerprint"]), env=git_env
+            str(args["expected_head"]), str(args["expected_index_fingerprint"]), repo=repo, env=git_env
         )
         staged = self._run_git_bytes(
-            [git, "-C", str(self.workspace.root), "diff", "--cached", "--name-only", "-z"],
+            [git, "-C", str(repo.root), "diff", "--cached", "--name-only", "-z"],
             timeout=10,
             env=git_env,
         )
@@ -5655,11 +5817,11 @@ class Runtime:
             )
         message = str(args["message"])
         completed = self._run_git_text(
-            [git, "-C", str(self.workspace.root), "commit", "-m", message], timeout=120, env=git_env
+            [git, "-C", str(repo.root), "commit", "-m", message], timeout=120, env=git_env
         )
         if completed.returncode != 0:
             raise ToolFailure("GIT_ERROR", completed.stderr.strip() or completed.stdout.strip() or "git commit failed", category="runtime")
-        state = self._git_write_state(env=git_env)
+        state = self._git_write_state(repo, env=git_env)
         return {
             "ok": True,
             "commit": state["head"],
@@ -5725,22 +5887,31 @@ class Runtime:
 
     def lsp_diagnostics(self, args: dict[str, Any]) -> dict[str, Any]:
         server, resolved, uri, digest = self._lsp_document(args)
+        snapshot = server.diagnostics_snapshot(uri, int(args.get("wait_ms", 500)), expected_digest=digest)
         diagnostics = lsp_tools.normalize_diagnostics(
             self.workspace.root,
             uri,
-            server.diagnostics(uri, int(args.get("wait_ms", 500))),
+            snapshot.pop("diagnostics"),
         )
+        try:
+            if hashlib.sha256(resolved.path.read_text(encoding="utf-8").encode("utf-8")).hexdigest() != digest:
+                snapshot["freshness"] = "stale"
+        except (OSError, UnicodeError):
+            snapshot["freshness"] = "stale"
         max_results = int(args.get("max_results", 500))
         return {
+            **snapshot,
             "ok": True,
             "path": resolved.display,
+            "project_root": str(server.workspace),
             "file_sha256": digest,
             "backend": server.command,
             "position_encoding": "utf-16",
             "diagnostics": diagnostics[:max_results],
             "count": min(len(diagnostics), max_results),
             "truncated": len(diagnostics) > max_results,
-            "summary": f"Received {min(len(diagnostics), max_results)} LSP diagnostics.",
+            "summary": f"Received {min(len(diagnostics), max_results)} LSP diagnostics ({snapshot['freshness']}). "
+                       + ("" if snapshot["freshness"] == "fresh" else "Not confirmed for the current document version; absence of diagnostics is not proof of no errors."),
         }
 
     def lsp_rename_preview(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -5774,18 +5945,25 @@ class Runtime:
         }
 
     def review_prepare(self, args: dict[str, Any]) -> dict[str, Any]:
-        target = self.resolve_existing(str(args.get("path", "."))).path
+        target = self.resolve_existing(str(args.get("path", args.get("repo_path", ".")))).path
         if not target.is_dir():
             raise ToolFailure("NOT_A_DIRECTORY", "Review path must be a directory.", category="validation")
+        target_rel = target.relative_to(self.workspace.root).as_posix()
+        scope_args = {**args, "path": target_rel}
+        repo = self._git_repository(scope_args)
+        for raw_path in args.get("paths", []):
+            if not self.resolve_for_write(str(raw_path)).path.is_relative_to(target):
+                raise ToolFailure("GIT_PATH_SCOPE_REQUIRED", "Review paths must stay inside the selected review directory.", category="validation")
         fingerprint = workspace_insight.workspace_fingerprint(self.workspace.root, target)
         diff_args: dict[str, Any] = {
             "staged": bool(args.get("staged", True)),
             "unstaged": bool(args.get("unstaged", True)),
             "max_bytes": int(args.get("max_bytes", 524288)),
+            "paths": list(args["paths"]) if args.get("paths") else [target_rel],
         }
-        if isinstance(args.get("paths"), list):
-            diff_args["paths"] = args["paths"]
-        git_status = self.git_status({"path": target.relative_to(self.workspace.root).as_posix() or "."})
+        if repo is not None:
+            diff_args["repo_path"] = repo.root.relative_to(self.workspace.root).as_posix()
+        git_status = self.git_status({"path": target_rel, **({"repo_path": args["repo_path"]} if "repo_path" in args else {})})
         diff = self.git_diff(diff_args)
         instructions = self.project_instructions(
             {"path": target.relative_to(self.workspace.root).as_posix() or "."}
@@ -5795,10 +5973,13 @@ class Runtime:
         snapshot = {
             "path": target.relative_to(self.workspace.root).as_posix() or ".",
             "git": {
+                "repo_root": git_status.get("repo_root"),
+                "path_base": git_status.get("path_base"),
                 "branch": git_status.get("branch"),
                 "head": git_status.get("head"),
                 "index_fingerprint": git_status.get("index_fingerprint"),
-                "status_entries": git_status.get("entries", []),
+                "status_entries": [entry for entry in git_status.get("entries", [])
+                                   if repo is None or (repo.root / entry["path"]).is_relative_to(target)],
             },
             "diff": diff,
             "instructions": instructions,
@@ -5920,7 +6101,12 @@ class Runtime:
         )
 
     def workspace_overview(self, args: dict[str, Any]) -> dict[str, Any]:
-        return workspace_insight.workspace_overview(self.workspace.root, self.project_context, args)
+        target = self.resolve_existing(str(args.get("path", "."))).path
+        if not target.is_dir():
+            raise ToolFailure("NOT_A_DIRECTORY", "workspace_overview path must be a directory.", category="validation")
+        result = workspace_insight.workspace_overview(self.workspace.root, self.project_context, args, target=target)
+        result["applicable_instructions"] = self.project_instructions({"path": args.get("path", ".")})
+        return result
 
     def repo_map(self, args: dict[str, Any]) -> dict[str, Any]:
         target = self.resolve_existing(str(args.get("path", "."))).path
@@ -5930,40 +6116,7 @@ class Runtime:
 
     def project_instructions(self, args: dict[str, Any]) -> dict[str, Any]:
         target = self.resolve_existing(str(args.get("path", "."))).path
-        target_dir = target if target.is_dir() else target.parent
-        applicable: list[dict[str, Any]] = []
-        for item in self.project_context.root_files:
-            applicable.append({"path": item.path, "content": item.content, "truncated": item.truncated, "scope": "."})
-        for rel in self.project_context.nested_files:
-            instruction_path = self.workspace.root / rel
-            try:
-                instruction_path.parent.relative_to(self.workspace.root)
-                target_dir.relative_to(instruction_path.parent)
-            except ValueError:
-                continue
-            resolved = self.resolve_existing(rel)
-            raw = resolved.path.read_bytes()
-            try:
-                content = raw[:16 * 1024].decode("utf-8")
-            except UnicodeDecodeError:
-                continue
-            applicable.append(
-                {
-                    "path": rel,
-                    "content": content,
-                    "truncated": len(raw) > 16 * 1024,
-                    "scope": resolved.path.parent.relative_to(self.workspace.root).as_posix() or ".",
-                }
-            )
-        applicable.sort(key=lambda item: (0 if item["scope"] == "." else len(str(item["scope"]).split("/")), item["path"]))
-        return {
-            "ok": True,
-            "path": target.relative_to(self.workspace.root).as_posix() or ".",
-            "instructions": applicable,
-            "count": len(applicable),
-            "warnings": list(self.project_context.warnings),
-            "summary": f"Resolved {len(applicable)} applicable instruction files.",
-        }
+        return instructions_for_path(self.workspace.root, target)
 
     def skills_list(self, args: dict[str, Any]) -> dict[str, Any]:
         return skill_tools.list_skills(self.workspace.root, max_results=int(args.get("max_results", 200)))
@@ -7630,6 +7783,8 @@ def tool_definition(name: str, *, fake_readonly: bool = False) -> dict[str, Any]
         "description": (
             f"[{TOOL_GUIDES[name].category}] {TOOL_REGISTRY[name].description} "
             f"Selection: {TOOL_GUIDES[name].use_when}"
+            + (" Select a worktree with repo_path; all input path/paths remain workspace-relative. Check repo_root/path_base in results."
+               if name.startswith("git_") else "")
         ),
         "inputSchema": schemas[name],
         "outputSchema": tool_output_schema(),
@@ -8049,7 +8204,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             ["tool_name", "permission", "reason", "arguments"],
         ),
         "workspace_overview": object_schema(
-            {"max_files": {**integer, "minimum": 1, "maximum": 50000, "default": 20000}}
+            {"path": {**string, "default": "."}, "max_files": {**integer, "minimum": 1, "maximum": 50000, "default": 20000}}
         ),
         "repo_map": object_schema(
             {
@@ -8501,6 +8656,16 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             },
             ["extension_id", "message"],
         ),
+    }
+    for name in ("git_status", "git_diff", "git_log", "git_show", "git_blame", "git_branch_list",
+                 "git_branch_create", "git_worktree_list", "git_worktree_create", "git_worktree_remove",
+                 "git_conflicts", "git_stage", "git_unstage", "git_commit", "review_prepare"):
+        schemas[name]["properties"]["repo_path"] = {
+            "type": "string", "minLength": 1,
+            "description": "Select one Git worktree inside the workspace. Other path/paths arguments stay workspace-relative, not repo-relative.",
+        }
+    schemas["list_commands"]["properties"]["workdir"] = {
+        "type": "string", "minLength": 1, "description": "Filter by exact canonical working directory; relative paths use the workspace.",
     }
     schemas.update({name: tool.schema for name, tool in COMPUTER_TOOLS.items()})
     return {name: schemas[name] for name in TOOL_REGISTRY}
@@ -9616,7 +9781,7 @@ def run_stdio(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Serve workspace-confined coding tools over MCP.")
+    parser = argparse.ArgumentParser(description="Serve workspace-anchored coding tools over MCP.")
     parser.add_argument(
         "--version",
         action="version",
@@ -9629,8 +9794,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "additional allowed root for ordinary file tools and apply_patch; repeat for multiple folders. "
-            "Relative paths stay workspace-relative, absolute paths must stay inside the workspace or an allowed "
-            "root, and ~/... addresses the first configured root. Defaults to CODING_TOOLS_MCP_FILE_ACCESS_ROOT "
+            "Applies to non-host modes; host mode already grants file tools host-filesystem access. Relative paths "
+            "stay workspace-relative, absolute paths must stay inside the workspace or an allowed root, and ~/... "
+            "addresses the first configured root. Defaults to CODING_TOOLS_MCP_FILE_ACCESS_ROOT "
             "or the path-separated CODING_TOOLS_MCP_FILE_ACCESS_ROOTS when set"
         ),
     )

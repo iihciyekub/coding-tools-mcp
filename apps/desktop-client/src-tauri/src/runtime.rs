@@ -645,7 +645,11 @@ fn spawn_runtime(
 }
 
 fn file_access_roots(profile: &WorkspaceProfile) -> Vec<String> {
-    profile.runtime.allowed_paths.clone()
+    if profile.runtime.permission_mode == "host" {
+        Vec::new()
+    } else {
+        profile.runtime.allowed_paths.clone()
+    }
 }
 
 fn runtime_environment_variables(
@@ -1049,7 +1053,7 @@ while True:
     }
 
     #[test]
-    fn full_access_uses_only_explicit_extra_allowed_folders() {
+    fn full_access_does_not_pass_redundant_file_roots() {
         let temporary = tempfile::tempdir().unwrap();
         let extra = temporary.path().join("Applications");
         fs::create_dir(&extra).unwrap();
@@ -1061,7 +1065,7 @@ while True:
 
         profile.runtime.permission_mode = "host".into();
         let roots = file_access_roots(&profile);
-        assert_eq!(roots, vec![extra.to_string_lossy().into_owned()]);
+        assert!(roots.is_empty());
     }
 
     #[test]

@@ -4,6 +4,7 @@ import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 CONTEXT_FILE_NAMES = frozenset({"AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"})
@@ -31,6 +32,62 @@ MAX_CONTEXT_FILE_BYTES = 16 * 1024
 MAX_NESTED_CONTEXT_FILES = 64
 MAX_CONTEXT_SCAN_FILES = 20_000
 MAX_CONTEXT_SCAN_DEPTH = 12
+MAX_APPLICABLE_CONTEXT_BYTES = 64 * 1024
+
+
+def instructions_for_path(root: Path, target: Path) -> dict[str, Any]:
+    """Read applicable rules now, independently of the startup directory scan."""
+    root = root.resolve(strict=True)
+    target = target.resolve(strict=False)
+    directory = target if target.is_dir() else target.parent
+    directory.relative_to(root)
+    chain = [directory]
+    while chain[-1] != root:
+        chain.append(chain[-1].parent)
+    instructions: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    seen: set[tuple[int, int]] = set()
+    remaining = MAX_APPLICABLE_CONTEXT_BYTES
+    for current in reversed(chain):
+        for name in ("AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"):
+            path = current / name
+            if not path.is_file():
+                continue
+            try:
+                resolved = path.resolve(strict=True)
+                resolved.relative_to(root)
+                info = resolved.stat()
+                identity = (info.st_dev, info.st_ino)
+                if identity in seen:
+                    continue
+                if remaining <= 0:
+                    warnings.append("Applicable instruction byte budget exhausted; read remaining rules explicitly.")
+                    break
+                budget = min(MAX_CONTEXT_FILE_BYTES, remaining)
+                with resolved.open("rb") as handle:
+                    raw = handle.read(budget + 1)
+                content = _decode_utf8_prefix(raw[:budget])
+            except (OSError, ValueError) as exc:
+                warnings.append(f"Skipped unsafe or unreadable instruction {path.relative_to(root)}: {exc}")
+                continue
+            seen.add(identity)
+            truncated = len(raw) > budget
+            remaining -= len(content.encode("utf-8"))
+            instructions.append({
+                "path": path.relative_to(root).as_posix(), "content": content,
+                "truncated": truncated, "scope": current.relative_to(root).as_posix(),
+            })
+            if truncated:
+                warnings.append(f"Instruction truncated: {path.relative_to(root)}")
+        if remaining <= 0:
+            if not any("budget exhausted" in warning for warning in warnings):
+                warnings.append("Applicable instruction byte budget exhausted; read remaining rules explicitly.")
+            break
+    return {
+        "ok": True, "path": target.relative_to(root).as_posix(),
+        "instructions": instructions, "count": len(instructions), "warnings": warnings,
+        "summary": f"Resolved {len(instructions)} applicable instruction files from the current filesystem.",
+    }
 
 
 @dataclass(frozen=True)

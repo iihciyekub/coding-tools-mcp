@@ -16,18 +16,18 @@ API.
 - Compact menu-bar panel with no macOS Dock icon
 - Multiple workspace profiles with one automatically assigned local port per workspace
 - Mode-first profile creation: both Standard and Full Access ask for a workspace
-  folder so project context is always explicit. Full Access starts with common
-  existing folders for the current platform, and the user can remove or extend them.
+  folder so project context is always explicit. Full Access does not synthesize a
+  folder allowlist: host-mode file tools and commands can use the host filesystem.
 - One-click OAuth runtime startup through Cloudflare Quick Tunnels
 - A simplified per-workspace access menu: **Standard** maps to the workspace-confined
   trusted runtime, while **Full Access** maps to host mode for agent workflows that
   intentionally need the wider Mac environment. Legacy safe/dangerous profiles remain
   readable until the user explicitly chooses one of the two desktop modes.
-- Independent **Allowed folders** control: ordinary file tools and `apply_patch`
-  can use the workspace plus the editable folders in the profile. Full Access does
-  not implicitly add the entire user home. Relative paths remain workspace-relative.
-  Git, LSP, workflow state, checks, and project context stay anchored to the
-  selected workspace even when an allowed folder is one of its parents.
+- **Allowed folders** apply to Standard access: ordinary file tools and `apply_patch`
+  can use the workspace plus explicitly selected folders. In Full Access, file tools
+  and host commands can use the host filesystem; relative paths still resolve from
+  the workspace. Git, LSP, workflow state, checks, reviews, and project context stay
+  anchored to the selected workspace rather than following arbitrary host paths.
 - **Full Access** launches host mode with SSH/Git credentials and compatibility
   annotations enabled for clients that otherwise refuse command tools. On macOS,
   the launcher also recovers `SSH_AUTH_SOCK` from the GUI environment, login shell,

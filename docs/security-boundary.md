@@ -4,8 +4,8 @@ Coding Tools MCP exposes primitives, not an agent workflow engine.
 
 The boundary is:
 
-- direct file tools accept workspace-relative paths plus absolute paths contained
-  by explicitly configured file-access roots
+- in safe/trusted/dangerous modes, direct file tools accept workspace-relative
+  paths plus absolute paths contained by explicitly configured file-access roots
 - `exec_command` starts in a workspace cwd
 - safe/trusted modes filter secrets and loader/startup env
 - safe/trusted modes block destructive commands
@@ -16,10 +16,12 @@ The boundary is:
 `host` mode is an explicit opt-out from the ordinary command boundary. It preserves the
 server process's host environment and disables ordinary command gates and Landlock so
 `exec_command` can use local SSH/Git credentials and operate outside the
-workspace. An explicitly selected `deny` or `allowlist` network policy still
-applies. Direct file tools remain limited to the workspace plus explicitly
-configured file-access roots. Treat a host-mode MCP endpoint as remote command
-execution with the authority of the server user.
+workspace. Host mode also lets ordinary file tools and `apply_patch` resolve
+absolute and home-relative paths across the host filesystem. Project-scoped Git,
+LSP, checks, reviews, workflow state, and project instructions remain anchored to
+the configured workspace. An explicitly selected `deny` or `allowlist` network
+policy still applies. Treat a host-mode MCP endpoint as remote code and file
+access with the authority of the server user.
 
 Opt-in [computer tools](computer-use-spec.md) require an explicit desktop approval
 for a bounded app session, even in host mode. That is a policy for these tools,

@@ -277,10 +277,13 @@ and bounded by file-count, scan-count, depth, per-file, and total-byte limits.
 - One server runtime owns one canonical workspace root and serves every client
   of it. Concurrent clients share the command pool, the retained output, and
   the patch baselines; this is a single trust domain by design.
-- Project-scoped path inputs remain workspace-relative. Ordinary file tools and
-  `apply_patch` additionally accept absolute paths only when they resolve inside
-  an explicitly configured file-access root. `..` traversal, NUL bytes, and
-  symlink escapes outside the selected root are rejected.
+- Project-scoped path inputs remain workspace-relative. In safe/trusted/dangerous
+  modes, ordinary file tools and `apply_patch` additionally accept absolute paths
+  only when they resolve inside an explicitly configured file-access root. In host
+  mode, those file tools may resolve absolute and home-relative paths across the host
+  filesystem; relative paths still resolve from the configured workspace. Git, LSP,
+  checks, reviews, workflow state, and project instructions remain workspace-scoped.
+  NUL bytes and `..` traversal in relative paths remain rejected.
 - `apply_patch` parses and validates every operation before committing, under a
   lock that spans every client, so two clients patching one file cannot lose
   an update: the later one is answered with a conflict rather than silently
@@ -356,6 +359,9 @@ Known tool error codes include:
 
 Error categories are `validation`, `security`, `permission`, `runtime`,
 `not_found`, `conflict`, and `internal`.
+
+Multi-project routing additionally defines `"GIT_REPOSITORY_MISMATCH"` and
+`"GIT_REPOSITORY_OUTSIDE_WORKSPACE"`; both reject the operation before Git writes.
 
 Malformed JSON-RPC uses standard protocol errors: parse `-32700`, invalid
 request `-32600`, unknown method `-32601`, invalid params/tool `-32602`, and
@@ -675,13 +681,18 @@ process registration reports `status: "accepting"` and is safe to poll again.
 
 ### list_commands
 
-Inputs: `"operation_id"`, `"max_results"`.
+Inputs: `"operation_id"`, `"max_results"`, `"workdir"`.
 
 Annotations: `{"title":"List commands","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
 Lists recent active/retained commands plus any accepting operation record,
 newest first. `"operation_id"` optionally filters the list after a lost HTTP
 response or reconnect.
+
+Registered commands carry their canonical absolute `workdir` in execution,
+status, polling and recovery results. Optional `workdir` filters this list by
+exact canonical directory; relative inputs remain workspace-relative. Pending
+acceptance records without a registered command are omitted from a directory-filtered list.
 
 ### write_stdin
 
@@ -728,31 +739,54 @@ Example: `{"output_ref":"command:abc:stdout","offset":0,"limit":4096}`.
 
 ### git_status
 
-Inputs: `"path"`, `"include_untracked"`, `"max_entries"`.
+Inputs: `"path"`, `"include_untracked"`, `"max_entries"`, `"repo_path"`.
 
 Annotations: `{"title":"Git status","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
+All Git tools support optional `repo_path` to select one worktree inside the
+configured workspace. Other `path` / `paths` arguments remain workspace-relative,
+including when `repo_path` is present. Without `repo_path`, explicit file/directory
+paths infer one repository; with no paths, the workspace itself is used. No global
+current-project state is kept. Mixed repositories or conflicting explicit selection
+return `"GIT_REPOSITORY_MISMATCH"`; an actual worktree root outside the workspace
+returns `"GIT_REPOSITORY_OUTSIDE_WORKSPACE"`. Explicit non-Git selection returns
+`GIT_NOT_REPOSITORY`, never a fallback.
+
+Results identify absolute `repo_root` and `path_base`. Status/diff/Git-write paths
+are repository-relative; input paths are still workspace-relative. `git_blame`
+keeps its selected source `path` workspace-relative. Worktree listing/create/remove
+paths are absolute. Status uses NUL-separated porcelain to preserve special names.
+The opaque `index_fingerprint` binds both index content and worktree identity;
+refresh old tokens through `git_status` after upgrading. Git location overrides
+such as `GIT_DIR` and `GIT_INDEX_FILE` do not override an explicit target.
+
 ### git_diff
 
-Inputs: `"path"`, `"paths"`, `"staged"`, `"unstaged"`, `"context_lines"`, `"max_bytes"`.
+Inputs: `"path"`, `"paths"`, `"staged"`, `"unstaged"`, `"context_lines"`, `"max_bytes"`, `"repo_path"`.
 
 Annotations: `{"title":"Git diff","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
+Real Git differences return `is_repo=true, diff_source="git"`. The legacy
+non-Git patch-baseline comparison remains available only without explicit repository
+selection and identifies `is_repo=false, diff_source="patch_baseline"`. It is not
+an authoritative view of arbitrary filesystem changes. File filters are literal
+paths, including names containing wildcard characters.
+
 ### git_log
 
-Inputs: `"path"`, `"ref"`, `"max_count"`, `"skip"`.
+Inputs: `"path"`, `"ref"`, `"max_count"`, `"skip"`, `"repo_path"`.
 
 Annotations: `{"title":"Git log","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
 ### git_show
 
-Inputs: `"rev"`, `"path"`, `"paths"`, `"include_diff"`, `"context_lines"`, `"max_bytes"`.
+Inputs: `"rev"`, `"path"`, `"paths"`, `"include_diff"`, `"context_lines"`, `"max_bytes"`, `"repo_path"`.
 
 Annotations: `{"title":"Git show","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
 ### git_blame
 
-Inputs: `"path"`, `"rev"`, `"start_line"`, `"end_line"`, `"max_lines"`.
+Inputs: `"path"`, `"rev"`, `"start_line"`, `"end_line"`, `"max_lines"`, `"repo_path"`.
 
 Annotations: `{"title":"Git blame","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
@@ -1266,10 +1300,13 @@ session or client trust boundary.
 
 ### workspace_overview
 
-Inputs: `"max_files"`.
+Inputs: `"max_files"`, `"path"`.
 
 Returns bounded manifest, language, entry-point, top-level area, and project
 instruction metadata. `scan_complete` and `truncated` disclose coverage.
+The optional `path` defaults to `.` and limits enumeration before applying the
+file budget. File paths remain workspace-relative. Current applicable rules are
+returned separately from startup discovery metadata.
 
 ### repo_map
 
@@ -1285,6 +1322,10 @@ Inputs: `"path"`.
 
 Returns root and nested `AGENTS.md`/`CLAUDE.md` files whose directory scope
 contains the selected path, ordered from broad to narrow scope.
+Rules are read along the target's ancestor chain on every call, independent of
+startup scan limits. This observes newly added or changed rules. Reads are bounded
+to 16 KiB per file and 64 KiB in total, deduplicate filesystem identities, reject
+outside-workspace symlinks and disclose truncation or unreadable rules.
 
 ### skills_list
 
@@ -1435,7 +1476,7 @@ creation are deleted. Git index and external side effects are outside its scope.
 
 ### git_branch_list
 
-Inputs: `"max_results"`.
+Inputs: `"max_results"`, `"repo_path"`.
 
 Lists local branches and returns the current `head` and `index_fingerprint`.
 Those values are concurrency tokens for every Git write tool.
@@ -1443,28 +1484,28 @@ Those values are concurrency tokens for every Git write tool.
 ### git_branch_create
 
 Inputs: `"name"`, `"start_point"`, `"checkout"`, `"expected_head"`,
-`"expected_index_fingerprint"`.
+`"expected_index_fingerprint"`, `"repo_path"`.
 
 Validates the branch name with Git and creates a local branch only while HEAD
 and index match the reviewed state. Checkout is explicit and defaults to false.
 
 ### git_conflicts
 
-Inputs: none.
+Inputs: `"repo_path"` (optional).
 
 Lists unmerged paths and all index stages. It also returns current HEAD and
 index fingerprints and never resolves conflicts automatically.
 
 ### git_stage
 
-Inputs: `"paths"`, `"expected_head"`, `"expected_index_fingerprint"`.
+Inputs: `"paths"`, `"expected_head"`, `"expected_index_fingerprint"`, `"repo_path"`.
 
 Stages 1-200 unique explicit workspace paths. The workspace root is rejected,
 and stale HEAD/index values return retryable `GIT_STATE_CONFLICT`.
 
 ### git_unstage
 
-Inputs: `"paths"`, `"expected_head"`, `"expected_index_fingerprint"`.
+Inputs: `"paths"`, `"expected_head"`, `"expected_index_fingerprint"`, `"repo_path"`.
 
 Removes only the explicit paths from the index through `git restore --staged`.
 Working-tree content is preserved.
@@ -1472,7 +1513,7 @@ Working-tree content is preserved.
 ### git_commit
 
 Inputs: `"paths"`, `"message"`, `"expected_head"`,
-`"expected_index_fingerprint"`.
+`"expected_index_fingerprint"`, `"repo_path"`.
 
 Commits only when the complete staged path set exactly equals `paths`; unrelated
 staged content returns `GIT_COMMIT_SCOPE_MISMATCH`. Hooks and configured signing
@@ -1480,7 +1521,7 @@ may run and their failures are returned as `GIT_ERROR`. This tool does not push.
 
 ### git_worktree_list
 
-Inputs: none.
+Inputs: `"repo_path"` (optional).
 
 Annotations: `{"title":"List Git worktrees","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
@@ -1490,22 +1531,29 @@ private workflow state as managed.
 ### git_worktree_create
 
 Inputs: `"worktree_id"`, `"branch"`, `"create_branch"`, `"start_point"`,
-`"expected_head"`, `"expected_index_fingerprint"`.
+`"expected_head"`, `"expected_index_fingerprint"`, `"repo_path"`.
 
 Annotations: `{"title":"Create Git worktree","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
 
 Creates an isolated checkout under private workflow state after HEAD and index
 concurrency checks. It can create a new branch or attach an existing branch and
 returns the absolute path so the Desktop app can register it as a workspace.
+Nested repositories use separate managed-worktree namespaces; the same
+worktree_id in another repository does not alias this directory. An external
+managed checkout is not automatically added to the current workspace's file scope.
 
 ### git_worktree_remove
 
-Inputs: `"worktree_id"`.
+Inputs: `"worktree_id"`, `"repo_path"`.
 
 Annotations: `{"title":"Remove Git worktree","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
 
 Removes only a runtime-managed worktree. Dirty or untracked content returns
 `GIT_WORKTREE_DIRTY`; the branch is always preserved.
+Removal verifies the checkout's actual Git common directory against the selected
+repository. MCP write calls coordinate their check-and-write sections per Git
+common directory within the process; this does not lock out arbitrary external
+writers or implement multi-round agent scheduling.
 
 ### lsp_status
 
@@ -1516,6 +1564,10 @@ backends, their commands and supported extensions. Rust uses `rust-analyzer` and
 is rooted at the nearest ancestor `Cargo.toml`; a rustup proxy without the actual
 component installed is reported unavailable. Backends start only when a semantic
 operation first needs them.
+Python and TypeScript also use nearest language/project configuration markers,
+stopping at the nearest Git worktree boundary instead of borrowing parent/neighbor
+configuration. Backends are reused by language and project root. This does not
+automatically install servers, activate virtual environments or execute shell profiles.
 
 ### lsp_definition
 
@@ -1539,6 +1591,12 @@ Inputs: `"path"`, `"wait_ms"`, `"max_results"`.
 
 Opens or refreshes the UTF-8 document and returns bounded diagnostics published
 by the language server. It does not label AST or text-search results as LSP.
+Results include `project_root`, `document_version`, `diagnostics_version` and
+`freshness` (`fresh`, `unversioned`, `pending`, `stale`). Only an explicitly matching
+document version is fresh; versionless publications remain unconfirmed. Waiting
+is URI/version-aware, late older-version notifications cannot overwrite current
+results, and a file changed during the query is stale. No latest diagnostics is
+not proof that a document has no errors.
 
 ### lsp_rename_preview
 
@@ -1559,11 +1617,15 @@ Python backend discovery tries `basedpyright-langserver`,
 ### review_prepare
 
 Inputs: `"path"`, `"paths"`, `"task_id"`, `"staged"`, `"unstaged"`,
-`"max_bytes"`.
+`"max_bytes"`, `"repo_path"`.
 
 Persists a bounded review snapshot containing Git status and diff, applicable
 project instructions, optional task evidence, and a code fingerprint. Preparing
 materials does not claim that an AI or human has reviewed them.
+The selected directory scopes diff paths, applicable rules and fingerprint input;
+explicit file filters outside it are rejected. With repo_path and no path, the
+selected repository directory is used. Fingerprints enumerate the target before
+applying budgets, so a sibling project does not consume its scan budget.
 
 ### review_record
 

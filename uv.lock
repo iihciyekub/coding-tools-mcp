@@ -198,6 +198,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+browser = [
+    { name = "playwright" },
+]
 dev = [
     { name = "mcp" },
     { name = "mypy" },
@@ -214,12 +217,13 @@ requires-dist = [
     { name = "mcp", marker = "extra == 'dev'", specifier = ">=2.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=2.1,<2.2" },
     { name = "pillow", marker = "extra == 'image'", specifier = ">=10.0" },
+    { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.58,<2" },
     { name = "pyjwt", specifier = ">=2.8" },
     { name = "pyyaml", marker = "extra == 'dev'", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15,<0.16" },
     { name = "typing-extensions", marker = "extra == 'dev'", specifier = ">=4.12" },
 ]
-provides-extras = ["dev", "image"]
+provides-extras = ["dev", "image", "browser"]
 
 [[package]]
 name = "colorama"

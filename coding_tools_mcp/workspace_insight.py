@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 import tomllib
@@ -11,6 +12,7 @@ from typing import Any
 
 from . import code_intel
 from .project_context import ProjectContext
+from .repositories import git_environment
 
 
 MANIFEST_NAMES = {
@@ -60,35 +62,34 @@ def _git_files(workspace: Path, *, max_files: int) -> tuple[list[Path], bool]:
             stderr=subprocess.DEVNULL,
             timeout=5,
             check=False,
+            env=git_environment(dict(os.environ)),
         )
     except (OSError, subprocess.SubprocessError):
         completed = None
     if completed is not None and completed.returncode == 0:
-        raw = [item for item in completed.stdout.decode("utf-8", errors="surrogateescape").split("\0") if item]
+        raw = sorted(set(item for item in completed.stdout.decode("utf-8", errors="surrogateescape").split("\0") if item))
         truncated = len(raw) > max_files
         git_paths = [workspace / item for item in raw[:max_files]]
         return git_paths, truncated
 
     fallback_paths: list[Path] = []
     excluded = code_intel.EXCLUDED_DIRS
-    for path in workspace.rglob("*"):
-        try:
-            rel = path.relative_to(workspace)
-        except ValueError:
-            continue
-        if any(part.startswith(".") or part in excluded for part in rel.parts[:-1]):
-            continue
-        if not path.is_file() or path.is_symlink():
-            continue
-        fallback_paths.append(path)
-        if len(fallback_paths) > max_files:
-            return sorted(fallback_paths[:max_files]), True
+    for current, directories, files in os.walk(workspace, followlinks=False):
+        directories[:] = sorted(name for name in directories if not name.startswith(".") and name not in excluded)
+        for name in sorted(files):
+            path = Path(current) / name
+            if not path.is_file() or path.is_symlink():
+                continue
+            fallback_paths.append(path)
+            if len(fallback_paths) > max_files:
+                return sorted(fallback_paths[:max_files]), True
     return sorted(fallback_paths), False
 
 
-def workspace_overview(workspace: Path, context: ProjectContext, args: dict[str, Any]) -> dict[str, Any]:
+def workspace_overview(workspace: Path, context: ProjectContext, args: dict[str, Any], *, target: Path | None = None) -> dict[str, Any]:
+    target = target or workspace
     max_files = int(args.get("max_files", 20_000))
-    files, truncated = _git_files(workspace, max_files=max_files)
+    files, truncated = _git_files(target, max_files=max_files)
     manifests: list[dict[str, str]] = []
     entrypoints: list[str] = []
     languages: Counter[str] = Counter()
@@ -110,6 +111,7 @@ def workspace_overview(workspace: Path, context: ProjectContext, args: dict[str,
     return {
         "ok": True,
         "workspace": str(workspace),
+        "path": target.relative_to(workspace).as_posix(),
         "files_scanned": len(files),
         "scan_complete": not truncated,
         "truncated": truncated,
@@ -133,15 +135,18 @@ def workspace_overview(workspace: Path, context: ProjectContext, args: dict[str,
 
 
 def workspace_fingerprint(workspace: Path, target: Path, *, max_files: int = 20_000) -> dict[str, Any]:
-    files, truncated = _git_files(workspace, max_files=max_files)
+    files, truncated = _git_files(target, max_files=max_files)
     digest = hashlib.sha256()
+    digest.update(target.relative_to(workspace).as_posix().encode("utf-8", errors="surrogateescape") + b"\0")
     hashed_bytes = 0
     file_count = 0
     complete = not truncated
     for path in files:
         try:
             path.relative_to(target)
+            path.resolve(strict=False).relative_to(workspace)
         except ValueError:
+            complete = False
             continue
         try:
             rel = path.relative_to(workspace).as_posix()
@@ -170,6 +175,7 @@ def workspace_fingerprint(workspace: Path, target: Path, *, max_files: int = 20_
         file_count += 1
     return {
         "fingerprint": digest.hexdigest(),
+        "path": target.relative_to(workspace).as_posix(),
         "scan_complete": complete,
         "files_hashed": file_count,
         "bytes_hashed": hashed_bytes,

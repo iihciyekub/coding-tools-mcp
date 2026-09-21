@@ -188,6 +188,15 @@ patch. A file's final newline is an ordinary line the hunk can add or remove.
 
 ## Model-ready examples
 
+One service can operate multiple repositories below its workspace without a
+mutable current-project setting. Select a Git worktree explicitly with `repo_path`
+or infer it from unambiguous `path` / `paths`. All input file paths remain
+workspace-relative, for example `{"repo_path":"project-a","paths":["project-a/src/app.py"]}`.
+Git results identify `repo_root` and their output `path_base`; do not feed a
+repo-relative filename back as a workspace-relative input without its prefix.
+See the [multi-project specification](multi-project-agent-spec.md) for scope,
+concurrency, command ownership, and visual-verification acceptance.
+
 Every relative path resolves against the workspace root; there is no
 session-scoped working directory. Use explicit paths for multi-call workflows:
 

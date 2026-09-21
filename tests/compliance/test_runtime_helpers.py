@@ -461,30 +461,69 @@ class RuntimeHelperTests(unittest.TestCase):
                 runtime.read_file({"path": str(blocked)})
             self.assertEqual(error.exception.code, "PATH_OUTSIDE_FILE_SCOPE")
 
-    def test_host_instructions_explicitly_advertise_ssh_and_allowed_file_roots(self) -> None:
-        with TemporaryDirectory() as workspace_tmp, TemporaryDirectory() as allowed_tmp:
-            allowed = Path(allowed_tmp)
-            runtime = Runtime(
-                Path(workspace_tmp),
-                file_access_roots=(allowed,),
-                permission_mode="host",
-            )
-            instructions = runtime.tool_usage_instructions()
-            command = runtime.exec_command(
-                {
-                    "cmd": "pwd",
-                    "workdir": str(allowed),
-                    "yield_time_ms": 1000,
-                }
-            )
+    def test_host_mode_gives_file_tools_host_access_without_expanding_project_scope(self) -> None:
+        with TemporaryDirectory() as workspace_tmp, TemporaryDirectory() as outside_tmp:
+            workspace = Path(workspace_tmp)
+            outside = Path(outside_tmp)
+            note = outside / "note.txt"
+            note.write_text("before\n", encoding="utf-8")
+            hidden = outside / ".codex"
+            hidden.mkdir()
+            config = hidden / "config.toml"
+            config.write_text("model = 'fixture'\n", encoding="utf-8")
+            runtime = Runtime(workspace, permission_mode="host")
+            try:
+                instructions = runtime.tool_usage_instructions()
+                payload = runtime.read_file({"path": str(note)})
+                listed = runtime.list_dir({"path": str(hidden)})
+                searched = runtime.search_text({"path": str(hidden), "query": "fixture"})
+                patched = runtime.apply_patch({
+                    "patch": (
+                        "*** Begin Patch\n"
+                        f"*** Update File: {note}\n"
+                        "@@\n"
+                        "-before\n"
+                        "+after\n"
+                        "*** End Patch"
+                    )
+                })
+                command = runtime.exec_command(
+                    {
+                        "cmd": "pwd",
+                        "workdir": str(outside),
+                        "yield_time_ms": 1000,
+                    }
+                )
+                project_scope = runtime.resolve_existing(".")
 
-        self.assertIn("SSH", instructions)
-        self.assertIn("SCP", instructions)
-        self.assertIn("rsync", instructions)
-        self.assertIn(str(allowed.resolve()), instructions)
-        self.assertNotIn("Use these tools only for coding operations inside the configured workspace.", instructions)
-        self.assertEqual(command["exit_code"], 0)
-        self.assertEqual(Path(command["stdout"].strip()).resolve(), allowed.resolve())
+                self.assertEqual(payload["path"], str(note.resolve()))
+                self.assertEqual([item["path"] for item in listed["entries"]], [str(config.resolve())])
+                self.assertEqual([item["path"] for item in searched["matches"]], [str(config.resolve())])
+                self.assertEqual(note.read_text(encoding="utf-8"), "after\n")
+                self.assertTrue(patched["clean"])
+                self.assertEqual(runtime.server_info_payload()["file_access_scope"], "host")
+                self.assertIn("SSH", instructions)
+                self.assertIn("SCP", instructions)
+                self.assertIn("rsync", instructions)
+                self.assertIn("host filesystem", instructions)
+                self.assertNotIn("Use these tools only for coding operations inside the configured workspace.", instructions)
+                self.assertEqual(project_scope.path, workspace.resolve())
+                self.assertEqual(command["exit_code"], 0)
+                self.assertEqual(Path(command["stdout"].strip()).resolve(), outside.resolve())
+            finally:
+                runtime.close()
+
+    def test_dangerous_mode_does_not_expand_file_tools_to_host(self) -> None:
+        with TemporaryDirectory() as workspace_tmp, TemporaryDirectory() as outside_tmp:
+            outside = Path(outside_tmp) / "note.txt"
+            outside.write_text("outside\n", encoding="utf-8")
+            runtime = Runtime(Path(workspace_tmp), permission_mode="dangerous")
+            try:
+                with self.assertRaises(ToolFailure) as error:
+                    runtime.read_file({"path": str(outside)})
+                self.assertEqual(error.exception.code, "PATH_OUTSIDE_FILE_SCOPE")
+            finally:
+                runtime.close()
 
     def test_kill_command_keeps_unresponsive_command(self) -> None:
         class StillRunningProcess:

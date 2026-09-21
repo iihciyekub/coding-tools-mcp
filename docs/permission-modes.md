@@ -60,13 +60,14 @@ coding-tools-mcp --permission-mode host --workspace /path/to/repo
 ```
 
 Direct file tools (`read_file`, `apply_patch`, search, listing, and image reads)
-use the configured file scope: the workspace plus any roots supplied with
-repeatable `--file-access-root` flags. Relative paths remain workspace-relative;
-absolute paths are accepted only inside the workspace or one of those explicit
-roots. Git, LSP, workflow state, checks, and project context remain anchored to
-the workspace. Unrestricted host command access, including SSH/SCP/rsync and Git
-over SSH, is available through `exec_command`. The server's own transport
-authentication secrets are always removed from child command environments.
+also use host filesystem access in this mode. Relative paths remain
+workspace-relative for deterministic project work, while absolute paths and
+home-relative paths may resolve across the host filesystem. Git, LSP, workflow
+state, checks, reviews, and project context remain anchored to the workspace.
+Unrestricted host command access, including SSH/SCP/rsync, installed developer
+tools, and Git over SSH, is available through `exec_command`. The server's own
+transport authentication secrets are always removed from child command
+environments.
 
 As with dangerous mode, an explicitly configured `deny` or `allowlist` network
 policy still applies even though the other command gates are disabled.

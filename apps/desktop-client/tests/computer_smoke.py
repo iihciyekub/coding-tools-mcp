@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import plistlib
 import subprocess
 import sys
 import tempfile
@@ -18,9 +20,24 @@ def main() -> int:
     helper = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else ROOT / "apps/desktop-client/src-tauri/resources/computer/Coding Tools MCP App Helper.app/Contents/MacOS/coding-tools-computer-helper"
     with tempfile.TemporaryDirectory(prefix="computer-smoke-") as temp:
         root = Path(temp)
-        executable = root / "ComputerFixture"
+        bundle = root / "ComputerFixture.app"
+        executable = bundle / "Contents/MacOS/ComputerFixture"
+        executable.parent.mkdir(parents=True)
+        fixture_bundle_id = "org.codingtoolsmcp.test-fixture"
+        (bundle / "Contents/Info.plist").write_bytes(plistlib.dumps({
+            "CFBundleIdentifier": fixture_bundle_id,
+            "CFBundleExecutable": "ComputerFixture",
+            "CFBundleName": "Coding Tools MCP Test Fixture",
+            "CFBundlePackageType": "APPL",
+            "LSUIElement": True,
+        }))
         subprocess.run(["xcrun", "swiftc", "-swift-version", "5", str(Path(__file__).with_name("computer-fixture.swift")), "-o", str(executable)], check=True)
-        fixture = subprocess.Popen([str(executable)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        fixture_env = dict(os.environ)
+        # A smoke launched from the desktop MCP inherits its host bundle id.
+        # Give only our disposable fixture its own identity; do not weaken the
+        # runtime's protection of the real desktop approval application.
+        fixture_env.pop("__CFBundleIdentifier", None)
+        fixture = subprocess.Popen([str(executable)], env=fixture_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         backend = NativeHelper(helper)
         runtime = Runtime(root, enable_computer_tools=True, computer_backend=backend, state_root=root / "state")
         try:
@@ -40,6 +57,7 @@ def main() -> int:
                 if time.monotonic() >= deadline:
                     raise RuntimeError("Fixture did not start")
                 time.sleep(0.1)
+            assert app.get("bundle_id") == fixture_bundle_id, app
             request = call("computer_request_access", {"app_id": app["app_id"], "access": "control", "reason": "Disposable integration fixture", "ttl_seconds": 60})
             # Human approval simulation is restricted to our isolated temporary state and PID.
             assert request["arguments"]["app"]["pid"] == fixture.pid
@@ -51,10 +69,22 @@ def main() -> int:
                 assert denied["structuredContent"]["error"]["code"] == "ACCESSIBILITY_PERMISSION_REQUIRED", denied
                 print(json.dumps({"stage": "permission_denied", "passed": True, "gui_acceptance": "blocked"}))
                 return 2
-            windows = call("app_windows", {"session_id": session})["windows"]
-            target = next(window for window in windows if window.get("title") == "Coding Tools MCP Test Fixture")
-            args = {"session_id": session, "window_id": target["window_id"]}
-            observed = runtime.call_tool("app_snapshot", {**args, "include_image": bool(status.get("screen_recording"))})
+            # Accessibility can publish a newly launched window before it is
+            # present in ScreenCaptureKit's list. Refresh observed handles while
+            # waiting for this fixture only; never relax PID/bounds matching.
+            ready_deadline = time.monotonic() + 5
+            observed = None
+            while time.monotonic() < ready_deadline:
+                windows = call("app_windows", {"session_id": session})["windows"]
+                target = next((window for window in windows if window.get("title") == "Coding Tools MCP Test Fixture"), None)
+                if target is not None:
+                    args = {"session_id": session, "window_id": target["window_id"]}
+                    observed = runtime.call_tool("app_snapshot", {**args, "include_image": bool(status.get("screen_recording"))})
+                    if not observed["isError"]:
+                        break
+                    assert observed["structuredContent"]["error"]["code"] == "COMPUTER_WINDOW_UNAVAILABLE", observed
+                time.sleep(0.1)
+            assert observed is not None, "Fixture window did not become available"
             assert not observed["isError"], observed
             snapshot = observed["structuredContent"]
             if status.get("screen_recording"):

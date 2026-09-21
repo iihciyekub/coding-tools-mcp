@@ -227,18 +227,6 @@ fn save_profile(
     mut profile: WorkspaceProfile,
     state: tauri::State<'_, DesktopState>,
 ) -> Result<WorkspaceProfile, String> {
-    let existing = state
-        .store
-        .lock()
-        .map_err(|_| "Profile store is unavailable.")?
-        .get(&profile.id);
-    let needs_full_access_defaults = profile.runtime.permission_mode == "host"
-        && existing.is_none_or(|existing| {
-            existing.runtime.permission_mode != "host" || existing.path != profile.path
-        });
-    if needs_full_access_defaults {
-        profile.enable_full_access();
-    }
     normalize_allowed_paths(&mut profile)?;
     if state
         .runtime

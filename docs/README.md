@@ -31,6 +31,8 @@ The documentation keeps stable file paths for existing links, while this index p
 
 ## Engineering and evaluation
 
+- [Single-service multi-project agent specification (简体中文)](multi-project-agent-spec.md)
+- [Optional local Web verification through existing MCP tools](browser-verification.md)
 - [ChatGPT computer-use implementation plan (简体中文)](computer-use-plan.zh-CN.md)
 - [Computer use v1 specification](computer-use-spec.md)
 - [CI and tests](ci-and-tests.md)

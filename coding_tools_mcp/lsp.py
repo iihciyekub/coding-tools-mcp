@@ -67,7 +67,11 @@ class LanguageServer:
         self._pending: dict[int, queue.Queue[dict[str, Any]]] = {}
         self._pending_lock = threading.Lock()
         self._diagnostics: dict[str, list[dict[str, Any]]] = {}
-        self._diagnostics_event = threading.Event()
+        self._document_lock = threading.RLock()
+        self._diagnostics_condition = threading.Condition(self._document_lock)
+        self._document_versions: dict[str, int] = {}
+        self._diagnostic_versions: dict[str, int | None] = {}
+        self._diagnostic_observed_versions: dict[str, int] = {}
         self._opened: dict[str, str] = {}
         self._closed = False
         self._reader = threading.Thread(target=self._read_loop, daemon=True, name=f"lsp-{language}-stdout")
@@ -86,7 +90,7 @@ class LanguageServer:
                     "general": {"positionEncodings": ["utf-16"]},
                     "textDocument": {
                         "definition": {"linkSupport": True},
-                        "publishDiagnostics": {"relatedInformation": True},
+                        "publishDiagnostics": {"relatedInformation": True, "versionSupport": True},
                     },
                     "workspace": {"workspaceFolders": True},
                 },
@@ -137,9 +141,7 @@ class LanguageServer:
                 if message.get("method") == "textDocument/publishDiagnostics":
                     params = message.get("params")
                     if isinstance(params, dict) and isinstance(params.get("uri"), str):
-                        diagnostics = params.get("diagnostics")
-                        self._diagnostics[params["uri"]] = diagnostics if isinstance(diagnostics, list) else []
-                        self._diagnostics_event.set()
+                        self._publish_diagnostics(params)
         except (OSError, ValueError, json.JSONDecodeError):
             return
 
@@ -156,10 +158,10 @@ class LanguageServer:
                 raise ToolFailure("LSP_EXITED", "Language server connection closed.", category="runtime", retryable=True) from exc
 
     def request(self, method: str, params: dict[str, Any], *, timeout: float = 10) -> Any:
-        request_id = self._next_id
-        self._next_id += 1
         response_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=1)
         with self._pending_lock:
+            request_id = self._next_id
+            self._next_id += 1
             self._pending[request_id] = response_queue
         try:
             self._send({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
@@ -192,7 +194,6 @@ class LanguageServer:
             raise ToolFailure("UNSUPPORTED_ENCODING", "LSP files must be UTF-8.", category="validation") from exc
         uri = path.as_uri()
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        previous = self._opened.get(uri)
         language_id = {
             ".py": "python",
             ".pyi": "python",
@@ -204,36 +205,78 @@ class LanguageServer:
             ".tsx": "typescriptreact",
             ".rs": "rust",
         }.get(path.suffix.lower(), self.language)
-        if previous is None:
-            self.notify(
-                "textDocument/didOpen",
-                {
-                    "textDocument": {
-                        "uri": uri,
-                        "languageId": language_id,
-                        "version": 1,
-                        "text": content,
-                    }
-                },
-            )
-        elif previous != digest:
-            self.notify(
-                "textDocument/didChange",
-                {"textDocument": {"uri": uri, "version": int(time.time_ns())}, "contentChanges": [{"text": content}]},
-            )
-        self._opened[uri] = digest
+        with self._document_lock:
+            previous = self._opened.get(uri)
+            if previous != digest:
+                version = self._document_versions.get(uri, 0) + 1
+                self._opened[uri] = digest
+                self._document_versions[uri] = version
+                if previous is None:
+                    self.notify("textDocument/didOpen", {"textDocument": {
+                        "uri": uri, "languageId": language_id, "version": version, "text": content,
+                    }})
+                else:
+                    self.notify("textDocument/didChange", {
+                        "textDocument": {"uri": uri, "version": version}, "contentChanges": [{"text": content}],
+                    })
+                self._diagnostics_condition.notify_all()
         return uri, digest
 
+    def _publish_diagnostics(self, params: dict[str, Any]) -> None:
+        uri = str(params["uri"])
+        diagnostics = params.get("diagnostics")
+        if not isinstance(diagnostics, list):
+            return
+        version = params.get("version")
+        version = version if isinstance(version, int) and not isinstance(version, bool) else None
+        with self._diagnostics_condition:
+            current = self._document_versions.get(uri, 0)
+            if version is not None and version < current:
+                return  # A late publication must never overwrite a current result.
+            self._diagnostics[uri] = diagnostics
+            self._diagnostic_versions[uri] = version
+            self._diagnostic_observed_versions[uri] = current
+            self._diagnostics_condition.notify_all()
+
+    def diagnostics_snapshot(self, uri: str, wait_ms: int, *, expected_digest: str | None = None) -> dict[str, Any]:
+        deadline = time.monotonic() + wait_ms / 1000
+        with self._diagnostics_condition:
+            def freshness() -> str:
+                if expected_digest is not None and self._opened.get(uri) != expected_digest:
+                    return "stale"
+                if uri not in self._diagnostics:
+                    return "pending"
+                current = self._document_versions.get(uri, 0)
+                published = self._diagnostic_versions.get(uri)
+                if published == current:
+                    return "fresh"
+                if published is None and self._diagnostic_observed_versions.get(uri) == current:
+                    return "unversioned"
+                return "stale"
+
+            while not self._closed and freshness() in {"pending", "stale"}:
+                if expected_digest is not None and self._opened.get(uri) != expected_digest:
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._diagnostics_condition.wait(remaining)
+            return {
+                "diagnostics": list(self._diagnostics.get(uri, [])),
+                "document_version": self._document_versions.get(uri),
+                "diagnostics_version": self._diagnostic_versions.get(uri),
+                "freshness": freshness(),
+            }
+
     def diagnostics(self, uri: str, wait_ms: int) -> list[dict[str, Any]]:
-        self._diagnostics_event.clear()
-        if uri not in self._diagnostics and wait_ms:
-            self._diagnostics_event.wait(wait_ms / 1000)
-        return self._diagnostics.get(uri, [])
+        return self.diagnostics_snapshot(uri, wait_ms)["diagnostics"]
 
     def close(self) -> None:
         if self._closed:
             return
-        self._closed = True
+        with self._diagnostics_condition:
+            self._closed = True
+            self._diagnostics_condition.notify_all()
         try:
             if self.process.poll() is None:
                 try:
@@ -311,11 +354,18 @@ class LSPManager:
         return {"ok": True, "backends": backends, "summary": "Inspected Python, TypeScript, and Rust LSP backends."}
 
     def project_root_for(self, path: Path, language: str) -> Path:
-        if language != "rust":
-            return self.workspace
         candidate = path.parent.resolve(strict=True)
+        if not candidate.is_relative_to(self.workspace):
+            raise ToolFailure("LSP_PATH_OUTSIDE_WORKSPACE", "Document is outside the workspace.", category="security")
+        markers = {
+            "python": ("pyrightconfig.json", "pyproject.toml", "setup.cfg", "setup.py"),
+            "typescript": ("tsconfig.json", "jsconfig.json", "package.json"),
+            "rust": ("Cargo.toml",),
+        }.get(language, ())
         while True:
-            if (candidate / "Cargo.toml").is_file():
+            if any((candidate / name).is_file() for name in markers):
+                return candidate
+            if (candidate / ".git").exists():
                 return candidate
             if candidate == self.workspace:
                 return self.workspace

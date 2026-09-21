@@ -1,6 +1,5 @@
 use rand::distr::{Alphanumeric, SampleString};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -34,46 +33,6 @@ fn default_allowed_paths() -> Vec<String> {
     Vec::new()
 }
 
-fn common_full_access_paths(workspace: &Path) -> Vec<String> {
-    let workspace = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
-    let mut candidates = Vec::<PathBuf>::new();
-    if let Some(home) = user_home_directory() {
-        for name in ["Desktop", "Documents", "Downloads", "Developer", "Projects"] {
-            candidates.push(home.join(name));
-        }
-    }
-    if cfg!(target_os = "macos") {
-        candidates.extend([
-            PathBuf::from("/Applications"),
-            PathBuf::from("/Users/Shared"),
-            PathBuf::from("/Volumes"),
-            PathBuf::from("/opt/homebrew"),
-            PathBuf::from("/usr/local"),
-        ]);
-    } else if cfg!(windows) {
-        for name in ["ProgramFiles", "ProgramFiles(x86)", "ProgramData"] {
-            if let Some(path) = std::env::var_os(name) {
-                candidates.push(PathBuf::from(path));
-            }
-        }
-    } else {
-        candidates.extend([
-            PathBuf::from("/opt"),
-            PathBuf::from("/usr/local"),
-            PathBuf::from("/mnt"),
-            PathBuf::from("/media"),
-        ]);
-    }
-
-    let mut seen = HashSet::new();
-    candidates
-        .into_iter()
-        .filter_map(|path| std::fs::canonicalize(path).ok())
-        .filter(|path| path.parent().is_some() && !path.starts_with(&workspace))
-        .filter(|path| seen.insert(path.clone()))
-        .map(|path| path.to_string_lossy().into_owned())
-        .collect()
-}
 fn default_environment_variables() -> Vec<EnvironmentVariable> {
     Vec::new()
 }
@@ -244,8 +203,6 @@ impl WorkspaceProfile {
 
     pub fn enable_full_access(&mut self) {
         self.runtime.permission_mode = "host".into();
-        let mut defaults = common_full_access_paths(Path::new(&self.path));
-        self.runtime.allowed_paths.append(&mut defaults);
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -489,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn full_access_profile_uses_selected_workspace_and_common_folders() {
+    fn full_access_profile_uses_selected_workspace_without_synthetic_folders() {
         let workspace = tempfile::tempdir().unwrap();
         let profile = WorkspaceProfile::new_full_access(
             workspace.path().to_string_lossy().into_owned(),
@@ -505,11 +462,7 @@ mod tests {
             std::fs::canonicalize(&profile.path).unwrap(),
             std::fs::canonicalize(workspace.path()).unwrap()
         );
-        assert!(profile
-            .runtime
-            .allowed_paths
-            .iter()
-            .all(|path| Path::new(path).is_dir()));
+        assert!(profile.runtime.allowed_paths.is_empty());
         assert!(profile.validate().is_ok());
     }
 
