@@ -1,5 +1,14 @@
 name: Desktop Release
 
+# Canonical maintainer/agent entry point for an existing desktop tag:
+#   gh workflow run desktop-release.yml \
+#     -R iihciyekub/coding-tools-mcp \
+#     --ref iiaide \
+#     -f tag=desktop-v<version> \
+#     -f mode=release
+# A newly pushed desktop-v<version> tag runs the same full release path
+# automatically. See docs/desktop-release-maintenance.md for the release contract.
+
 on:
   push:
     tags:

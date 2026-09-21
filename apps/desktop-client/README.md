@@ -78,12 +78,28 @@ locations.
 ## Automated desktop releases
 
 `.github/workflows/desktop-release.yml` is the canonical desktop release
-pipeline. Push an existing version-matched tag such as:
+pipeline. For a new version, push a version-matched tag such as:
 
 ```bash
 git tag desktop-v0.3.35
 git push origin desktop-v0.3.35
 ```
+
+Pushing the tag automatically starts the complete release workflow. To release
+or retry an **existing** tag, use the standard maintainer/agent command:
+
+```bash
+gh workflow run desktop-release.yml \
+  -R iihciyekub/coding-tools-mcp \
+  --ref iiaide \
+  -f tag=desktop-v0.3.35 \
+  -f mode=release
+```
+
+Watch the run until it finishes; a Desktop release is complete only after the
+signed/notarized DMG is published to GitHub Release and the Homebrew Cask update
+and install verification succeed. The detailed operator/agent procedure is in
+the [desktop release maintenance contract](../../docs/desktop-release-maintenance.md).
 
 The workflow validates the tag against the desktop metadata, builds the Apple
 Silicon app on an arm64 macOS runner, imports the Developer ID certificate,

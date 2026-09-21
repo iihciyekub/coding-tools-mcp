@@ -138,6 +138,74 @@ For each stable desktop version, `.github/workflows/desktop-release.yml` is the 
 
 Publishing the Homebrew update before the final release asset is immutable is not allowed.
 
+### Canonical maintainer / coding-agent command
+
+When the maintainer says **publish/release the Desktop app** and the matching
+`desktop-v<version>` tag already exists on `origin`, the coding agent SHOULD
+execute the release rather than merely describing how to do it. Use the default
+maintained branch as the workflow source and the immutable tag as the release
+source:
+
+```bash
+VERSION=0.3.35
+gh workflow run desktop-release.yml \
+  -R iihciyekub/coding-tools-mcp \
+  --ref iiaide \
+  -f tag="desktop-v${VERSION}" \
+  -f mode=release
+```
+
+Then resolve and watch the run to completion:
+
+```bash
+RUN_ID="$(gh run list \
+  -R iihciyekub/coding-tools-mcp \
+  --workflow desktop-release.yml \
+  --event workflow_dispatch \
+  --limit 1 \
+  --json databaseId \
+  --jq '.[0].databaseId')"
+
+gh run watch "$RUN_ID" \
+  -R iihciyekub/coding-tools-mcp \
+  --exit-status
+```
+
+For a **new** Desktop version, first synchronize all Desktop version metadata,
+commit the release source, create the matching `desktop-v<version>` tag, and
+push that tag. The tag push automatically starts the same `mode=release` path,
+so do not start a duplicate manual dispatch unless the first run needs to be
+retried:
+
+```bash
+git tag "desktop-v${VERSION}"
+git push origin "desktop-v${VERSION}"
+```
+
+Before dispatching an existing tag, confirm it exists on `origin` and resolves
+to the intended release commit. Never move, force-update, or recreate a
+published release tag.
+
+After the workflow succeeds, verify the public result rather than treating a
+green intermediate job as sufficient:
+
+```bash
+gh release view "desktop-v${VERSION}" \
+  -R iihciyekub/coding-tools-mcp \
+  --json tagName,name,assets,url
+
+brew info --cask iihciyekub/tap/coding-tools-mcp
+```
+
+The completed run must contain the macOS signed/notarized DMG, the immutable
+GitHub Release, and a successful Homebrew Cask update/verification. If any of
+those stages is skipped or fails, the Desktop release is incomplete.
+
+Do not use local ad-hoc signing as a substitute for this path when the
+`production-release` GitHub Environment is available. Do not retrieve, print,
+or copy secret values into logs or chat; checking secret **names** and presence
+is sufficient for release diagnostics.
+
 The canonical CI path uses a protected `production-release` GitHub Environment,
 the same credential model used by WOS Aide: an exported Developer ID Application
 `.p12` plus an App Store Connect Team API Key `.p8`. When Apple credentials are

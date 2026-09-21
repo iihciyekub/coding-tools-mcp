@@ -11,3 +11,4 @@ This subtree owns the desktop application. Keep desktop-only behavior here and k
 - Secrets belong in the operating-system keychain, never in `profiles.json`, logs, command lines, or frontend persistence.
 - When changing the UI, run `npm run check` and `npm run build`.
 - When changing runtime discovery or process management, run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`.
+- When the maintainer asks to publish the Desktop app, follow `../../docs/desktop-release-maintenance.md` and use the canonical `desktop-release.yml` GitHub Actions path. Existing release tags are manually dispatched from `iiaide` with `mode=release`; new matching `desktop-v<version>` tags trigger the same workflow when pushed. Wait for signing/notarization, GitHub Release publication, and Homebrew verification to complete before reporting success.

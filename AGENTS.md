@@ -23,3 +23,4 @@ This repository is a monorepo. Keep changes inside the narrowest owning subtree 
 4. Prefer subtree-specific instructions when present.
 5. Run the narrowest relevant checks first, then broader checks when tooling is available.
 6. Changes to desktop release tags, DMG creation, signing/notarization, GitHub Release assets, or Homebrew publishing must follow `docs/desktop-release-maintenance.md`; treat that document as the authoritative desktop distribution contract.
+7. When the maintainer asks to publish/release the Desktop app, execute the canonical GitHub Actions release path from `docs/desktop-release-maintenance.md`. For an existing `desktop-v<version>` tag, dispatch `.github/workflows/desktop-release.yml` from `iiaide` with `mode=release`, wait for the run to finish, and verify the GitHub Release and Homebrew result. Do not substitute a local unsigned/ad-hoc build, and do not read or print secret values.
