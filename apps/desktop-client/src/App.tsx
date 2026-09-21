@@ -9,7 +9,7 @@ import type { DependencyStatus, LogBundle, PermissionMode, RuntimeStatus, Worksp
 import { publicEndpoint, workspaceHue } from "./utils";
 
 const PANEL_WIDTH = 320;
-const APP_VERSION = "0.3.34";
+const APP_VERSION = "0.3.35";
 type Page = "home" | "new-access" | "workspaces" | "environment" | "logs" | "settings" | "workflow" | "computer" | "more";
 type CopyAction = "server-name" | "server-url" | "credential" | "logs";
 type ConfirmAction = { kind: "stop"; profileId: string } | { kind: "stop-all" } | { kind: "quit" } | null;
@@ -42,6 +42,7 @@ function App() {
   const [runtimeLogs, setRuntimeLogs] = useState<LogBundle | null>(null);
   const [installLog, setInstallLog] = useState<string[]>([]);
   const [error, setError] = useState("");
+  const [mcpNamePrefix, setMcpNamePrefix] = useState("www");
 
   const workspaceStatus = (profile: WorkspaceProfile) => {
     const current = statuses[profile.id] ?? stoppedStatus(profile.runtime.local_port);
@@ -85,6 +86,7 @@ function App() {
 
   useEffect(() => { void refresh(false); const timer = window.setInterval(() => void refresh(), 2500); return () => window.clearInterval(timer); }, [refresh]);
   useEffect(() => { selectedIdRef.current = selectedId; setRevealCredential(false); setConfirmDelete(false); setConfirmAction(null); setRuntimeLogs(null); }, [selectedId]);
+  useEffect(() => { setMcpNamePrefix(selected?.runtime.server_name_prefix ?? "www"); }, [selected?.id, selected?.runtime.server_name_prefix]);
   useEffect(() => { if (!confirmAction) return; const timer = window.setTimeout(() => setConfirmAction(null), 4000); return () => window.clearTimeout(timer); }, [confirmAction]);
   useEffect(() => {
     const panel = panelRef.current;
@@ -182,6 +184,24 @@ function App() {
     if (!selected || running) return; setBusy("permission");
     try { const saved = await api.saveProfile({ ...selected, runtime: { ...selected.runtime, permission_mode: permissionMode } }); setProfiles((current) => current.map((profile) => profile.id === saved.id ? saved : profile)); setError(""); }
     catch (reason) { setError(String(reason)); } finally { setBusy(null); }
+  };
+  const saveMcpNamePrefix = async () => {
+    if (!selected || running) return;
+    const nextPrefix = mcpNamePrefix.trim();
+    if (!nextPrefix || nextPrefix === selected.runtime.server_name_prefix) {
+      setMcpNamePrefix(selected.runtime.server_name_prefix);
+      return;
+    }
+    setBusy("mcp-prefix");
+    try {
+      const saved = await api.saveProfile({ ...selected, runtime: { ...selected.runtime, server_name_prefix: nextPrefix } });
+      setProfiles((current) => current.map((profile) => profile.id === saved.id ? saved : profile));
+      setMcpNamePrefix(saved.runtime.server_name_prefix);
+      setError("");
+    } catch (reason) {
+      setMcpNamePrefix(selected.runtime.server_name_prefix);
+      setError(String(reason));
+    } finally { setBusy(null); }
   };
   const addAllowedFolder = async () => {
     if (!selected || running) return;
@@ -301,6 +321,11 @@ function App() {
     {page === "settings" && selected && <section className="subpage-body settings-page">
       <div className="field-copy"><strong>{t("Access")}</strong><small>{t("Standard stays inside the workspace. Full Access enables host commands, SSH, and remote access.")}</small></div>
       <div className="segmented-control"><button type="button" className={selected.runtime.permission_mode !== "host" ? "selected" : ""} disabled={running || busy === "permission"} onClick={() => void savePermission("trusted")}>{t("Standard")}</button><button type="button" className={selected.runtime.permission_mode === "host" ? "selected danger" : ""} disabled={running || busy === "permission"} onClick={() => void savePermission("host")}>{t("Full Access")}</button></div>
+      <div className="mcp-prefix-setting">
+        <div className="field-copy"><strong>{t("MCP name prefix")}</strong><small>{t("Customize the prefix used when a new MCP name is generated.")}</small></div>
+        <div className="mcp-prefix-row"><input aria-label={t("MCP name prefix")} value={mcpNamePrefix} maxLength={24} spellCheck={false} disabled={running || busy === "mcp-prefix"} onChange={(event) => setMcpNamePrefix(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void saveMcpNamePrefix(); }} /><button className="secondary-button" type="button" disabled={running || busy === "mcp-prefix" || !mcpNamePrefix.trim() || mcpNamePrefix.trim() === selected.runtime.server_name_prefix} onClick={() => void saveMcpNamePrefix()}>{t("Save prefix")}</button></div>
+        <small className="mcp-prefix-format">{t("Format")}: <code>{`${mcpNamePrefix.trim() || "www"}XXYYYYMMDDHHmmss`}</code></small>
+      </div>
       <div className="field-copy scope-copy"><strong>{t(selected.runtime.permission_mode === "host" ? "Full Access coverage" : "Allowed folders")}</strong><small>{t(selected.runtime.permission_mode === "host" ? "The workspace anchors project context. File tools can also use the editable folders below; host commands retain full access." : "Standard Access includes the workspace. Add only the specific extra folders it needs.")}</small></div>
       <div className="allowed-folder-list">
         <div className="allowed-folder-row fixed"><span><small>{t("Workspace")}</small><strong title={selected.path}>{selected.path}</strong></span><em>{t("Project context")}</em></div>

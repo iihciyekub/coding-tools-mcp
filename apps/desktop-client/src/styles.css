@@ -194,6 +194,13 @@ button:focus-visible, select:focus-visible { outline: 2px solid var(--focus); ou
 .segmented-control button { min-height: 30px; border: 0; border-radius: 5px; background: transparent; cursor: pointer; font-size: 11px; }
 .segmented-control button.selected { background: var(--raised); box-shadow: 0 1px 4px rgba(0, 0, 0, .12); }
 .segmented-control button.selected.danger { color: var(--danger); }
+.mcp-prefix-setting { margin-top: 12px; }
+.mcp-prefix-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; margin-top: 7px; }
+.mcp-prefix-row input { min-width: 0; height: 32px; padding: 0 8px; color: var(--text); border: 1px solid var(--line); border-radius: 6px; outline: none; background: var(--raised); font: 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+.mcp-prefix-row input:focus { border-color: var(--focus); box-shadow: 0 0 0 2px color-mix(in srgb, var(--focus) 18%, transparent); }
+.mcp-prefix-row .secondary-button { min-height: 32px; }
+.mcp-prefix-format { display: block; margin-top: 5px; color: var(--muted); font-size: 10px; }
+.mcp-prefix-format code { color: var(--text); font: inherit; }
 .scope-copy { margin-top: 12px; }
 .allowed-folder-list { margin-top: 7px; border-top: 1px solid var(--line); }
 .allowed-folder-row { display: grid; min-height: 38px; grid-template-columns: minmax(0, 1fr) 27px; gap: 7px; align-items: center; border-bottom: 1px solid var(--line); }

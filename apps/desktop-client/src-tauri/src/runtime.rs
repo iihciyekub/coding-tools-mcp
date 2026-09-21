@@ -3,6 +3,7 @@ mod environment;
 use crate::models::{LogBundle, RuntimeStatus, WorkspaceProfile, MCP_ENDPOINT_PATH};
 use crate::resource_installer;
 use chrono::Local;
+use rand::distr::{Alphanumeric, SampleString};
 use regex::Regex;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -119,11 +120,15 @@ struct ManagedSession {
     server_name: String,
 }
 
-fn new_server_name(workspace_sequence: usize) -> String {
+fn new_server_name(prefix: &str) -> String {
+    let random_code = Alphanumeric
+        .sample_string(&mut rand::rng(), 2)
+        .to_ascii_uppercase();
     format!(
-        "CTM-{}-{}",
-        Local::now().format("%Y%m%d%H%M%S"),
-        workspace_sequence.max(1)
+        "{}{}{}",
+        prefix.trim(),
+        random_code,
+        Local::now().format("%Y%m%d%H%M%S")
     )
 }
 
@@ -253,7 +258,6 @@ pub fn start_workspace(
     manager: &Arc<Mutex<RuntimeManager>>,
     profile: &WorkspaceProfile,
     log_dir: &Path,
-    workspace_sequence: usize,
 ) -> Result<RuntimeStatus, String> {
     profile.validate()?;
     let operation = Arc::new(PendingOperation::default());
@@ -287,15 +291,7 @@ pub fn start_workspace(
         if profile.tunnel.r#type == "cloudflare" && resolve_cloudflared(&data).is_err() {
             resource_installer::install("cloudflared", &data, cancelled)?;
         }
-        start_session(
-            profile,
-            log_dir,
-            resolved,
-            &data,
-            &resources,
-            workspace_sequence,
-            cancelled,
-        )
+        start_session(profile, log_dir, resolved, &data, &resources, cancelled)
     });
     let mut state = manager
         .lock()
@@ -434,7 +430,6 @@ fn start_session(
     resolved: (PathBuf, Vec<String>),
     data_dir: &Path,
     resource_dir: &Path,
-    workspace_sequence: usize,
     cancelled: &AtomicBool,
 ) -> Result<ManagedSession, String> {
     if cancelled.load(Ordering::Relaxed) {
@@ -447,7 +442,7 @@ fn start_session(
         ));
     }
     fs::create_dir_all(log_dir).map_err(|error| error.to_string())?;
-    let server_name = new_server_name(workspace_sequence);
+    let server_name = new_server_name(&profile.runtime.server_name_prefix);
     let mut runtime = spawn_runtime(
         profile,
         log_dir,
@@ -1046,9 +1041,11 @@ while True:
     }
 
     #[test]
-    fn server_names_include_second_precision_and_workspace_sequence() {
-        let name = new_server_name(7);
-        assert!(Regex::new(r"^CTM-\d{14}-7$").unwrap().is_match(&name));
+    fn server_names_include_prefix_random_code_and_second_precision() {
+        let name = new_server_name("www");
+        assert!(Regex::new(r"^www[A-Z0-9]{2}\d{14}$")
+            .unwrap()
+            .is_match(&name));
     }
 
     #[test]
@@ -1132,7 +1129,7 @@ while True:
             thread::sleep(Duration::from_millis(10));
         }
         let status = manager.lock().unwrap().status(&profile);
-        let restart = start_workspace(&manager, &profile, temporary.path(), 1);
+        let restart = start_workspace(&manager, &profile, temporary.path());
         let finished_early = stopper.is_finished();
         // Complete the simulated startup cleanup before assertions so failures
         // cannot leave a waiting test thread behind.
@@ -1166,7 +1163,7 @@ while True:
             thread::sleep(Duration::from_millis(10));
         }
         let finished_early = exiting.is_finished();
-        let restart = start_workspace(&manager, &profile, temporary.path(), 1);
+        let restart = start_workspace(&manager, &profile, temporary.path());
         manager.lock().unwrap().preparing.remove(&profile.id);
         operation.finish();
         exiting.join().unwrap().unwrap();
@@ -1224,7 +1221,6 @@ while True:
                 ),
                 temporary.path(),
                 temporary.path(),
-                index + 1,
                 &AtomicBool::new(false),
             )
             .unwrap();

@@ -21,6 +21,9 @@ fn default_permission_mode() -> String {
 fn default_file_access_scope() -> String {
     "workspace".into()
 }
+fn default_server_name_prefix() -> String {
+    "www".into()
+}
 
 pub(crate) fn user_home_directory() -> Option<PathBuf> {
     std::env::var_os("HOME")
@@ -165,6 +168,8 @@ impl Default for AuthConfig {
 pub struct RuntimeConfig {
     #[serde(default)]
     pub computer_enabled: bool,
+    #[serde(default = "default_server_name_prefix")]
+    pub server_name_prefix: String,
     #[serde(default = "default_port")]
     pub local_port: u16,
     #[serde(default = "default_permission_mode")]
@@ -181,6 +186,7 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             computer_enabled: false,
+            server_name_prefix: default_server_name_prefix(),
             local_port: default_port(),
             permission_mode: default_permission_mode(),
             file_access_scope: default_file_access_scope(),
@@ -257,6 +263,18 @@ impl WorkspaceProfile {
         }
         if self.name.trim().is_empty() {
             return Err("Workspace name cannot be empty.".into());
+        }
+        let server_name_prefix = self.runtime.server_name_prefix.trim();
+        if server_name_prefix.is_empty()
+            || server_name_prefix.chars().count() > 24
+            || !server_name_prefix
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+        {
+            return Err(
+                "MCP name prefix must be 1-24 characters using letters, numbers, '.', '-' or '_'."
+                    .into(),
+            );
         }
         if self.runtime.local_port < 1024 {
             return Err("Local port must be between 1024 and 65535.".into());

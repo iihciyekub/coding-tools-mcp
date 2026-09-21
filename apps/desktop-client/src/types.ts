@@ -23,6 +23,7 @@ export interface AuthConfig {
 
 export interface RuntimeConfig {
   computer_enabled: boolean;
+  server_name_prefix: string;
   local_port: number;
   permission_mode: PermissionMode;
   file_access_scope: "workspace";

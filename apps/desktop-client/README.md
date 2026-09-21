@@ -81,8 +81,8 @@ locations.
 pipeline. Push an existing version-matched tag such as:
 
 ```bash
-git tag desktop-v0.3.34
-git push origin desktop-v0.3.34
+git tag desktop-v0.3.35
+git push origin desktop-v0.3.35
 ```
 
 The workflow validates the tag against the desktop metadata, builds the Apple
@@ -91,7 +91,7 @@ signs and notarizes both the app and final DMG, builds the Windows x64 portable
 ZIP when selected by `releasePlatforms` in `package.json`, publishes immutable GitHub Release assets and checksums, then updates the
 Homebrew Tap.
 
-Version 0.3.34 selects macOS only. Existing Windows releases remain available.
+Version 0.3.35 selects macOS only. Existing Windows releases remain available.
 
 The repository must provide these GitHub Actions secrets:
 
