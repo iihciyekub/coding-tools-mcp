@@ -1,6 +1,6 @@
 # Coding Tools MCP — Local Agent Coding Runtime Gateway
 
-日期：2026-09-21。状态：0.4.0 当前架构。
+日期：2026-09-21。状态：0.4.1 当前架构。
 
 ## 1. 目标
 
@@ -16,7 +16,7 @@ Coding Tools MCP 的目标是给当前调用 MCP 的模型提供稳定、模型�
 
 ## 2. 明确不做
 
-0.4.0 起，Coding Tools MCP 不提供通用 App / Computer Control：
+0.4.1 起，Coding Tools MCP 不提供通用 App / Computer Control：
 
 - 不控制 macOS 应用窗口；
 - 不提供鼠标、键盘、拖动、滚动或屏幕操作 MCP 工具；
@@ -123,7 +123,7 @@ Full Access 表示：
 
 优先复用现有工具参数与 Workflow Store，避免为每个 Agent/Provider 增加一组新工具。
 
-## 9. 0.4.0 架构
+## 9. 0.4.1 架构
 
 ```text
 Current LLM
@@ -143,7 +143,7 @@ Coding Tools MCP
 
 ## 10. Definition of Done
 
-0.4.0 的 Local Agent Coding Runtime Gateway 满足：
+0.4.1 的 Local Agent Coding Runtime Gateway 满足：
 
 - `agent_environment` 仅 host mode 可见；
 - discovery 不返回敏感文件内容；

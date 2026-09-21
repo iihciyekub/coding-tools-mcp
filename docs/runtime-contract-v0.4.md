@@ -129,7 +129,7 @@ instructions:
     "io.modelcontextprotocol/serverInfo": {
       "name": "coding-tools-mcp",
       "title": "Coding Tools MCP",
-      "version": "0.4.0"
+      "version": "0.4.1"
     }
   }
 }

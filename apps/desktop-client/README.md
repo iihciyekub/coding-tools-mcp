@@ -78,8 +78,8 @@ locations.
 pipeline. For a new version, push a version-matched tag such as:
 
 ```bash
-git tag desktop-v0.4.0
-git push origin desktop-v0.4.0
+git tag desktop-v0.4.1
+git push origin desktop-v0.4.1
 ```
 
 Pushing the tag automatically starts the complete release workflow. To release
@@ -89,7 +89,7 @@ or retry an **existing** tag, use the standard maintainer/agent command:
 gh workflow run desktop-release.yml \
   -R iihciyekub/coding-tools-mcp \
   --ref iiaide \
-  -f tag=desktop-v0.4.0 \
+  -f tag=desktop-v0.4.1 \
   -f mode=release
 ```
 
@@ -104,7 +104,7 @@ signs and notarizes both the app and final DMG, builds the Windows x64 portable
 ZIP when selected by `releasePlatforms` in `package.json`, publishes immutable GitHub Release assets and checksums, then updates the
 Homebrew Tap.
 
-Version 0.4.0 selects macOS only. Existing Windows releases remain available.
+Version 0.4.1 selects macOS only. Existing Windows releases remain available.
 
 The macOS release job uses the protected `production-release` GitHub
 Environment, matching the production signing model used by WOS Aide. Configure
