@@ -4,7 +4,7 @@
   "version": "0.4.0",
   "identifier": "com.codingtoolsmcp.desktop",
   "build": {
-    "beforeDevCommand": "npm run build:runtime && npm run build:helper && npm run dev",
+    "beforeDevCommand": "npm run build:runtime && npm run dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "npm run build:bundle",
     "frontendDist": "../dist"
@@ -24,8 +24,7 @@
     "longDescription": "Manage local MCP runtimes, explicit access modes, and authenticated Cloudflare tunnels.",
     "copyright": "Copyright \u00a9 Coding Tools MCP Contributors",
     "resources": {
-      "resources/runtime/": "runtime/",
-      "resources/computer/": "computer/"
+      "resources/runtime/": "runtime/"
     },
     "icon": [
       "icons/32x32.png",

@@ -266,13 +266,8 @@ def _codex_metadata(root: Path, *, limit: int) -> dict[str, Any]:
     }
     enabled_ids = {item["id"] for item in plugins}
     capabilities = {
-        "computer_use_installed": (root / "computer-use" / "Codex Computer Use.app").is_dir(),
         "browser_plugin_cached": (root / "plugins" / "cache" / "openai-bundled" / "browser").is_dir(),
         "chrome_plugin_cached": (root / "plugins" / "cache" / "openai-bundled" / "chrome").is_dir(),
-        "computer_use_enabled": bool({
-            "computer-use@openai-bundled",
-            "unified-computer-use@openai-bundled",
-        } & enabled_ids),
         "browser_enabled": "browser@openai-bundled" in enabled_ids,
         "chrome_enabled": "chrome@openai-bundled" in enabled_ids,
     }

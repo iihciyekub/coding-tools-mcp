@@ -1,5 +1,5 @@
 {
-  "dataset_name": "princeton-nlp/SWE-bench_Lite",
+  "dataset_name": "SWE-bench/SWE-bench_Lite",
   "split": "test",
   "selection_date": "2026-05-16",
   "selection_source": "Hugging Face datasets-server rows API",

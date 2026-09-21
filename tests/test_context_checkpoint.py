@@ -46,7 +46,7 @@ class ContextCheckpointTests(unittest.TestCase):
 
         # Test-only mutation of a runtime capability flag demonstrates that
         # restore/read detects a changed execution environment without a model.
-        self.runtime.enable_computer_tools = True
+        self.runtime.enable_agent_environment = True
         stale = self.call({"action": "get", "context_checkpoint_id": checkpoint_id})
         self.assertTrue(stale["stale"])
         self.assertIn("capabilities_changed", stale["stale_reasons"])

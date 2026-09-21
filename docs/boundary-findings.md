@@ -4,5 +4,5 @@
 
 - 当前已知限制：[limitations.md](limitations.md)
 - 当前安全边界：[security-boundary.md](security-boundary.md)
-- 当前运行时契约：[runtime-contract-v0.3.md](runtime-contract-v0.3.md)
+- 当前运行时契约：[runtime-contract-v0.4.md](runtime-contract-v0.4.md)
 - 历史记录全文：[archive/boundary-findings.md](archive/boundary-findings.md)

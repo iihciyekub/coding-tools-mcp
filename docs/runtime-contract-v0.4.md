@@ -1,9 +1,9 @@
-# Coding Tools MCP Runtime Contract v0.3
+# Coding Tools MCP Runtime Contract v0.4
 
-Status: implemented contract for `coding-tools-mcp` 0.3.x. The frozen contract
-for 0.2.x is [runtime-contract-v0.2.md](runtime-contract-v0.2.md); what changed
+Status: implemented contract for `coding-tools-mcp` 0.4.x. The frozen contract
+for 0.3.x is [runtime-contract-v0.3.md](runtime-contract-v0.3.md); what changed
 between them, and what a client has to do about it, is
-[migration-0.3.md](migration-0.3.md).
+[migration-0.4.md](migration-0.4.md).
 
 Protocol targets: MCP `2026-07-28`, which serves every request on its own, and
 the handshake era `2025-11-25` with explicit compatibility for `2025-06-18`.
@@ -129,7 +129,7 @@ instructions:
     "io.modelcontextprotocol/serverInfo": {
       "name": "coding-tools-mcp",
       "title": "Coding Tools MCP",
-      "version": "0.3.10"
+      "version": "0.4.0"
     }
   }
 }
@@ -277,9 +277,13 @@ and bounded by file-count, scan-count, depth, per-file, and total-byte limits.
 - One server runtime owns one canonical workspace root and serves every client
   of it. Concurrent clients share the command pool, the retained output, and
   the patch baselines; this is a single trust domain by design.
-- Direct path inputs are workspace-relative and always resolve against the
-  workspace root. Absolute paths, `..` traversal, NUL bytes, and symlink
-  escapes are rejected.
+- Project-scoped path inputs remain workspace-relative. In safe/trusted/dangerous
+  modes, ordinary file tools and `apply_patch` additionally accept absolute paths
+  only when they resolve inside an explicitly configured file-access root. In host
+  mode, those file tools may resolve absolute and home-relative paths across the host
+  filesystem; relative paths still resolve from the configured workspace. Git, LSP,
+  checks, reviews, workflow state, and project instructions remain workspace-scoped.
+  NUL bytes and `..` traversal in relative paths remain rejected.
 - `apply_patch` parses and validates every operation before committing, under a
   lock that spans every client, so two clients patching one file cannot lose
   an update: the later one is answered with a conflict rather than silently
@@ -350,11 +354,14 @@ Retry: This command_id has expired or never existed; …
 Known tool error codes include:
 
 ```json
-["ABSOLUTE_PATH_DENIED", "ACCESSIBILITY_PERMISSION_REQUIRED", "APPROVAL_EXPIRED", "APPROVAL_NOT_FOUND", "APPROVAL_NOT_USABLE", "APPROVAL_SCOPE_MISMATCH", "APP_CONTROL_ERROR", "APP_HELPER_ERROR", "BINARY_FILE", "BROWSER_DOWNLOAD_NOT_FOUND", "BROWSER_DOWNLOAD_TOO_LARGE", "BROWSER_DOWNLOAD_UNAVAILABLE", "BROWSER_ERROR", "BROWSER_TIMEOUT", "BROWSER_WATCH_NOT_FOUND", "CHECKPOINT_CONFLICT", "CHECKPOINT_NOT_FOUND", "CHECKPOINT_SCOPE_INVALID", "CHECKPOINT_TOO_LARGE", "CHECK_NOT_FOUND", "CHECK_RUN_NOT_FOUND", "CHROME_EXTENSION_ERROR", "CHROME_EXTENSION_UNAVAILABLE", "COMMAND_CLOSED", "COMMAND_LIMIT_REACHED", "COMMAND_NOT_FOUND", "ELICITATION_UNSUPPORTED", "GIT_COMMIT_SCOPE_MISMATCH", "GIT_ERROR", "GIT_NOT_REPOSITORY", "GIT_PATH_SCOPE_REQUIRED", "GIT_STATE_CONFLICT", "GIT_WORKTREE_DIRTY", "GIT_WORKTREE_EXISTS", "GIT_WORKTREE_NOT_FOUND", "HOOK_BLOCKED", "INTERNAL_ERROR", "INVALID_ARGUMENT", "INVALID_GIT_BRANCH", "INVALID_HOOK_CONFIG", "INVALID_TASK_TRANSITION", "IS_DIRECTORY", "LSP_EDIT_TOO_LARGE", "LSP_EDIT_UNSUPPORTED", "LSP_ERROR", "LSP_EXITED", "LSP_LANGUAGE_UNSUPPORTED", "LSP_PATH_OUTSIDE_WORKSPACE", "LSP_TIMEOUT", "LSP_UNAVAILABLE", "NOT_A_DIRECTORY", "NOT_FOUND", "OPERATION_CONFLICT", "OPERATION_NOT_FOUND", "OPERATION_PENDING", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "PROTOCOL_TASK_NOT_FOUND", "REVIEW_CONFLICT", "REVIEW_NOT_FOUND", "REVIEW_TOO_LARGE", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_UNAVAILABLE", "SCREEN_RECORDING_PERMISSION_REQUIRED", "SYMLINK_ESCAPE", "TASK_CONFLICT", "TASK_NOT_FOUND", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING", "UNSUPPORTED_PLATFORM", "WORKFLOW_STORE_ERROR"]
+["ABSOLUTE_PATH_DENIED", "APPROVAL_EXPIRED", "APPROVAL_NOT_FOUND", "APPROVAL_NOT_USABLE", "APPROVAL_SCOPE_MISMATCH", "BINARY_FILE", "CHECKPOINT_CONFLICT", "CHECKPOINT_NOT_FOUND", "CHECKPOINT_SCOPE_INVALID", "CHECKPOINT_TOO_LARGE", "CHECK_NOT_FOUND", "CHECK_RUN_NOT_FOUND", "COMMAND_CLOSED", "COMMAND_LIMIT_REACHED", "COMMAND_NOT_FOUND", "CONTEXT_CHECKPOINT_INVALID", "CONTEXT_CHECKPOINT_NOT_FOUND", "CONTEXT_CHECKPOINT_TOO_LARGE", "GIT_COMMIT_SCOPE_MISMATCH", "GIT_ERROR", "GIT_NOT_REPOSITORY", "GIT_PATH_SCOPE_REQUIRED", "GIT_REPOSITORY_MISMATCH", "GIT_REPOSITORY_OUTSIDE_WORKSPACE", "GIT_STATE_CONFLICT", "GIT_WORKTREE_DIRTY", "GIT_WORKTREE_EXISTS", "GIT_WORKTREE_NOT_FOUND", "HOOK_BLOCKED", "INTERNAL_ERROR", "INVALID_ARGUMENT", "INVALID_GIT_BRANCH", "INVALID_HOOK_CONFIG", "INVALID_TASK_TRANSITION", "IS_DIRECTORY", "LSP_EDIT_TOO_LARGE", "LSP_EDIT_UNSUPPORTED", "LSP_ERROR", "LSP_EXITED", "LSP_LANGUAGE_UNSUPPORTED", "LSP_PATH_OUTSIDE_WORKSPACE", "LSP_TIMEOUT", "LSP_UNAVAILABLE", "NOT_A_DIRECTORY", "NOT_FOUND", "OPERATION_CONFLICT", "OPERATION_NOT_FOUND", "OPERATION_PENDING", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_FILE_SCOPE", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "PROTOCOL_TASK_NOT_FOUND", "REVIEW_CONFLICT", "REVIEW_NOT_FOUND", "REVIEW_TOO_LARGE", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_UNAVAILABLE", "SYMLINK_ESCAPE", "TASK_CONFLICT", "TASK_NOT_FOUND", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING", "WORKFLOW_STORE_ERROR"]
 ```
 
 Error categories are `validation`, `security`, `permission`, `runtime`,
 `not_found`, `conflict`, and `internal`.
+
+Multi-project routing additionally defines `"GIT_REPOSITORY_MISMATCH"` and
+`"GIT_REPOSITORY_OUTSIDE_WORKSPACE"`; both reject the operation before Git writes.
 
 Malformed JSON-RPC uses standard protocol errors: parse `-32700`, invalid
 request `-32600`, unknown method `-32601`, invalid params/tool `-32602`, and
@@ -431,12 +438,12 @@ remain short-lived and process-local. Forwarded headers are ignored unless
 
 The default catalog has 28 tools, including `view_image`. Setting
 `CODING_TOOLS_MCP_ENABLE_VIEW_IMAGE=0` removes that optional binary-content
-tool. `--enable-workflow-tools` adds the 40 tools specified in the opt-in
-workflow section for 68 directly exposed tools. Adding
-`--defer-workflow-tools` instead hides those 40 workflow tools from the direct
+tool. `--enable-workflow-tools` adds the 41 tools specified in the opt-in
+workflow section for 69 directly exposed tools. Adding
+`--defer-workflow-tools` instead hides those 41 workflow tools from the direct
 catalog, exposes `tool_invoke`, and leaves them searchable through
-`tool_search`: 29 tools are direct and 40 are deferred, while all 69 registered
-runtime capabilities remain available. These selections are fixed at startup;
+`tool_search`: 29 tools are direct and 41 are deferred, while all 70 capabilities
+available in that startup configuration remain reachable. These selections are fixed at startup;
 the runtime does not emit dynamic tool-list changes. The desktop launcher
 selects deferred workflow exposure by default; the CLI defaults are unchanged.
 Tool descriptions carry a category and a concise selection hint. Both
@@ -674,13 +681,18 @@ process registration reports `status: "accepting"` and is safe to poll again.
 
 ### list_commands
 
-Inputs: `"operation_id"`, `"max_results"`.
+Inputs: `"operation_id"`, `"max_results"`, `"workdir"`.
 
 Annotations: `{"title":"List commands","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
 Lists recent active/retained commands plus any accepting operation record,
 newest first. `"operation_id"` optionally filters the list after a lost HTTP
 response or reconnect.
+
+Registered commands carry their canonical absolute `workdir` in execution,
+status, polling and recovery results. Optional `workdir` filters this list by
+exact canonical directory; relative inputs remain workspace-relative. Pending
+acceptance records without a registered command are omitted from a directory-filtered list.
 
 ### write_stdin
 
@@ -727,31 +739,54 @@ Example: `{"output_ref":"command:abc:stdout","offset":0,"limit":4096}`.
 
 ### git_status
 
-Inputs: `"path"`, `"include_untracked"`, `"max_entries"`.
+Inputs: `"path"`, `"include_untracked"`, `"max_entries"`, `"repo_path"`.
 
 Annotations: `{"title":"Git status","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
+All Git tools support optional `repo_path` to select one worktree inside the
+configured workspace. Other `path` / `paths` arguments remain workspace-relative,
+including when `repo_path` is present. Without `repo_path`, explicit file/directory
+paths infer one repository; with no paths, the workspace itself is used. No global
+current-project state is kept. Mixed repositories or conflicting explicit selection
+return `"GIT_REPOSITORY_MISMATCH"`; an actual worktree root outside the workspace
+returns `"GIT_REPOSITORY_OUTSIDE_WORKSPACE"`. Explicit non-Git selection returns
+`GIT_NOT_REPOSITORY`, never a fallback.
+
+Results identify absolute `repo_root` and `path_base`. Status/diff/Git-write paths
+are repository-relative; input paths are still workspace-relative. `git_blame`
+keeps its selected source `path` workspace-relative. Worktree listing/create/remove
+paths are absolute. Status uses NUL-separated porcelain to preserve special names.
+The opaque `index_fingerprint` binds both index content and worktree identity;
+refresh old tokens through `git_status` after upgrading. Git location overrides
+such as `GIT_DIR` and `GIT_INDEX_FILE` do not override an explicit target.
+
 ### git_diff
 
-Inputs: `"path"`, `"paths"`, `"staged"`, `"unstaged"`, `"context_lines"`, `"max_bytes"`.
+Inputs: `"path"`, `"paths"`, `"staged"`, `"unstaged"`, `"context_lines"`, `"max_bytes"`, `"repo_path"`.
 
 Annotations: `{"title":"Git diff","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
+Real Git differences return `is_repo=true, diff_source="git"`. The legacy
+non-Git patch-baseline comparison remains available only without explicit repository
+selection and identifies `is_repo=false, diff_source="patch_baseline"`. It is not
+an authoritative view of arbitrary filesystem changes. File filters are literal
+paths, including names containing wildcard characters.
+
 ### git_log
 
-Inputs: `"path"`, `"ref"`, `"max_count"`, `"skip"`.
+Inputs: `"path"`, `"ref"`, `"max_count"`, `"skip"`, `"repo_path"`.
 
 Annotations: `{"title":"Git log","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
 ### git_show
 
-Inputs: `"rev"`, `"path"`, `"paths"`, `"include_diff"`, `"context_lines"`, `"max_bytes"`.
+Inputs: `"rev"`, `"path"`, `"paths"`, `"include_diff"`, `"context_lines"`, `"max_bytes"`, `"repo_path"`.
 
 Annotations: `{"title":"Git show","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
 ### git_blame
 
-Inputs: `"path"`, `"rev"`, `"start_line"`, `"end_line"`, `"max_lines"`.
+Inputs: `"path"`, `"rev"`, `"start_line"`, `"end_line"`, `"max_lines"`, `"repo_path"`.
 
 Annotations: `{"title":"Git blame","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
@@ -779,8 +814,8 @@ The base64 data appears exactly once, in one MCP image content block. Stable
 `structuredContent` contains metadata only; it has no duplicate base64 or data
 URL. Pillow is optional and used only for requested auto-resize.
 
-> Historical note: the `browser_*`, `chrome_extension_*`, and `app_*` sections
-> below document GUI-automation tools removed from the live v0.3 catalog. They
+> Historical note: the `browser_*` and `chrome_extension_*` sections below
+> document browser-automation tools removed from the live v0.3 catalog. They
 > are not registered, returned by `tools/list`, or callable by current runtimes.
 > They remain here only to make older v0.3 deployments and migration records
 > interpretable.
@@ -1147,111 +1182,6 @@ rules still apply: the target extension must explicitly permit external
 messages from the bridge extension; this tool does not bypass extension
 isolation.
 
-### app_accessibility
-
-Inputs: `"open_settings"`.
-
-Annotations: `{"title":"App accessibility","readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":true}`.
-
-Reports whether macOS Accessibility trusts the current runtime. With
-`open_settings=true`, opens the system Accessibility privacy pane when trust is
-missing.
-
-### app_list
-
-Inputs: `"query"`, `"include_background"`, `"max_results"`.
-
-Annotations: `{"title":"App list","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
-
-Lists running macOS applications with name, bundle id, pid, background-only
-state, foreground state, and current Accessibility trust.
-
-### app_launch
-
-Inputs: `"app"`, `"new_instance"`.
-
-Annotations: `{"title":"App launch","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
-
-Launches a macOS application by display name or bundle identifier using the
-system `open` service. `new_instance=true` requests a separate application
-instance where macOS permits one.
-
-### app_activate
-
-Inputs: `"app"`, `"wait_ms"`.
-
-Annotations: `{"title":"App activate","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
-
-Brings an application to the foreground and returns the resolved running-app
-metadata after the bounded activation delay.
-
-### app_windows
-
-Inputs: `"app"`.
-
-Annotations: `{"title":"App windows","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
-
-Returns Accessibility metadata for each window, including role/subrole, title,
-identifier, focus, position, and size. Accessibility permission is required.
-
-### app_snapshot
-
-Inputs: `"app"`, `"max_depth"`, `"max_elements"`.
-
-Annotations: `{"title":"App snapshot","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
-
-Walks a bounded portion of the macOS Accessibility hierarchy and returns roles,
-titles, identifiers, descriptions, values, focus/enabled state, geometry, and
-tree depth for subsequent app-control calls.
-
-### app_click
-
-Inputs: `"app"`, `"role"`, `"title"`, `"identifier"`, `"index"`.
-
-Annotations: `{"title":"App click","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
-
-Finds an Accessibility element by role/title/identifier (at least one selector
-is required) and invokes `AXPress`, falling back to a synthesized mouse click at
-the element center when appropriate.
-
-### app_type
-
-Inputs: `"app"`, `"text"`, `"role"`, `"title"`, `"identifier"`, `"index"`, `"clear"`.
-
-Annotations: `{"title":"App type","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
-
-Sets `AXValue` directly for a matched editable element when possible; otherwise
-uses synthesized keyboard input. With no element selector, text is sent to the
-currently focused control in the target application.
-
-### app_press
-
-Inputs: `"app"`, `"key"`, `"modifiers"`, `"wait_ms"`.
-
-Annotations: `{"title":"App press","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
-
-Activates the application and posts one supported keyboard key with optional
-Command, Shift, Control, Option, or Fn modifiers using CGEvent.
-
-### app_menu
-
-Inputs: `"app"`, `"path"`.
-
-Annotations: `{"title":"App menu","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
-
-Selects a menu path such as `["File", "Open…"]` through Accessibility
-`AXMenuBarItem`/`AXMenuItem` elements.
-
-### app_screenshot
-
-Inputs: `"app"`, `"window_index"`.
-
-Annotations: `{"title":"App screenshot","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
-
-Captures the Accessibility bounds of one app window as PNG. The image is
-returned once as MCP image content with metadata-only structured content.
-macOS Screen Recording permission may be required in addition to Accessibility.
-
 ## Opt-in workflow toolset
 
 The tools in this section are exposed only when the server starts with
@@ -1264,10 +1194,13 @@ session or client trust boundary.
 
 ### workspace_overview
 
-Inputs: `"max_files"`.
+Inputs: `"max_files"`, `"path"`.
 
 Returns bounded manifest, language, entry-point, top-level area, and project
 instruction metadata. `scan_complete` and `truncated` disclose coverage.
+The optional `path` defaults to `.` and limits enumeration before applying the
+file budget. File paths remain workspace-relative. Current applicable rules are
+returned separately from startup discovery metadata.
 
 ### repo_map
 
@@ -1283,6 +1216,10 @@ Inputs: `"path"`.
 
 Returns root and nested `AGENTS.md`/`CLAUDE.md` files whose directory scope
 contains the selected path, ordered from broad to narrow scope.
+Rules are read along the target's ancestor chain on every call, independent of
+startup scan limits. This observes newly added or changed rules. Reads are bounded
+to 16 KiB per file and 64 KiB in total, deduplicate filesystem identities, reject
+outside-workspace symlinks and disclose truncation or unreadable rules.
 
 ### skills_list
 
@@ -1298,6 +1235,17 @@ Inputs: `"path"`.
 
 Reads one selected workspace Skill, with a 128 KiB limit and workspace/symlink
 confinement.
+
+### agent_environment
+
+Inputs: `"provider"`, `"max_items"`.
+
+This tool is exposed only in `permission_mode=host`. It discovers metadata for
+installed local agent environments (`codex`, `claude`, `gemini`, `cursor`, and
+`opencode`) including CLI/home paths, Skill names, Codex enabled Plugin ids,
+Plugin Skill names, worktrees, rule filenames, and selected local capability
+presence. It reports only booleans for auth/browser-session/OAuth-like resources
+and never returns their contents. It does not execute an agent CLI or Skill.
 
 ### checks_discover
 
@@ -1377,8 +1325,9 @@ linked checks, and linked checkpoints also generate events automatically.
 
 Inputs: `"task_id"`, `"event_limit"`.
 
-Returns the task record together with recent events and linked check/checkpoint
-evidence so a client can resume after reconnecting or restarting the runtime.
+Returns the task record together with recent events and linked check, file
+checkpoint, context checkpoint, and review evidence so a client can resume after
+reconnecting or restarting the runtime.
 
 ### task_plan_get
 
@@ -1431,9 +1380,25 @@ Rechecks every path and rejects stale previews with retryable
 through the existing atomic multi-file committer; files absent at checkpoint
 creation are deleted. Git index and external side effects are outside its scope.
 
+### context_checkpoint
+
+Inputs: `"action"`, `"context_checkpoint_id"`, `"label"`, `"summary"`,
+`"decisions"`, `"unresolved"`, `"next_steps"`, `"task_id"`, `"max_results"`.
+
+This is a model-free cross-session context metadata store. `action="create"`
+requires a semantic `summary` supplied by the current caller and locally records
+the current workspace, Git state, running-command set, runtime capability state,
+and SHA-256 fingerprints of those deterministic sections. `action="get"`
+recomputes the deterministic state and reports `stale` plus bounded reasons such
+as `git_state_changed`, `running_commands_changed`, or `capabilities_changed`.
+`action="list"` returns bounded checkpoint metadata. The combined deterministic
+and semantic payload is limited to 128 KiB. Supplying `task_id` links the context
+checkpoint into `task_context`. The tool does not call Codex compact or any
+other model service.
+
 ### git_branch_list
 
-Inputs: `"max_results"`.
+Inputs: `"max_results"`, `"repo_path"`.
 
 Lists local branches and returns the current `head` and `index_fingerprint`.
 Those values are concurrency tokens for every Git write tool.
@@ -1441,28 +1406,28 @@ Those values are concurrency tokens for every Git write tool.
 ### git_branch_create
 
 Inputs: `"name"`, `"start_point"`, `"checkout"`, `"expected_head"`,
-`"expected_index_fingerprint"`.
+`"expected_index_fingerprint"`, `"repo_path"`.
 
 Validates the branch name with Git and creates a local branch only while HEAD
 and index match the reviewed state. Checkout is explicit and defaults to false.
 
 ### git_conflicts
 
-Inputs: none.
+Inputs: `"repo_path"` (optional).
 
 Lists unmerged paths and all index stages. It also returns current HEAD and
 index fingerprints and never resolves conflicts automatically.
 
 ### git_stage
 
-Inputs: `"paths"`, `"expected_head"`, `"expected_index_fingerprint"`.
+Inputs: `"paths"`, `"expected_head"`, `"expected_index_fingerprint"`, `"repo_path"`.
 
 Stages 1-200 unique explicit workspace paths. The workspace root is rejected,
 and stale HEAD/index values return retryable `GIT_STATE_CONFLICT`.
 
 ### git_unstage
 
-Inputs: `"paths"`, `"expected_head"`, `"expected_index_fingerprint"`.
+Inputs: `"paths"`, `"expected_head"`, `"expected_index_fingerprint"`, `"repo_path"`.
 
 Removes only the explicit paths from the index through `git restore --staged`.
 Working-tree content is preserved.
@@ -1470,7 +1435,7 @@ Working-tree content is preserved.
 ### git_commit
 
 Inputs: `"paths"`, `"message"`, `"expected_head"`,
-`"expected_index_fingerprint"`.
+`"expected_index_fingerprint"`, `"repo_path"`.
 
 Commits only when the complete staged path set exactly equals `paths`; unrelated
 staged content returns `GIT_COMMIT_SCOPE_MISMATCH`. Hooks and configured signing
@@ -1478,7 +1443,7 @@ may run and their failures are returned as `GIT_ERROR`. This tool does not push.
 
 ### git_worktree_list
 
-Inputs: none.
+Inputs: `"repo_path"` (optional).
 
 Annotations: `{"title":"List Git worktrees","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
@@ -1488,22 +1453,29 @@ private workflow state as managed.
 ### git_worktree_create
 
 Inputs: `"worktree_id"`, `"branch"`, `"create_branch"`, `"start_point"`,
-`"expected_head"`, `"expected_index_fingerprint"`.
+`"expected_head"`, `"expected_index_fingerprint"`, `"repo_path"`.
 
 Annotations: `{"title":"Create Git worktree","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
 
 Creates an isolated checkout under private workflow state after HEAD and index
 concurrency checks. It can create a new branch or attach an existing branch and
 returns the absolute path so the Desktop app can register it as a workspace.
+Nested repositories use separate managed-worktree namespaces; the same
+worktree_id in another repository does not alias this directory. An external
+managed checkout is not automatically added to the current workspace's file scope.
 
 ### git_worktree_remove
 
-Inputs: `"worktree_id"`.
+Inputs: `"worktree_id"`, `"repo_path"`.
 
 Annotations: `{"title":"Remove Git worktree","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
 
 Removes only a runtime-managed worktree. Dirty or untracked content returns
 `GIT_WORKTREE_DIRTY`; the branch is always preserved.
+Removal verifies the checkout's actual Git common directory against the selected
+repository. MCP write calls coordinate their check-and-write sections per Git
+common directory within the process; this does not lock out arbitrary external
+writers or implement multi-round agent scheduling.
 
 ### lsp_status
 
@@ -1514,6 +1486,10 @@ backends, their commands and supported extensions. Rust uses `rust-analyzer` and
 is rooted at the nearest ancestor `Cargo.toml`; a rustup proxy without the actual
 component installed is reported unavailable. Backends start only when a semantic
 operation first needs them.
+Python and TypeScript also use nearest language/project configuration markers,
+stopping at the nearest Git worktree boundary instead of borrowing parent/neighbor
+configuration. Backends are reused by language and project root. This does not
+automatically install servers, activate virtual environments or execute shell profiles.
 
 ### lsp_definition
 
@@ -1537,6 +1513,12 @@ Inputs: `"path"`, `"wait_ms"`, `"max_results"`.
 
 Opens or refreshes the UTF-8 document and returns bounded diagnostics published
 by the language server. It does not label AST or text-search results as LSP.
+Results include `project_root`, `document_version`, `diagnostics_version` and
+`freshness` (`fresh`, `unversioned`, `pending`, `stale`). Only an explicitly matching
+document version is fresh; versionless publications remain unconfirmed. Waiting
+is URI/version-aware, late older-version notifications cannot overwrite current
+results, and a file changed during the query is stale. No latest diagnostics is
+not proof that a document has no errors.
 
 ### lsp_rename_preview
 
@@ -1557,11 +1539,15 @@ Python backend discovery tries `basedpyright-langserver`,
 ### review_prepare
 
 Inputs: `"path"`, `"paths"`, `"task_id"`, `"staged"`, `"unstaged"`,
-`"max_bytes"`.
+`"max_bytes"`, `"repo_path"`.
 
 Persists a bounded review snapshot containing Git status and diff, applicable
 project instructions, optional task evidence, and a code fingerprint. Preparing
 materials does not claim that an AI or human has reviewed them.
+The selected directory scopes diff paths, applicable rules and fingerprint input;
+explicit file filters outside it are rejected. With repo_path and no path, the
+selected repository directory is used. Fingerprints enumerate the target before
+applying budgets, so a sibling project does not consume its scan budget.
 
 ### review_record
 

@@ -114,60 +114,6 @@ fn decide_approval(
 }
 
 #[tauri::command]
-fn stop_computer_session(
-    profile_id: String,
-    session_id: String,
-    state: tauri::State<'_, DesktopState>,
-) -> Result<(), String> {
-    let profile = state
-        .store
-        .lock()
-        .map_err(|_| "Profile store is unavailable")?
-        .get(&profile_id)
-        .ok_or("Workspace profile was not found.")?;
-    let root = state
-        .runtime
-        .lock()
-        .map_err(|_| "Runtime manager is unavailable")?
-        .workflow_state_root();
-    workflow::stop_computer_session(&root, Path::new(&profile.path), &session_id)
-}
-
-#[tauri::command]
-async fn computer_permission_settings(
-    permission: String,
-    state: tauri::State<'_, DesktopState>,
-) -> Result<(), String> {
-    if !cfg!(target_os = "macos") {
-        return Err("Application control currently requires macOS.".into());
-    }
-    if !matches!(permission.as_str(), "accessibility" | "screen_recording") {
-        return Err("Unknown system permission.".into());
-    }
-    let helper = state
-        .runtime
-        .lock()
-        .map_err(|_| "Runtime manager is unavailable")?
-        .computer_helper_path();
-    if !helper.is_file() {
-        return Err("The bundled computer helper is missing.".into());
-    }
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut child = Command::new(helper)
-            .args(["--request-permission", &permission])
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        // Reap without holding a Tauri state lock while the user handles the OS prompt.
-        std::thread::spawn(move || {
-            let _ = child.wait();
-        });
-        Ok(())
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
 fn create_profile(
     path: String,
     state: tauri::State<'_, DesktopState>,
@@ -977,36 +923,6 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
                 )
                 .map_err(menu_error)?;
                 approval_menu.append(&reason).map_err(menu_error)?;
-                if approval.tool_name == "computer_session_start" {
-                    if let Ok(scope) =
-                        serde_json::from_str::<serde_json::Value>(&approval.arguments)
-                    {
-                        let details = [
-                            format!(
-                                "{} · PID {}",
-                                scope["app"]["name"].as_str().unwrap_or("Application"),
-                                scope["app"]["pid"]
-                            ),
-                            scope["app"]["path"].as_str().unwrap_or("").to_string(),
-                            format!(
-                                "{} · {} seconds",
-                                scope["access"].as_str().unwrap_or("unknown"),
-                                scope["ttl_seconds"]
-                            ),
-                        ];
-                        for (index, detail) in details.iter().enumerate() {
-                            let item = MenuItem::with_id(
-                                app,
-                                format!("computer-scope:{}:{index}", approval.approval_id),
-                                detail,
-                                false,
-                                None::<&str>,
-                            )
-                            .map_err(menu_error)?;
-                            approval_menu.append(&item).map_err(menu_error)?;
-                        }
-                    }
-                }
                 let separator = PredefinedMenuItem::separator(app).map_err(menu_error)?;
                 approval_menu.append(&separator).map_err(menu_error)?;
                 let approve = MenuItem::with_id(
@@ -1938,8 +1854,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             desktop_snapshot,
             decide_approval,
-            stop_computer_session,
-            computer_permission_settings,
             create_profile,
             create_full_access_profile,
             save_profile,

@@ -2,10 +2,6 @@
 
 `exec_command` has four permission modes.
 
-These modes do not grant application-control sessions. Opt-in
-[computer tools](computer-use-spec.md) use their own desktop approval and retain
-truthful annotations in every permission mode.
-
 ## safe
 
 Default mode. Commands run with:

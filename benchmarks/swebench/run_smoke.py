@@ -19,6 +19,7 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BENCHMARK_ROOT = Path(__file__).resolve().parents[1]
+SWEBENCH_PACKAGE = "swebench==5.0.2"
 
 
 @dataclass
@@ -152,7 +153,12 @@ def check_docker(raw_dir: Path) -> tuple[bool, str, dict[str, Any]]:
 def check_swebench(raw_dir: Path, *, install: bool) -> tuple[bool, str, dict[str, Any] | None, dict[str, Any]]:
     install_result: dict[str, Any] | None = None
     if install and importlib.util.find_spec("swebench") is None:
-        install_result = capture([sys.executable, "-m", "pip", "install", "swebench"], raw_dir, "pip-install-swebench", timeout=900)
+        install_result = capture(
+            [sys.executable, "-m", "pip", "install", SWEBENCH_PACKAGE],
+            raw_dir,
+            "pip-install-swebench",
+            timeout=900,
+        )
     help_result = capture([sys.executable, "-m", "swebench.harness.run_evaluation", "--help"], raw_dir, "swebench-help", timeout=120)
     if help_result["returncode"] != 0:
         if importlib.util.find_spec("swebench") is None:
@@ -167,7 +173,7 @@ def evaluation_command(predictions: Path, run_id: str, max_workers: int, instanc
         "-m",
         "swebench.harness.run_evaluation",
         "--dataset_name",
-        "princeton-nlp/SWE-bench_Lite",
+        "SWE-bench/SWE-bench_Lite",
         "--predictions_path",
         str(predictions),
         "--max_workers",

@@ -105,7 +105,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     subset = load_subset(args.subset)
-    dataset_name = str(subset.get("dataset_name", "princeton-nlp/SWE-bench_Lite"))
+    dataset_name = str(subset.get("dataset_name", "SWE-bench/SWE-bench_Lite"))
     split = str(subset.get("split", "test"))
     instance_ids = selected_instance_ids(subset, args.instance_id)
     patches = fetch_reference_patches(dataset_name, split, instance_ids)

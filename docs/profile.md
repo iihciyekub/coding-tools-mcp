@@ -1,8 +1,8 @@
 # Coding Tools MCP Contract
 
-The active contract is [runtime-contract-v0.3.md](runtime-contract-v0.3.md).
+The active contract is [runtime-contract-v0.4.md](runtime-contract-v0.4.md).
 The frozen 0.2.x one is [runtime-contract-v0.2.md](runtime-contract-v0.2.md),
-and [migration-0.3.md](migration-0.3.md) is the difference between them.
+and [migration-0.4.md](migration-0.4.md) describes the current migration from 0.3.
 
 Contract id: `coding-tools-mcp-v0.3`.
 

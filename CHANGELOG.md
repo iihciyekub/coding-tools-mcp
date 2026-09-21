@@ -2,37 +2,33 @@
 
 ## Desktop 0.4.0
 
-- Updated Application control for the Local Agent Capability Gateway: Native
-  Computer remains the stable default while host-mode profiles can expose the
-  Codex Computer Use Preview provider through the same explicit desktop approval
-  flow.
-- Desktop approval cards now understand both Native and Codex app identities,
-  identify the active provider, and can display and stop Codex sessions through
-  the shared workflow state database instead of treating them as invalid or
-  invisible.
-- Full Access documentation now reflects local agent capability discovery and
-  the current Computer v2 safety model; Browser/Chrome remain gated until their
-  separate safe-backend verification is complete.
+- Removed the Application Control page, native macOS helper, Accessibility /
+  Screen Recording permission flow, and app-session state from the desktop
+  package. The desktop now focuses on workspace access, runtime lifecycle,
+  approvals, environment setup, logs, and release operations.
+- Full Access keeps metadata-only local agent environment discovery without
+  adding GUI automation authority or extra desktop permissions.
+- Simplified the signed/notarized app bundle by removing the unused Computer
+  helper resource and its build step.
 
 ## 0.4.0 - 2026-09-21
 
-- Added the optional isolated Codex App Server capability broker with a hard
-  no-model-turn RPC allowlist, schema/version probing, minimal temporary
-  `CODEX_HOME`, secret filtering, and real `turns=[]` smoke verification.
 - Added host-only `agent_environment` metadata discovery for local agent Skills,
   Plugins, worktrees, rules and capability presence without reading auth, cookie,
   token or browser-session contents.
 - Added model-free `context_checkpoint` create/get/list actions with deterministic
   Git/command/capability fingerprints, caller-supplied semantic summaries,
   staleness detection, and task-context integration.
-- Added Codex Computer Preview observation and Computer v2 control through the
-  existing approval/session tools. Control requires a separately approved scope,
-  a fresh app observation snapshot and a unique operation receipt; stale or
-  uncertain outcomes fail closed and Native Computer v1 remains the default.
-- Codex Browser service initialization and metadata forwarding were verified
-  without model turns, but the provider remains disabled because the current
-  runtime cannot supply an isolated IAB backend and would otherwise select the
-  user's existing Chrome extension.
+- Removed the opt-in App/Computer toolset and Codex Computer bridge so the public
+  MCP surface stays focused on software-engineering primitives with higher coding
+  leverage and lower platform-specific maintenance cost.
+- Local Web verification remains an explicit developer workflow through
+  `python -m coding_tools_mcp.browser_check` plus existing command/file/image
+  tools; no personal Chrome control or persistent browser MCP surface is added.
+- Updated the SWE-bench Lite release smoke to the current
+  `SWE-bench/SWE-bench_Lite` dataset and pinned the verified `swebench==5.0.2`
+  harness so release evidence is reproducible instead of depending on a moving
+  PyPI/data-schema combination.
 
 ## Desktop 0.3.31
 

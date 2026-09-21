@@ -29,7 +29,6 @@ class AgentEnvironmentTests(unittest.TestCase):
         (root / "rules" / "default.rules").write_text("rule body", encoding="utf-8")
         (root / "browser" / "sessions").mkdir(parents=True)
         (root / "mcp-oauth-locks").mkdir(parents=True)
-        (root / "computer-use" / "Codex Computer Use.app").mkdir(parents=True)
         (root / "auth.json").write_text('{"token":"TOP-SECRET-TOKEN"}', encoding="utf-8")
         (root / "config.toml").write_text(
             """
@@ -69,7 +68,6 @@ enabled = false
         self.assertIn("rules/default.rules", provider["rules"])
         self.assertTrue(provider["sensitive_resources_present"]["auth"])
         self.assertTrue(provider["sensitive_resources_present"]["browser_sessions"])
-        self.assertTrue(provider["capabilities"]["computer_use_installed"])
         rendered = json.dumps(result)
         self.assertNotIn("TOP-SECRET-TOKEN", rendered)
         self.assertNotIn("secret body must not be read", rendered)

@@ -225,4 +225,4 @@ consequences for embedders:
   commands also need the real home, credentials, and SSH agent.
 
 *`HOME` is redirected to a per-runtime directory except in host mode; see the
-[runtime contract](runtime-contract-v0.3.md).
+[runtime contract](runtime-contract-v0.4.md).

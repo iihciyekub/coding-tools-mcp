@@ -125,8 +125,6 @@ impl Default for AuthConfig {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RuntimeConfig {
-    #[serde(default)]
-    pub computer_enabled: bool,
     #[serde(default = "default_server_name_prefix")]
     pub server_name_prefix: String,
     #[serde(default = "default_port")]
@@ -144,7 +142,6 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
-            computer_enabled: false,
             server_name_prefix: default_server_name_prefix(),
             local_port: default_port(),
             permission_mode: default_permission_mode(),

@@ -1,6 +1,6 @@
 # Tools And Schemas
 
-The normative behavior is [runtime-contract-v0.3.md](runtime-contract-v0.3.md).
+The normative behavior is [runtime-contract-v0.4.md](runtime-contract-v0.4.md).
 Live JSON Schemas come from `tools/list`; CI compares their names, input
 properties, annotations, and error codes with the contract.
 
@@ -10,7 +10,7 @@ runtimes now select deferred workflow exposure; the CLI defaults are unchanged.
 
 ## Fixed inventory
 
-The implementation declares exactly 83 tools. With the default `view_image`
+The implementation declares exactly 71 tools. With the default `view_image`
 capability enabled, the default catalog exposes 28 tools:
 
 - `server_info`: server, workspace, automatic project context, policy, runtime,
@@ -125,24 +125,6 @@ path is `.agents/hooks.json` (override with `--hooks-file` or
 filesystem sandbox as `exec_command`; a failing blocking `before_tool` hook
 rejects the target call. Hook arguments/results are redacted before being sent
 to hook stdin, and hook stdout/stderr is bounded.
-
-Starting with `--enable-computer-tools` adds these 12 directly exposed tools,
-including when workflow tools are deferred. Desktop profiles provide this switch
-and the bundled native helper. See [Computer use v1](computer-use-spec.md) for
-the approval, session and platform contract.
-
-- `computer_status`: Check Native Computer availability plus optional provider status without prompting.
-- `computer_request_access`: Ask the desktop user to authorize one app session. `provider=native` remains the default; `provider=codex` is host-only Preview. Observe and control are separately approved scopes; neither is automatic.
-- `computer_session_start`: Consume an approved app access request and start its bounded session. Reuse the returned session_id for app tools.
-- `computer_session_get`: Read an app approval, session or operation receipt. Pass approval_id to check a pending request, session_id for a session, or no arguments to list this runtime's sessions.
-- `computer_session_stop`: Revoke an app session and release its control lock. Already completed actions are not undone.
-- `app_list`: Find app identities before requesting access. `provider=native` is the stable default; `provider=codex` uses the optional host-mode Preview provider. Does not expose window contents.
-- `app_windows`: List windows belonging to an authorized session. Use returned window_id values, never guessed window indices.
-- `app_snapshot`: Read an authorized window's accessibility elements and optional screenshot. Use returned snapshot_id and element_id for actions. Set include_image=false for accessibility-only inspection.
-- `app_observe`: Read whole-app accessibility text and an optional screenshot from an approved Codex Preview session and return a short-lived snapshot_id for v2 actions.
-- `app_interact`: Perform one bounded Computer v2 action in an approved Codex control session. Requires a fresh app_observe snapshot_id plus a unique operation_id; stale state and uncertain outcomes fail closed.
-- `app_action`: Press or set the value of an observed accessible element in a control session. Requires a fresh snapshot and unique operation_id. No foreground keyboard/mouse fallback. Verify the outcome afterwards.
-- `app_wait`: Wait for an observed element to become enabled or have an expected value. Returns bounded evidence or timeout and responds to session revocation.
 
 ## Result envelope
 

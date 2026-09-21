@@ -61,15 +61,6 @@ pub struct WorkflowWorktree {
     pub path: String,
 }
 
-#[derive(Clone, Serialize)]
-pub struct ComputerSession {
-    pub session_id: String,
-    pub app_name: String,
-    pub provider: String,
-    pub access: String,
-    pub status: String,
-    pub expires_at: f64,
-}
 
 #[derive(Clone, Serialize)]
 pub struct WorkflowSnapshot {
@@ -81,7 +72,6 @@ pub struct WorkflowSnapshot {
     pub reviews: Vec<WorkflowReview>,
     pub approvals: Vec<WorkflowApproval>,
     pub worktrees: Vec<WorkflowWorktree>,
-    pub computer_sessions: Vec<ComputerSession>,
     pub warning: Option<String>,
 }
 
@@ -96,7 +86,6 @@ impl WorkflowSnapshot {
             reviews: Vec::new(),
             approvals: Vec::new(),
             worktrees: Vec::new(),
-            computer_sessions: Vec::new(),
             warning: None,
         }
     }
@@ -111,7 +100,6 @@ impl WorkflowSnapshot {
             reviews: Vec::new(),
             approvals: Vec::new(),
             worktrees: Vec::new(),
-            computer_sessions: Vec::new(),
             warning: Some(warning),
         }
     }
@@ -159,7 +147,6 @@ pub fn read_snapshot(state_root: &Path, workspace: &Path) -> Result<WorkflowSnap
             .parent()
             .ok_or_else(|| "Workflow state path is invalid.".to_string())?,
     )?;
-    let computer_sessions = read_computer_sessions(&connection)?;
     Ok(WorkflowSnapshot {
         available: true,
         workspace_id,
@@ -169,74 +156,8 @@ pub fn read_snapshot(state_root: &Path, workspace: &Path) -> Result<WorkflowSnap
         reviews,
         approvals,
         worktrees,
-        computer_sessions,
         warning: None,
     })
-}
-
-fn read_computer_sessions(connection: &Connection) -> Result<Vec<ComputerSession>, String> {
-    if !table_exists(connection, "computer_sessions")? {
-        return Ok(Vec::new());
-    }
-    let now = unix_time()?;
-    let mut statement = connection.prepare(
-        "SELECT session_id,app_json,access,status,expires_at FROM computer_sessions ORDER BY (status='active' AND expires_at > ?1) DESC, created_at DESC LIMIT 20"
-    ).map_err(|e| e.to_string())?;
-    let rows = statement
-        .query_map([now], |row| {
-            let app: String = row.get(1)?;
-            let app = serde_json::from_str::<serde_json::Value>(&app).unwrap_or_default();
-            let expires_at: f64 = row.get(4)?;
-            let mut status: String = row.get(3)?;
-            if status == "active" && expires_at <= now {
-                status = "expired".into();
-            }
-            Ok(ComputerSession {
-                session_id: row.get(0)?,
-                app_name: app
-                    .get("name")
-                    .or_else(|| app.get("display_name"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Application")
-                    .into(),
-                provider: app
-                    .get("provider")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("native")
-                    .into(),
-                access: row.get(2)?,
-                status,
-                expires_at,
-            })
-        })
-        .map_err(|e| e.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())
-}
-
-pub fn stop_computer_session(
-    state_root: &Path,
-    workspace: &Path,
-    session_id: &str,
-) -> Result<(), String> {
-    let database = workflow_database(state_root, workspace)?;
-    if !database.is_file() {
-        return Err("No application sessions in this workspace.".into());
-    }
-    let connection = Connection::open(database).map_err(|e| e.to_string())?;
-    connection
-        .busy_timeout(Duration::from_secs(2))
-        .map_err(|e| e.to_string())?;
-    if !table_exists(&connection, "computer_sessions")? {
-        return Err("No application sessions in this workspace.".into());
-    }
-    connection
-        .execute(
-            "UPDATE computer_sessions SET status='stopped' WHERE session_id=?1",
-            [session_id],
-        )
-        .map_err(|e| e.to_string())?;
-    Ok(())
 }
 
 fn read_managed_worktrees(workspace_state: &Path) -> Result<Vec<WorkflowWorktree>, String> {
@@ -479,48 +400,6 @@ mod tests {
         assert!(!snapshot.available);
         assert!(snapshot.tasks.is_empty());
         assert_eq!(snapshot.workspace_id.len(), 24);
-    }
-
-    #[test]
-    fn desktop_revokes_shared_computer_sessions_and_displays_expiry() {
-        let state = tempfile::tempdir().unwrap();
-        let workspace = tempfile::tempdir().unwrap();
-        let database = workflow_database(state.path(), workspace.path()).unwrap();
-        std::fs::create_dir_all(database.parent().unwrap()).unwrap();
-        let db = Connection::open(&database).unwrap();
-        db.execute_batch("CREATE TABLE computer_sessions (session_id TEXT PRIMARY KEY, runtime_id TEXT, app_json TEXT, access TEXT, status TEXT, helper_id TEXT, expires_at REAL, created_at REAL);
-            INSERT INTO computer_sessions VALUES ('live','runtime','{\"name\":\"Fixture\"}','control','active','helper',9999999999,2);
-            INSERT INTO computer_sessions VALUES ('expired','runtime','{\"display_name\":\"Codex Fixture\",\"provider\":\"codex\"}','observe','active','codex',0,1);").unwrap();
-        let sessions = read_computer_sessions(&db).unwrap();
-        assert_eq!(sessions[0].app_name, "Fixture");
-        assert_eq!(sessions[0].provider, "native");
-        assert_eq!(sessions[0].status, "active");
-        assert_eq!(sessions[1].app_name, "Codex Fixture");
-        assert_eq!(sessions[1].provider, "codex");
-        assert_eq!(sessions[1].status, "expired");
-        stop_computer_session(state.path(), workspace.path(), "live").unwrap();
-        assert_eq!(read_computer_sessions(&db).unwrap()[0].status, "stopped");
-    }
-
-    #[test]
-    fn active_computer_sessions_remain_visible_after_history_fills_up() {
-        let db = Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE computer_sessions (session_id TEXT PRIMARY KEY, app_json TEXT, access TEXT, status TEXT, expires_at REAL, created_at REAL);
-            INSERT INTO computer_sessions VALUES ('live','{\"name\":\"Fixture\"}','control','active',9999999999,0);").unwrap();
-        for index in 1..=25 {
-            db.execute(
-                "INSERT INTO computer_sessions VALUES (?1,'{}','observe','active',0,?2)",
-                rusqlite::params![format!("expired-{index}"), index],
-            )
-            .unwrap();
-        }
-        let sessions = read_computer_sessions(&db).unwrap();
-        assert_eq!(sessions.len(), 20);
-        assert_eq!(sessions[0].session_id, "live");
-        assert_eq!(sessions[0].status, "active");
-        assert!(sessions[1..]
-            .iter()
-            .all(|session| session.status == "expired"));
     }
 
     #[test]

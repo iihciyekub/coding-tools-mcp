@@ -88,7 +88,7 @@ command checks.
 ## SWE-bench
 
 The `swebench-lite` workflow ran the official Docker-backed SWE-bench harness
-on `princeton-nlp/SWE-bench_Lite` instance `sympy__sympy-12419`.
+on `SWE-bench/SWE-bench_Lite` instance `sympy__sympy-12419`.
 
 The uploaded SWE-bench report records:
 

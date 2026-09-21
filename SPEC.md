@@ -1,7 +1,7 @@
 # Coding Tools MCP Spec
 
 This repository implements the `coding-tools-mcp-v0.3` runtime contract defined
-in [docs/runtime-contract-v0.3.md](docs/runtime-contract-v0.3.md).
+in [docs/runtime-contract-v0.4.md](docs/runtime-contract-v0.4.md).
 
 ## Product boundary
 
@@ -108,7 +108,7 @@ partition it: one workspace is one trust domain, shared by every client of it.
 Version 0.3 adds `2026-07-28` and removes every session. The handshake era is
 unchanged on the wire; the cwd tools, the HTTP session, and several
 `server_info` fields are not. See
-[docs/migration-0.3.md](docs/migration-0.3.md).
+[docs/migration-0.4.md](docs/migration-0.4.md).
 
 Version 0.2 changes model-facing result text from a JSON mirror to summaries.
 Clients that parsed `content[0].text` as JSON must read `structuredContent`.

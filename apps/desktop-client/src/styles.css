@@ -227,21 +227,6 @@ button:focus-visible, select:focus-visible { outline: 2px solid var(--focus); ou
 .approval-item > div { display: flex; justify-content: flex-end; gap: 4px; margin-top: 6px; }
 .approval-item button { min-height: 27px; padding: 0 9px; border: 1px solid var(--line); border-radius: 5px; background: var(--raised); cursor: pointer; font-size: 10px; }
 .approval-item button.approve { color: var(--success); }
-.computer-toggle { display: flex; align-items: center; gap: 12px; }
-.computer-toggle span { flex: 1; }
-.computer-toggle strong, .computer-toggle small { display: block; }
-.computer-toggle strong { font-size: 12px; }
-.computer-toggle small { margin-top: 5px; color: var(--muted); font-size: 11px; line-height: 1.5; }
-.computer-toggle input { accent-color: var(--success); }
-.computer-permissions { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
-.computer-permissions button, .computer-request button { min-height: 29px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 5px; background: var(--raised); cursor: pointer; font-size: 11px; }
-.computer-request { padding: 10px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
-.computer-request > strong, .computer-request > span { display: block; margin-bottom: 4px; font-size: 12px; }
-.computer-request > span, .computer-request p { color: var(--muted); font-size: 11px; line-height: 1.5; }
-.computer-identity { display: block; margin: 5px 0; color: var(--muted); font-size: 10px; line-height: 1.5; user-select: text; }
-.computer-request > div { display: flex; justify-content: flex-end; gap: 6px; }
-.computer-request .approve { color: var(--success); }
-.computer-page > .approval-item { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
 .activity-row { display: grid; min-height: 43px; grid-template-columns: 59px minmax(0, 1fr); align-items: center; border-bottom: 1px solid var(--line); }
 .activity-row > small { color: var(--muted); font-size: 10px; }
 .activity-row span strong, .activity-row span small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

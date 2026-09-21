@@ -3,8 +3,6 @@ import type { DesktopSnapshot, LogBundle, RuntimeStatus, WorkspaceProfile } from
 
 export const api = {
   snapshot: () => invoke<DesktopSnapshot>("desktop_snapshot"),
-  stopComputerSession: (profileId: string, sessionId: string) => invoke<void>("stop_computer_session", { profileId, sessionId }),
-  computerPermissionSettings: (permission: "accessibility" | "screen_recording") => invoke<void>("computer_permission_settings", { permission }),
   decideApproval: (profileId: string, approvalId: string, approved: boolean) =>
     invoke<void>("decide_approval", { profileId, approvalId, approved }),
   createProfile: (path: string) => invoke<WorkspaceProfile>("create_profile", { path }),

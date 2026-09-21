@@ -2,7 +2,7 @@
 
 这份升级方案已经完成其主要设计职责，M1–M3 的核心能力现已进入正式实现，因此不再作为当前能力清单或待办来源。
 
-- 当前运行时契约：[runtime-contract-v0.3.md](runtime-contract-v0.3.md)
+- 当前运行时契约：[runtime-contract-v0.4.md](runtime-contract-v0.4.md)
 - 当前工具与 schema：[tools-and-schemas.md](tools-and-schemas.md)
 - 当前产品边界：[../SPEC.md](../SPEC.md)
 - 当前桌面端能力：[../apps/desktop-client/README.md](../apps/desktop-client/README.md)

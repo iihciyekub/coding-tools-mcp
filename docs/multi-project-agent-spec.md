@@ -105,17 +105,7 @@ Python / TypeScript LSP 在目标向上查找语言配置，最迟在最近仓�
 
 协议契约、工具说明和测试随实现更新。新增错误码必须纳入运行时契约。不得用批量格式化掩盖功能 diff，也不重写不相关桌面文件。
 
-## 9. 截图和 App 验证：第 2 阶段
-
-复用现有 `app_snapshot`、`app_action`、`app_wait` 和授权会话。先完成目标窗口观察、可访问控件操作、再观察的闭环。
-
-屏幕捕获权限不等于持续录像。默认不开麦克风、不录音、不连续上传桌面。静态布局问题用按需窗口截图；只有实际遇到动画/拖动问题才考虑有界过程证据。
-
-当前动作仅包含可访问元素的 press / set_value。不能声称已经覆盖画布笔画、全局快捷键和任意拖动。不得操作 MCP 自身授权 UI 来扩大权限。
-
-验收分开记录：模拟后端 HTTP 协议测试、原生测试夹具、签名安装后的首次系统授权、实际聊天客户端图像消费。未执行项明确保留未验收，不以其中一种结果代替其他结果。
-
-## 10. 浏览器：第 3 阶段，限制范围
+## 9. 浏览器编码验证：第 2 阶段，限制范围
 
 目标仅是 Web 编码验证，不是管理用户全部浏览器活动。本轮选择可选 Playwright Python 驱动，通过 `python -m coding_tools_mcp.browser_check` 执行有限 JSON 场景。agent 使用已有 `exec_command` 运行、`read_file` 读取结果、`view_image` 查看截图；不增加 MCP 注册工具、另一个常驻服务或个人浏览器连接。
 
@@ -131,7 +121,7 @@ Python / TypeScript LSP 在目标向上查找语言配置，最迟在最近仓�
 
 本轮不暴露跨调用页面句柄，因此不宣称实现持久页面恢复、交互式 Chrome 管理、用户日常标签页访问、任意 JS/坐标操作等能力。遗留 browser/chrome Schema 仍不代表实现。Web 测试不能代替 Tauri/WKWebView 的原生验收；后续只有真实任务证明场景式验证不足，才考虑按需 browser gateway。
 
-## 11. 验收矩阵
+## 10. 验收矩阵
 
 | 编号 | 场景 | 必须满足 |
 | --- | --- | --- |
@@ -156,7 +146,7 @@ Python / TypeScript LSP 在目标向上查找语言配置，最迟在最近仓�
 
 所有破坏性验收只在临时夹具中进行，不对用户其他项目提交、删除或重置。真实项目只做只读验收。
 
-## 12. 发布与执行记录
+## 11. 发布与执行记录
 
 不自动 commit / push / 打 tag / 替换正在使用的已安装 App。源码验证使用新建的测试 Runtime，避免把已启动旧进程的工具表误认为新版行为。最终明确说明当前连接是否仍需要重启才能加载源码。
 
@@ -198,23 +188,19 @@ PYTHONDONTWRITEBYTECODE=1 \
 .venv/bin/python -m unittest discover -s tests -p 'test_*.py'
 
 make lint typecheck check-dispatch-inputs PYTHON=.venv/bin/python
-.venv/bin/python -m ruff check --ignore E501 apps/desktop-client/tests/computer_smoke.py
-.venv/bin/python apps/desktop-client/tests/computer_smoke.py
 ```
 
 本轮在项目 `.venv` 显式安装 Playwright 1.63.0 及依赖，并在 Playwright 缓存安装其测试 Chromium；没有修改个人 Chrome profile。依赖选择记录在 `pyproject.toml` 的可选 browser extra 和 `uv.lock`，核心运行时不要求安装浏览器依赖。
-
-原生测试初次失败暴露的是夹具身份与就绪时序：从桌面服务启动的无 bundle 夹具继承了管理 App 的 `__CFBundleIdentifier`，触发正确的受保护应用拒绝。测试现改为独立临时 `.app` 身份，移除夹具子进程继承值，且验证 bundle ID。AX 与 ScreenCaptureKit 列表短暂不同步时，测试仅在有限启动窗口重新观察自己的窗口。不修改产品受保护应用名单、截图匹配规则或授权逻辑。
 
 一次保留的浏览器证据位于 `$HOME/Library/Caches/coding-tools-mcp/browser-acceptance/browser-check-vyqznt6e/`。`screenshot.png` 已通过现有 MCP `view_image` 实际返回本次对话：输入框显示 `MCP acceptance`，页面显示 `Saved`。该记录证明浏览器图像传递，不替代直接 computer 工具的完整聊天客户端验收。
 
 ### 12.2 明确保留的验收边界
 
-本次真实 App 夹具使用已有 macOS Accessibility / Screen Recording 权限；没有重新测试签名安装后首次拒绝/授权/升级归属。Windows/Linux 没有在本机执行平台回归。Tauri/WKWebView 的完整产品 UI 和任意绘图/拖动/全局快捷键不属于本轮完成声明。
+Windows/Linux 没有在本机执行平台回归。Tauri/WKWebView 的完整产品 UI 不属于本轮浏览器场景验证的完成声明。
 
 当前在线连接仍是先前已启动的安装运行时。使用本轮核心修复需重新构建/更新该 App 实际使用的运行时，再重启相应服务并刷新客户端工具定义；只重启旧安装包不保证加载工作区源码。本轮没有擅自断开正在使用的连接。
 
-## 13. 外部参考
+## 12. 外部参考
 
 - Git rev-parse（仓库与 worktree 定位）：https://git-scm.com/docs/git-rev-parse
 - LSP 3.17（文档版本及 publishDiagnostics）：https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/

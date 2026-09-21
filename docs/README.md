@@ -14,7 +14,8 @@ The documentation keeps stable file paths for existing links, while this index p
 ## Runtime and protocol reference
 
 - [Tools and schemas](tools-and-schemas.md)
-- [Runtime contract v0.3](runtime-contract-v0.3.md)
+- [Runtime contract v0.4](runtime-contract-v0.4.md)
+- [Runtime contract v0.3 (frozen)](runtime-contract-v0.3.md)
 - [Runtime contract v0.2](runtime-contract-v0.2.md)
 - [Permission modes](permission-modes.md)
 - [Telemetry](telemetry.md)
@@ -26,6 +27,7 @@ The documentation keeps stable file paths for existing links, while this index p
 - [Embedding](embedding.md)
 - [Exec command recipes](exec-command-recipes.md)
 - [Exec troubleshooting](troubleshooting-exec.md)
+- [Migration to 0.4](migration-0.4.md)
 - [Migration to 0.3](migration-0.3.md)
 - [Profile](profile.md)
 
@@ -34,8 +36,6 @@ The documentation keeps stable file paths for existing links, while this index p
 - [Single-service multi-project agent specification (简体中文)](multi-project-agent-spec.md)
 - [Local Agent Capability Gateway specification (简体中文)](local-agent-capability-gateway-spec.zh-CN.md)
 - [Optional local Web verification through existing MCP tools](browser-verification.md)
-- [ChatGPT computer-use implementation plan (简体中文)](computer-use-plan.zh-CN.md)
-- [Computer use v1 specification](computer-use-spec.md)
 - [CI and tests](ci-and-tests.md)
 - [Desktop release maintenance contract](desktop-release-maintenance.md)
 - [Competitive analysis](competitive-analysis.md)

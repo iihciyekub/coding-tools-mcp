@@ -7,14 +7,6 @@ API.
 
 ## Features
 
-- Opt-in **Application control** for running macOS apps. Native Computer v1 uses
-  the bundled helper and remains the stable default. Full Access profiles can
-  additionally expose the isolated Codex Computer Use Preview provider through
-  the same MCP approval/session surface. See the
-  [v1 specification and acceptance status](../../docs/computer-use-spec.md) and
-  [Local Agent Capability Gateway specification](../../docs/local-agent-capability-gateway-spec.zh-CN.md).
-  Enabling it adds tools after service restart; each app session still needs a
-  desktop approval. The control page supports permission setup and immediate stop.
 - Full Access also exposes metadata-only local agent environment discovery so an
   MCP client can discover installed agent Skills, Plugins, rules, worktrees and
   capability presence without reading auth/token/cookie contents.

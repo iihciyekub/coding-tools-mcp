@@ -166,7 +166,7 @@ allowlist 模式下可重复使用 `--network-allow-domain github.com`，子域�
 工具的 `content` 是给 agent 看的精炼文本，`structuredContent` 则是完整稳定的
 机器结果。Schema 与结果封装：
 [docs/tools-and-schemas.md](docs/tools-and-schemas.md) ·
-[docs/runtime-contract-v0.3.md](docs/runtime-contract-v0.3.md)
+[docs/runtime-contract-v0.4.md](docs/runtime-contract-v0.4.md)
 
 ## 安全边界
 
@@ -211,7 +211,7 @@ SWE-bench 榜单成绩——[docs/swe-bench.md](docs/swe-bench.md) 写明了测�
 | 文档导航 | [按主题浏览文档](docs/README.md) |
 | 上手 | [快速开始](docs/quickstart.md) · [客户端配置](docs/mcp-client-config.md) · [排障](docs/troubleshooting.md) |
 | 远程与沙箱 | [Remote MCP](docs/remote-mcp.md) · [Docker 沙箱](docs/docker.md) · [云沙箱 Worker](infra/cloudflare/sandbox-control/README.md) |
-| 工具与契约 | [工具与 Schema](docs/tools-and-schemas.md) · [运行时契约](docs/runtime-contract-v0.3.md) · [迁移到 0.3](docs/migration-0.3.md) · [权限模式](docs/permission-modes.md) |
+| 工具与契约 | [工具与 Schema](docs/tools-and-schemas.md) · [运行时契约](docs/runtime-contract-v0.4.md) · [迁移到 0.4](docs/migration-0.4.md) · [权限模式](docs/permission-modes.md) |
 | 命令执行 | [Exec 配方](docs/exec-command-recipes.md) · [Exec 排障](docs/troubleshooting-exec.md) |
 | 集成 | [嵌入指南](docs/embedding.md) · [npm 启动器](packages/npm-launcher/README.md) |
 | 安全与质量 | [安全策略](SECURITY.md) · [安全边界](docs/security-boundary.md) · [CI 与测试](docs/ci-and-tests.md) · [已知限制](docs/limitations.md) · [竞品分析](docs/competitive-analysis.md) |

@@ -22,7 +22,6 @@ export interface AuthConfig {
 }
 
 export interface RuntimeConfig {
-  computer_enabled: boolean;
   server_name_prefix: string;
   local_port: number;
   permission_mode: PermissionMode;
@@ -121,18 +120,9 @@ export interface WorkflowSnapshot {
   reviews: WorkflowReview[];
   approvals: WorkflowApproval[];
   worktrees: WorkflowWorktree[];
-  computer_sessions: ComputerSession[];
   warning: string | null;
 }
 
-export interface ComputerSession {
-  session_id: string;
-  app_name: string;
-  provider: "native" | "codex";
-  access: "observe" | "control";
-  status: string;
-  expires_at: number;
-}
 
 export interface DependencyStatus {
   uv: boolean;
