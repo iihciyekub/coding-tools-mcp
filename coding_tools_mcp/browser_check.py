@@ -184,7 +184,7 @@ async def run_check(
 
     async def execute() -> None:
         nonlocal driver, browser, context, page
-        from playwright.async_api import async_playwright
+        from playwright.async_api import async_playwright  # type: ignore[import-not-found]
 
         driver = await async_playwright().start()
         browser = await driver.chromium.launch(headless=True, timeout=min(timeout_ms, 10000))
