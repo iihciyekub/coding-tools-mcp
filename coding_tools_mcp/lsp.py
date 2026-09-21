@@ -27,6 +27,7 @@ LANGUAGE_SUFFIXES = {
     ".ts": "typescript",
     ".tsx": "typescript",
     ".rs": "rust",
+    ".swift": "swift",
 }
 DEFAULT_COMMANDS = {
     "python": [
@@ -36,11 +37,13 @@ DEFAULT_COMMANDS = {
     ],
     "typescript": [["typescript-language-server", "--stdio"]],
     "rust": [["rust-analyzer"]],
+    "swift": [["sourcekit-lsp"]],
 }
 COMMAND_ENV = {
     "python": "CODING_TOOLS_MCP_PYTHON_LSP_COMMAND",
     "typescript": "CODING_TOOLS_MCP_TYPESCRIPT_LSP_COMMAND",
     "rust": "CODING_TOOLS_MCP_RUST_LSP_COMMAND",
+    "swift": "CODING_TOOLS_MCP_SWIFT_LSP_COMMAND",
 }
 
 
@@ -204,6 +207,7 @@ class LanguageServer:
             ".ts": "typescript",
             ".tsx": "typescriptreact",
             ".rs": "rust",
+            ".swift": "swift",
         }.get(path.suffix.lower(), self.language)
         with self._document_lock:
             previous = self._opened.get(uri)
@@ -316,7 +320,7 @@ class LSPManager:
             if executable:
                 if language == "rust":
                     try:
-                        probe = subprocess.run(
+                        rust_probe = subprocess.run(
                             [executable, "--version"],
                             cwd=self.workspace,
                             env=self.env,
@@ -327,14 +331,34 @@ class LSPManager:
                         )
                     except (OSError, subprocess.TimeoutExpired):
                         continue
-                    if probe.returncode != 0:
+                    if rust_probe.returncode != 0:
                         continue
                 return [executable, *candidate[1:]]
+        if language == "swift":
+            xcrun = shutil.which("xcrun", path=self.env.get("PATH"))
+            if xcrun:
+                try:
+                    swift_probe = subprocess.run(
+                        [xcrun, "--find", "sourcekit-lsp"],
+                        cwd=self.workspace,
+                        env=self.env,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL,
+                        text=True,
+                        timeout=3,
+                        check=False,
+                    )
+                except (OSError, subprocess.TimeoutExpired):
+                    swift_probe = None
+                if swift_probe is not None and swift_probe.returncode == 0:
+                    resolved = swift_probe.stdout.strip()
+                    if resolved and Path(resolved).is_file():
+                        return [resolved]
         return None
 
     def status(self) -> dict[str, Any]:
         backends = []
-        for language in ("python", "typescript", "rust"):
+        for language in ("python", "typescript", "rust", "swift"):
             command = self._command(language)
             running = [server for (item_language, _), server in self._servers.items() if item_language == language]
             backends.append(
@@ -351,7 +375,7 @@ class LSPManager:
                     ),
                 }
             )
-        return {"ok": True, "backends": backends, "summary": "Inspected Python, TypeScript, and Rust LSP backends."}
+        return {"ok": True, "backends": backends, "summary": "Inspected Python, TypeScript, Rust, and Swift LSP backends."}
 
     def project_root_for(self, path: Path, language: str) -> Path:
         candidate = path.parent.resolve(strict=True)
@@ -361,9 +385,19 @@ class LSPManager:
             "python": ("pyrightconfig.json", "pyproject.toml", "setup.cfg", "setup.py"),
             "typescript": ("tsconfig.json", "jsconfig.json", "package.json"),
             "rust": ("Cargo.toml",),
+            "swift": ("Package.swift",),
         }.get(language, ())
         while True:
-            if any((candidate / name).is_file() for name in markers):
+            swift_container = False
+            if language == "swift":
+                try:
+                    swift_container = any(
+                        child.suffix in {".xcodeproj", ".xcworkspace"}
+                        for child in candidate.iterdir()
+                    )
+                except OSError:
+                    swift_container = False
+            if any((candidate / name).is_file() for name in markers) or swift_container:
                 return candidate
             if (candidate / ".git").exists():
                 return candidate

@@ -264,6 +264,137 @@ class WorkflowToolTests(unittest.TestCase):
         finally:
             runtime.close()
 
+    def test_apple_workspace_metadata_and_checks_are_cli_first(self) -> None:
+        (self.workspace / "Package.swift").write_text("// swift-tools-version: 6.0\n", encoding="utf-8")
+        swift_source = self.workspace / "Sources" / "Demo" / "App.swift"
+        swift_source.parent.mkdir(parents=True)
+        swift_source.write_text("public func answer() -> Int { 42 }\n", encoding="utf-8")
+        xcodeproj = self.workspace / "Demo.xcodeproj"
+        xcodeproj.mkdir()
+        (xcodeproj / "project.pbxproj").write_text("// fixture\n", encoding="utf-8")
+        runtime = self.runtime()
+        try:
+            with mock.patch(
+                "coding_tools_mcp.workspace_insight.apple_toolchain.probe",
+                return_value={
+                    "platform": "macos",
+                    "is_macos": True,
+                    "xcode_available": True,
+                    "xcode_version": "Xcode 18.0",
+                    "swift_available": True,
+                    "swift_version": "Swift 6.2",
+                    "sourcekit_lsp": "/usr/bin/sourcekit-lsp",
+                    "sdk_summary": ["macOS 26.0 -sdk macosx26.0"],
+                },
+            ), mock.patch(
+                "coding_tools_mcp.workspace_insight.shutil.which",
+                side_effect=lambda name, path=None: "/usr/bin/xcodebuild" if name == "xcodebuild" else None,
+            ):
+                overview = self.payload(runtime, "workspace_overview", {})
+                checks = self.payload(runtime, "checks_discover", {})
+            self.assertTrue(overview["apple"]["detected"])
+            self.assertEqual(overview["apple"]["xcodeproj"], ["Demo.xcodeproj"])
+            self.assertEqual(overview["apple"]["swift_packages"], ["Package.swift"])
+            self.assertEqual(overview["apple"]["xcode_version"], "Xcode 18.0")
+            check_ids = {item["id"] for item in checks["checks"]}
+            self.assertIn("swift:build", check_ids)
+            self.assertIn("swift:test", check_ids)
+            self.assertIn("xcode:list", check_ids)
+            xcode_check = next(item for item in checks["checks"] if item["id"] == "xcode:list")
+            self.assertIn("-project Demo.xcodeproj -list -json", xcode_check["command"])
+        finally:
+            runtime.close()
+
+    def test_checks_discover_recommends_existing_checks_from_git_changes(self) -> None:
+        (self.workspace / "pyproject.toml").write_text(
+            "[tool.pytest.ini_options]\naddopts = '-q'\n[tool.ruff]\nline-length = 100\n[tool.mypy]\npython_version = '3.11'\n",
+            encoding="utf-8",
+        )
+        (self.workspace / "package.json").write_text(
+            json.dumps({"scripts": {"test": "node --test", "lint": "eslint ."}}),
+            encoding="utf-8",
+        )
+        (self.workspace / "README.md").write_text("# Fixture\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=self.workspace, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=self.workspace, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.workspace, check=True)
+        subprocess.run(["git", "add", "."], cwd=self.workspace, check=True)
+        subprocess.run(["git", "commit", "-qm", "fixture"], cwd=self.workspace, check=True)
+
+        runtime = self.runtime()
+        try:
+            (self.workspace / "src" / "app.py").write_text(
+                "def answer():\n    return 43\n",
+                encoding="utf-8",
+            )
+            discovered = self.payload(runtime, "checks_discover", {})
+            self.assertEqual(discovered["recommendation_source"], "git_status")
+            self.assertEqual(discovered["changed_paths"], ["src/app.py"])
+            self.assertEqual(
+                discovered["recommended_check_ids"],
+                ["python:mypy", "python:ruff", "python:pytest"],
+            )
+            checks_by_id = {item["id"]: item for item in discovered["checks"]}
+            self.assertTrue(checks_by_id["python:mypy"]["recommended"])
+            self.assertEqual(checks_by_id["python:mypy"]["priority"], "medium")
+            self.assertFalse(checks_by_id["npm:test"]["recommended"])
+            self.assertTrue(checks_by_id["python:mypy"]["recommendation_reasons"])
+
+            subprocess.run(["git", "checkout", "--", "src/app.py"], cwd=self.workspace, check=True)
+            (self.workspace / "README.md").write_text("# Fixture\nDocs only.\n", encoding="utf-8")
+            docs_only = self.payload(runtime, "checks_discover", {})
+            self.assertEqual(docs_only["changed_paths"], ["README.md"])
+            self.assertEqual(docs_only["recommended_check_ids"], [])
+
+            explicit = self.payload(
+                runtime,
+                "checks_discover",
+                {"changed_paths": ["package.json"]},
+            )
+            self.assertEqual(explicit["recommendation_source"], "explicit")
+            self.assertEqual(explicit["recommended_check_ids"], ["npm:lint", "npm:test"])
+        finally:
+            runtime.close()
+
+    def test_repo_map_impact_uses_git_changes_and_finds_likely_tests(self) -> None:
+        (self.workspace / "src" / "calc.py").write_text(
+            "def compute_total(value):\n    return value + 1\n",
+            encoding="utf-8",
+        )
+        (self.workspace / "src" / "consumer.py").write_text(
+            "from .calc import compute_total\n\ndef render(value):\n    return compute_total(value)\n",
+            encoding="utf-8",
+        )
+        (self.workspace / "tests").mkdir()
+        (self.workspace / "tests" / "test_calc.py").write_text(
+            "from src.calc import compute_total\n\ndef test_total():\n    assert compute_total(1) == 2\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "init", "-q"], cwd=self.workspace, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=self.workspace, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.workspace, check=True)
+        subprocess.run(["git", "add", "."], cwd=self.workspace, check=True)
+        subprocess.run(["git", "commit", "-qm", "fixture"], cwd=self.workspace, check=True)
+        (self.workspace / "src" / "calc.py").write_text(
+            "def compute_total(value):\n    return value + 2\n",
+            encoding="utf-8",
+        )
+
+        runtime = self.runtime()
+        try:
+            mapping = self.payload(runtime, "repo_map", {"impact": True, "query": "compute_total"})
+            impact = mapping["impact"]
+            self.assertEqual(impact["source"], "git_status")
+            self.assertIn("src/calc.py", impact["changed_paths"])
+            impacted_paths = [item["path"] for item in impact["impacted_files"]]
+            self.assertIn("src/consumer.py", impacted_paths)
+            self.assertIn("tests/test_calc.py", impacted_paths)
+            self.assertIn("tests/test_calc.py", [item["path"] for item in impact["likely_tests"]])
+            self.assertIn("compute_total", [item["name"] for item in impact["changed_symbols"]])
+            self.assertIn("heuristic", impact["limitations"][0].lower())
+        finally:
+            runtime.close()
+
     def test_tasks_persist_and_reject_stale_revisions(self) -> None:
         first = self.runtime()
         created = self.payload(first, "task_create", {"title": "Fix", "objective": "Fix the bug"})
@@ -332,6 +463,35 @@ class WorkflowToolTests(unittest.TestCase):
             )
             self.assertEqual(replay["command_id"], first["command_id"])
             self.assertTrue(replay["deduplicated"])
+        finally:
+            runtime.close()
+
+    def test_checks_return_structured_failure_diagnostics(self) -> None:
+        (self.workspace / "Makefile").write_text(
+            "test:\n\t@printf 'src/app.py:7: error: bad assignment  [assignment]\\nFAILED tests/test_app.py::test_bad - AssertionError: nope\\n' >&2; exit 1\n",
+            encoding="utf-8",
+        )
+        runtime = self.runtime(permission_mode="dangerous")
+        try:
+            failed = self.payload(
+                runtime,
+                "checks_run",
+                {"check_id": "make:test", "yield_time_ms": 30000, "max_diagnostics": 10},
+            )
+            self.assertNotEqual(failed["exit_code"], 0)
+            self.assertEqual(failed["diagnostic_count"], 1)
+            self.assertEqual(failed["diagnostics"][0]["path"], "src/app.py")
+            self.assertEqual(failed["diagnostics"][0]["code"], "assignment")
+            self.assertEqual(failed["failing_tests"], ["tests/test_app.py::test_bad"])
+            evidence = self.payload(
+                runtime,
+                "checks_result",
+                {"check_run_id": failed["check_run_id"], "max_diagnostics": 10},
+            )
+            self.assertEqual(evidence["status"], "failed")
+            self.assertEqual(evidence["diagnostic_count"], 1)
+            self.assertEqual(evidence["failing_tests"], ["tests/test_app.py::test_bad"])
+            self.assertTrue(evidence["diagnostic_context"]["raw_output_authoritative"])
         finally:
             runtime.close()
 
@@ -587,6 +747,7 @@ class WorkflowToolTests(unittest.TestCase):
                 "CODING_TOOLS_MCP_PYTHON_LSP_COMMAND": "/missing/python-lsp",
                 "CODING_TOOLS_MCP_TYPESCRIPT_LSP_COMMAND": "/missing/typescript-lsp",
                 "CODING_TOOLS_MCP_RUST_LSP_COMMAND": "/missing/rust-lsp",
+                "CODING_TOOLS_MCP_SWIFT_LSP_COMMAND": "/missing/swift-lsp",
             },
         ):
             runtime = self.runtime()
@@ -598,6 +759,15 @@ class WorkflowToolTests(unittest.TestCase):
                 )
                 self.assertTrue(unavailable["isError"])
                 self.assertEqual(unavailable["structuredContent"]["error"]["code"], "LSP_UNAVAILABLE")
+                fallback = self.payload(
+                    runtime,
+                    "code_definition",
+                    {"symbol": "answer", "path": "src/app.py", "line": 1, "column": 5},
+                )
+                self.assertEqual(fallback["backend"], "syntax")
+                self.assertTrue(fallback["fallback_used"])
+                self.assertEqual(fallback["fallback_reason"], "LSP_UNAVAILABLE")
+                self.assertEqual(fallback["definitions"][0]["path"], "src/app.py")
             finally:
                 runtime.close()
 
@@ -610,6 +780,32 @@ class WorkflowToolTests(unittest.TestCase):
         manager = LSPManager(self.workspace, {"PATH": ""})
         try:
             self.assertEqual(manager.project_root_for(source, "rust"), crate.resolve())
+        finally:
+            manager.close()
+
+    def test_swift_lsp_uses_package_root_and_xcrun_discovery(self) -> None:
+        package = self.workspace / "swift-demo"
+        source = package / "Sources" / "Demo" / "App.swift"
+        source.parent.mkdir(parents=True)
+        (package / "Package.swift").write_text("// swift-tools-version: 6.0\n", encoding="utf-8")
+        source.write_text("public func answer() -> Int { 42 }\n", encoding="utf-8")
+        manager = LSPManager(self.workspace, {"PATH": "/usr/bin:/bin"})
+        fake_sourcekit = Path(self.temp.name) / "sourcekit-lsp"
+        fake_sourcekit.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake_sourcekit.chmod(0o755)
+        try:
+            self.assertEqual(manager.project_root_for(source, "swift"), package.resolve())
+            with mock.patch("coding_tools_mcp.lsp.shutil.which") as which, mock.patch(
+                "coding_tools_mcp.lsp.subprocess.run"
+            ) as run:
+                which.side_effect = lambda name, path=None: "/usr/bin/xcrun" if name == "xcrun" else None
+                run.return_value = subprocess.CompletedProcess(
+                    args=["xcrun", "--find", "sourcekit-lsp"],
+                    returncode=0,
+                    stdout=f"{fake_sourcekit}\n",
+                    stderr="",
+                )
+                self.assertEqual(manager._command("swift"), [str(fake_sourcekit)])
         finally:
             manager.close()
 
@@ -679,6 +875,22 @@ while True:
                     runtime, "lsp_references", {"path": "src/app.py", "line": 1, "column": 5}
                 )
                 self.assertEqual(references["count"], 1)
+                unified_definition = self.payload(
+                    runtime,
+                    "code_definition",
+                    {"symbol": "answer", "path": "src/app.py", "line": 1, "column": 5},
+                )
+                self.assertEqual(unified_definition["backend"], "lsp")
+                self.assertFalse(unified_definition["fallback_used"])
+                self.assertEqual(unified_definition["definitions"][0]["path"], "src/app.py")
+                unified_references = self.payload(
+                    runtime,
+                    "code_references",
+                    {"symbol": "answer", "path": "src/app.py", "line": 1, "column": 5},
+                )
+                self.assertEqual(unified_references["backend"], "lsp")
+                self.assertFalse(unified_references["fallback_used"])
+                self.assertEqual(unified_references["references"][0]["path"], "src/app.py")
                 diagnostics = self.payload(runtime, "lsp_diagnostics", {"path": "src/app.py"})
                 self.assertEqual(diagnostics["diagnostics"][0]["message"], "sample")
                 preview = self.payload(
@@ -688,6 +900,9 @@ while True:
                 )
                 self.assertFalse(preview["applied"])
                 self.assertEqual(preview["changes"][0]["edits"][0]["new_text"], "result")
+                self.assertEqual(preview["affected_paths"], ["src/app.py"])
+                self.assertTrue(preview["guarded_apply_required"])
+                self.assertEqual(preview["patch_plan"][0]["expected_sha256"], preview["changes"][0]["sha256"])
 
                 rust_definition = self.payload(
                     runtime,

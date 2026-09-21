@@ -339,11 +339,6 @@ const TRICKS = [
     cmd: "docker run … coding-tools-mcp-sandbox",
     note: "point an agent at untrusted code, then destroy the container",
   },
-  {
-    title: "Cloud sandbox via MCP",
-    cmd: "start_coding_tools_sandbox()",
-    note: "one tool call boots a tunnel-backed runner on GitHub Actions",
-  },
 ];
 
 const TricksScene: React.FC = () => (

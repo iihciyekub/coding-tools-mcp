@@ -24,25 +24,14 @@ permissions:
 
 jobs:
   check:
-    name: Check (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-14, windows-2025, ubuntu-24.04]
-    runs-on: ${{ matrix.os }}
+    name: Check (macOS)
+    runs-on: macos-15
     defaults:
       run:
         working-directory: apps/desktop-client
     steps:
       - name: Check out repository
         uses: actions/checkout@v6.0.2
-
-      - name: Install Linux webview dependencies
-        if: runner.os == 'Linux'
-        working-directory: .
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Set up Node
         uses: actions/setup-node@v6
@@ -90,11 +79,9 @@ jobs:
         run: cargo test prepare_and_reuse_external_runtime -- --ignored
 
       - name: Verify pinned macOS managed downloads
-        if: runner.os == 'macOS'
         working-directory: apps/desktop-client/src-tauri
         run: cargo test downloads_and_verifies_pinned_macos_tools -- --ignored
 
       - name: Prepare an external runtime without uv
-        if: runner.os != 'Windows'
         working-directory: apps/desktop-client/src-tauri
         run: cargo test prepare_external_runtime_without_uv -- --ignored

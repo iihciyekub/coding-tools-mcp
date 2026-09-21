@@ -169,6 +169,7 @@ class CommandRun:
     lock: threading.Lock = field(default_factory=threading.Lock)
     reader_threads: list[threading.Thread] = field(default_factory=list)
     started_at: float = field(default_factory=time.time)
+    last_output_at: float | None = None
     completed_at: float | None = None
     closed: bool = False
     exit_code: int | None = None
@@ -194,6 +195,7 @@ class CommandRun:
 
     def append_stdout(self, chunk: bytes) -> None:
         with self.lock:
+            self.last_output_at = time.time()
             head_capacity = self.head_buffer_limit - len(self.stdout_head)
             if head_capacity > 0:
                 self.stdout_head.extend(chunk[:head_capacity])
@@ -212,6 +214,7 @@ class CommandRun:
 
     def append_stderr(self, chunk: bytes) -> None:
         with self.lock:
+            self.last_output_at = time.time()
             head_capacity = self.head_buffer_limit - len(self.stderr_head)
             if head_capacity > 0:
                 self.stderr_head.extend(chunk[:head_capacity])

@@ -20,6 +20,7 @@ from unittest.mock import patch
 from coding_tools_mcp import server as server_module
 from coding_tools_mcp import processes as processes_module
 from coding_tools_mcp import telemetry as telemetry_module
+from coding_tools_mcp.tool_catalog import TOOL_GUIDES
 from coding_tools_mcp.patching import (
     AtomicPatchCommitter,
     FileBaseline,
@@ -666,7 +667,23 @@ class RuntimeHelperTests(unittest.TestCase):
                     return "/usr/bin/python3"
                 return real_which(name, *args, **kwargs)
 
-            with patch.object(server_module.shutil, "which", side_effect=fake_which):
+            with patch.object(server_module.shutil, "which", side_effect=fake_which), patch.object(
+                server_module.apple_toolchain,
+                "probe",
+                return_value={
+                    "platform": "macos",
+                    "is_macos": True,
+                    "architecture": "arm64",
+                    "xcode_available": True,
+                    "xcode_version": "Xcode 18.0",
+                    "swift_available": True,
+                    "swift_version": "Swift 6.2",
+                    "sourcekit_lsp": "/usr/bin/sourcekit-lsp",
+                    "codesign": "/usr/bin/codesign",
+                    "notarytool": "/usr/bin/notarytool",
+                    "homebrew": "/opt/homebrew/bin/brew",
+                },
+            ):
                 result = runtime.call_tool("runtime_doctor", {})
 
             payload = result["structuredContent"]
@@ -675,6 +692,9 @@ class RuntimeHelperTests(unittest.TestCase):
             self.assertEqual(payload["network"]["mode"], "allowlist")
             self.assertEqual(payload["network"]["allow_domains"], ["github.com"])
             self.assertEqual(payload["network"]["enforcement"], "command-policy")
+            self.assertEqual(payload["apple"]["architecture"], "arm64")
+            self.assertTrue(payload["apple"]["xcode_available"])
+            self.assertEqual(payload["apple"]["sourcekit_lsp"], "/usr/bin/sourcekit-lsp")
             self.assertIn("PYTHON_ALIAS_MISSING", self.agent_text(result))
             runtime.close()
 
@@ -1224,6 +1244,38 @@ Maven home: /usr/share/maven
             core.close()
             workflow.close()
 
+    def test_tool_search_catalog_covers_every_available_tool_with_exact_schema(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            runtime = Runtime(
+                workspace,
+                enable_workflow_tools=True,
+                defer_workflow_tools=True,
+                permission_mode="host",
+            )
+            try:
+                schemas = server_module.input_schemas()
+                available = set(runtime._available_tool_names)
+                deferred = set(runtime._deferred_tool_names)
+                self.assertEqual(available, set(TOOL_GUIDES))
+                self.assertEqual(available, set(schemas))
+                for name in sorted(available):
+                    with self.subTest(name=name):
+                        result = runtime.call_tool(
+                            "tool_search",
+                            {"query": name, "include_schema": True, "limit": 3},
+                        )
+                        self.assertFalse(result["isError"], result)
+                        matches = result["structuredContent"]["matches"]
+                        exact = next((item for item in matches if item["name"] == name), None)
+                        self.assertIsNotNone(exact, matches)
+                        assert exact is not None
+                        self.assertEqual(exact["input_schema"], schemas[name])
+                        self.assertEqual(bool(exact["deferred"]), name in deferred)
+                        self.assertTrue(str(exact["use_when"]).strip())
+            finally:
+                runtime.close()
+
     def test_deferred_workflow_tools_are_searched_and_invoked_through_gateway(self) -> None:
         with TemporaryDirectory() as tmp:
             workspace = Path(tmp)
@@ -1765,6 +1817,38 @@ Maven home: /usr/share/maven
                 )
             self.assertEqual(conflict.exception.code, "OPERATION_CONFLICT")
             self.assertEqual((workspace / "side-effect.txt").read_text(encoding="utf-8"), "x")
+
+    def test_command_activity_reports_long_silence_without_killing_process(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp), permission_mode="trusted")
+            self.addCleanup(runtime.close)
+            script = "import time; time.sleep(10)"
+            started = runtime.exec_command(
+                {
+                    "cmd": f"{sys.executable} -c {script!r}",
+                    "timeout_ms": 20000,
+                    "yield_time_ms": 0,
+                }
+            )
+            command_id = str(started["command_id"])
+            command = runtime._get_command(command_id)
+            command.started_at = time.time() - 61
+            command.last_output_at = None
+            status = runtime.get_command({"command_id": command_id})
+            self.assertEqual(status["status"], "running")
+            self.assertEqual(status["activity_state"], "long_silent")
+            self.assertTrue(status["needs_attention"])
+            self.assertGreaterEqual(status["idle_seconds"], 60)
+            self.assertEqual(status["attention"]["reason"], "no_output_for_60_seconds")
+            listed = runtime.list_commands({"max_results": 10})
+            listed_item = next(item for item in listed["commands"] if item["command_id"] == command_id)
+            self.assertEqual(listed_item["activity_state"], "long_silent")
+            self.assertTrue(listed_item["needs_attention"])
+            polled = runtime.write_stdin({"command_id": command_id, "chars": "", "yield_time_ms": 0})
+            self.assertEqual(polled["activity_state"], "long_silent")
+            self.assertTrue(polled["needs_attention"])
+            self.assertIsNone(command.process.poll())
+            runtime.kill_command({"command_id": command_id, "signal": "KILL", "wait_ms": 1000})
 
     @unittest.skipIf(os.name == "nt", "this build explicitly reports ConPTY as unsupported")
     def test_exec_command_tty_uses_a_real_pseudo_terminal(self) -> None:

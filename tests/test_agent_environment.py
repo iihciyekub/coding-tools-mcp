@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from coding_tools_mcp import agent_environment
+from coding_tools_mcp.errors import JsonRpcError
 from coding_tools_mcp.server import Runtime
 
 
@@ -107,6 +108,34 @@ enabled = false
             result = runtime.call_tool("agent_environment", {"provider": "codex", "max_items": 20})
         self.assertFalse(result["isError"], result)
         self.assertEqual(result["structuredContent"]["providers"][0]["id"], "codex")
+
+    def test_filtered_search_finds_capabilities_without_returning_full_metadata(self) -> None:
+        self._codex_fixture()
+        with mock.patch.object(agent_environment, "_home", return_value=self.home), mock.patch(
+            "coding_tools_mcp.agent_environment.shutil.which", return_value=None
+        ):
+            skill_result = agent_environment.discover_agent_environment(
+                provider="codex", query="browser", kind="plugin_skill", max_items=10
+            )
+            worktree_result = agent_environment.discover_agent_environment(
+                provider="codex", query="annotation", kind="worktree", max_items=10
+            )
+        self.assertEqual(skill_result["match_count"], 1)
+        self.assertEqual(skill_result["matches"][0]["name"], "browser-skill")
+        self.assertEqual(skill_result["matches"][0]["kind"], "plugin_skill")
+        self.assertNotIn("skills", skill_result["providers"][0])
+        self.assertEqual(worktree_result["match_count"], 1)
+        self.assertEqual(worktree_result["matches"][0]["value"], "worktrees/annotation-engine-v3")
+
+    def test_agent_environment_tool_validates_search_kind(self) -> None:
+        workspace = self.home / "workspace-invalid-kind"
+        workspace.mkdir()
+        runtime = Runtime(workspace, permission_mode="host")
+        self.addCleanup(runtime.close)
+        with self.assertRaises(JsonRpcError) as caught:
+            runtime.call_tool("agent_environment", {"kind": "not-a-kind"})
+        self.assertEqual(caught.exception.code, -32602)
+        self.assertEqual(caught.exception.data, {"reason": "invalid_arguments", "code": "INVALID_ARGUMENT"})
 
 
 if __name__ == "__main__":

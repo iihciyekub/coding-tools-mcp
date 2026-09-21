@@ -16,6 +16,7 @@ from typing import Any, Iterable
 
 
 MAX_DISCOVERY_ITEMS = 500
+SEARCH_KINDS = {"all", "skill", "plugin_skill", "plugin", "rule", "worktree", "capability"}
 
 
 @dataclass(frozen=True)
@@ -192,8 +193,8 @@ def _codex_plugin_skills(root: Path, *, limit: int) -> tuple[list[dict[str, Any]
             data = json.loads(manifest.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             continue
-        plugin_name = data.get("name") if isinstance(data, dict) else None
-        if not isinstance(plugin_name, str) or not plugin_name:
+        manifest_name = data.get("name") if isinstance(data, dict) else None
+        if not isinstance(manifest_name, str) or not manifest_name:
             continue
         skills_dir = manifest.parent.parent / "skills"
         if not skills_dir.is_dir():
@@ -216,7 +217,7 @@ def _codex_plugin_skills(root: Path, *, limit: int) -> tuple[list[dict[str, Any]
                 relative_path = None
             items.append({
                 "name": skill_file.parent.name,
-                "plugin": plugin_name,
+                "plugin": manifest_name,
                 "plugin_id": plugin_id,
                 "path": relative_path or str(skill_file),
                 "source": "plugin",
@@ -318,13 +319,80 @@ def _generic_metadata(root: Path, *, limit: int) -> dict[str, Any]:
     }
 
 
-def discover_agent_environment(*, provider: str = "all", max_items: int = 200) -> dict[str, Any]:
+def _matches_query(value: Any, query: str) -> bool:
+    if not query:
+        return True
+    needle = query.casefold()
+    if isinstance(value, dict):
+        fields = [str(item) for item in value.values() if isinstance(item, (str, int, float, bool))]
+        return any(needle in field.casefold() for field in fields)
+    return needle in str(value).casefold()
+
+
+def _provider_matches(
+    provider: dict[str, Any],
+    *,
+    query: str,
+    kind: str,
+    remaining: int,
+) -> tuple[list[dict[str, Any]], bool]:
+    provider_id = str(provider.get("id", ""))
+    matches: list[dict[str, Any]] = []
+    truncated = False
+
+    def add(match_kind: str, value: Any) -> None:
+        nonlocal truncated
+        if kind not in {"all", match_kind} or not _matches_query(value, query):
+            return
+        if len(matches) >= remaining:
+            truncated = True
+            return
+        item: dict[str, Any] = {"provider": provider_id, "kind": match_kind}
+        if isinstance(value, dict):
+            item.update(value)
+        else:
+            item["name"] = str(value)
+            item["value"] = value
+        matches.append(item)
+
+    for item in provider.get("skills", []):
+        if isinstance(item, dict):
+            add("skill", item)
+    for item in provider.get("plugin_skills", []):
+        if isinstance(item, dict):
+            add("plugin_skill", item)
+    for item in provider.get("enabled_plugins", []):
+        if isinstance(item, dict):
+            add("plugin", item)
+    for item in provider.get("rules", []):
+        add("rule", item)
+    for item in provider.get("worktrees", []):
+        add("worktree", item)
+    capabilities = provider.get("capabilities")
+    if isinstance(capabilities, dict):
+        for capability_name, available in capabilities.items():
+            add("capability", {"name": str(capability_name), "available": bool(available)})
+    return matches, truncated
+
+
+def discover_agent_environment(
+    *,
+    provider: str = "all",
+    max_items: int = 200,
+    query: str = "",
+    kind: str = "all",
+) -> dict[str, Any]:
     if max_items < 1 or max_items > MAX_DISCOVERY_ITEMS:
         raise ValueError(f"max_items must be between 1 and {MAX_DISCOVERY_ITEMS}")
     specs = _agent_specs()
     known = {spec.id for spec in specs}
     if provider != "all" and provider not in known:
         raise ValueError(f"unknown provider: {provider}")
+    if kind not in SEARCH_KINDS:
+        raise ValueError(f"unknown kind: {kind}")
+    query = query.strip()
+    search_active = bool(query) or kind != "all"
+    discovery_limit = MAX_DISCOVERY_ITEMS if search_active else max_items
     providers: list[dict[str, Any]] = []
     for spec in specs:
         if provider != "all" and spec.id != provider:
@@ -340,9 +408,13 @@ def discover_agent_environment(*, provider: str = "all", max_items: int = 200) -
             "cli": cli,
         }
         if root is not None:
-            item.update(_codex_metadata(root, limit=max_items) if spec.id == "codex" else _generic_metadata(root, limit=max_items))
+            item.update(
+                _codex_metadata(root, limit=discovery_limit)
+                if spec.id == "codex"
+                else _generic_metadata(root, limit=discovery_limit)
+            )
         providers.append(item)
-    return {
+    result: dict[str, Any] = {
         "ok": True,
         "providers": providers,
         "count": len(providers),
@@ -350,4 +422,39 @@ def discover_agent_environment(*, provider: str = "all", max_items: int = 200) -
         "sensitive_contents_read": False,
         "summary": f"Discovered metadata for {len(providers)} local agent environment(s).",
     }
+    if search_active:
+        matches: list[dict[str, Any]] = []
+        matches_truncated = False
+        for item in providers:
+            remaining = max(0, max_items - len(matches))
+            if remaining == 0:
+                matches_truncated = True
+                break
+            provider_matches, provider_truncated = _provider_matches(
+                item,
+                query=query,
+                kind=kind,
+                remaining=remaining,
+            )
+            matches.extend(provider_matches)
+            matches_truncated = matches_truncated or provider_truncated
+        result["providers"] = [
+            {
+                "id": item.get("id"),
+                "display_name": item.get("display_name"),
+                "installed": item.get("installed"),
+                "home": item.get("home"),
+                "cli": item.get("cli"),
+            }
+            for item in providers
+        ]
+        result.update(
+            query=query,
+            kind=kind,
+            matches=matches,
+            match_count=len(matches),
+            matches_truncated=matches_truncated,
+            summary=f"Found {len(matches)} matching local agent capability item(s).",
+        )
+    return result
 

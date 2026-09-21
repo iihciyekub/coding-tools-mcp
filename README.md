@@ -113,13 +113,7 @@ docker run --rm --init -it -p 8765:8765 -v "$PWD:/workspace" coding-tools-mcp-sa
 A containerized server with toolchains and caches preconfigured, safe to point
 at a sketchy PR and destroy afterwards. → [docs/docker.md](docs/docker.md)
 
-**4. Spin up a cloud sandbox with one MCP call.** The bundled
-[Cloudflare Worker control plane](infra/cloudflare/sandbox-control/README.md) exposes
-`start_coding_tools_sandbox` as an MCP tool: one call dispatches a GitHub
-Actions runner that boots the Docker sandbox and publishes it behind an
-authenticated Cloudflare Tunnel. Ephemeral compute, no server of your own.
-
-**5. Drive it from a GUI.**
+**4. Drive it from a GUI.**
 
 ```bash
 cd apps/desktop-client
@@ -129,8 +123,8 @@ npm run tauri dev
 
 The Tauri desktop app provides per-workspace profiles, server and tunnel
 start/stop, OS-keychain credential storage, clipboard helpers, and live health
-checks. It uses the native system webview and ships one React UI for macOS,
-Windows, and Linux. English and 简体中文. →
+checks. The project is macOS-first and macOS is the supported/tested desktop
+platform. English and 简体中文. →
 [Desktop client](apps/desktop-client/README.md)
 
 **6. Keep an interactive command alive.** `exec_command` starts a REPL or
@@ -233,7 +227,7 @@ measured. More: [COMPLIANCE.md](COMPLIANCE.md) · [BENCHMARK.md](BENCHMARK.md) �
 | --- | --- |
 | Documentation map | [Browse docs by topic](docs/README.md) |
 | Getting started | [Quickstart](docs/quickstart.md) · [Client configuration](docs/mcp-client-config.md) · [Troubleshooting](docs/troubleshooting.md) |
-| Remote & sandboxed | [Remote MCP](docs/remote-mcp.md) · [Docker sandbox](docs/docker.md) · [Cloud sandbox worker](infra/cloudflare/sandbox-control/README.md) |
+| Remote & sandboxed | [Remote MCP](docs/remote-mcp.md) · [Docker sandbox](docs/docker.md) |
 | Tools & contract | [Tools and schemas](docs/tools-and-schemas.md) · [Runtime contract](docs/runtime-contract-v0.4.md) · [Migrating to 0.4](docs/migration-0.4.md) · [Permission modes](docs/permission-modes.md) |
 | Execution | [Exec recipes](docs/exec-command-recipes.md) · [Exec troubleshooting](docs/troubleshooting-exec.md) |
 | Integration | [Embedding](docs/embedding.md) · [npm launcher](packages/npm-launcher/README.md) |

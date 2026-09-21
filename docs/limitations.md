@@ -3,9 +3,13 @@
 - `exec_command` is policy-constrained and uses Linux Landlock filesystem confinement where available, but it is not a complete OS/container sandbox.
 - Command classification uses string/path checks for non-filesystem risk classes and can miss behavior hidden inside interpreters, package scripts, static binaries, or generated files.
 - Network denial is policy-based unless the operator runs the server in an external sandbox with egress controls.
-- Non-Linux platforms or Linux kernels without Landlock are not production targets for `exec_command` without an external sandbox.
-- This build uses real POSIX PTYs but does not implement Windows ConPTY;
-  `tty=true` returns `TTY_UNSUPPORTED` on Windows.
+- macOS is the supported/tested product platform. Linux/Windows behavior that
+  continues to work through portable Python/Git/Shell code is best-effort and is
+  not a compatibility target for new features.
+- Landlock is Linux-specific and is therefore not the primary macOS isolation
+  mechanism. On macOS, command safety relies on the runtime permission/command
+  policy plus the operator's process/user boundary; use an external sandbox when
+  stronger OS-level isolation is required.
 - Portable filesystems do not provide a transaction across unrelated
   directories. `apply_patch` keeps same-directory backups and rolls back the
   full staged set, but a storage failure that also prevents rollback is surfaced

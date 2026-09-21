@@ -4,13 +4,15 @@ import hashlib
 import json
 import os
 import re
+import shlex
+import shutil
 import subprocess
 import tomllib
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from . import code_intel
+from . import apple_toolchain, code_intel
 from .project_context import ProjectContext
 from .repositories import git_environment
 
@@ -19,6 +21,7 @@ MANIFEST_NAMES = {
     "Cargo.toml": "rust",
     "go.mod": "go",
     "package.json": "node",
+    "Package.swift": "swift",
     "pyproject.toml": "python",
     "requirements.txt": "python",
     "setup.cfg": "python",
@@ -86,7 +89,14 @@ def _git_files(workspace: Path, *, max_files: int) -> tuple[list[Path], bool]:
     return sorted(fallback_paths), False
 
 
-def workspace_overview(workspace: Path, context: ProjectContext, args: dict[str, Any], *, target: Path | None = None) -> dict[str, Any]:
+def workspace_overview(
+    workspace: Path,
+    context: ProjectContext,
+    args: dict[str, Any],
+    *,
+    target: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
     target = target or workspace
     max_files = int(args.get("max_files", 20_000))
     files, truncated = _git_files(target, max_files=max_files)
@@ -94,6 +104,9 @@ def workspace_overview(workspace: Path, context: ProjectContext, args: dict[str,
     entrypoints: list[str] = []
     languages: Counter[str] = Counter()
     directories: Counter[str] = Counter()
+    xcode_projects: set[str] = set()
+    xcode_workspaces: set[str] = set()
+    swift_packages: set[str] = set()
     for path in files:
         try:
             rel = path.relative_to(workspace).as_posix()
@@ -101,6 +114,14 @@ def workspace_overview(workspace: Path, context: ProjectContext, args: dict[str,
             continue
         if path.name in MANIFEST_NAMES:
             manifests.append({"path": rel, "ecosystem": MANIFEST_NAMES[path.name]})
+            if path.name == "Package.swift":
+                swift_packages.add(rel)
+        parts = Path(rel).parts
+        for index, part in enumerate(parts):
+            if part.endswith(".xcodeproj"):
+                xcode_projects.add(Path(*parts[: index + 1]).as_posix())
+            elif part.endswith(".xcworkspace"):
+                xcode_workspaces.add(Path(*parts[: index + 1]).as_posix())
         if path.name in ENTRYPOINT_NAMES or path.name.startswith("README"):
             entrypoints.append(rel)
         language = LANGUAGE_SUFFIXES.get(path.suffix.lower())
@@ -108,6 +129,23 @@ def workspace_overview(workspace: Path, context: ProjectContext, args: dict[str,
             languages[language] += 1
         top = rel.split("/", 1)[0]
         directories[top] += 1
+
+    apple_detected = bool(xcode_projects or xcode_workspaces or swift_packages or languages.get("Swift"))
+    apple: dict[str, Any] = {
+        "detected": apple_detected,
+        "xcodeproj": sorted(xcode_projects),
+        "xcworkspace": sorted(xcode_workspaces),
+        "swift_packages": sorted(swift_packages),
+    }
+    if apple_detected:
+        apple.update(
+            apple_toolchain.probe(
+                cwd=target,
+                env=dict(env or os.environ),
+                include_sdks=True,
+            )
+        )
+
     return {
         "ok": True,
         "workspace": str(workspace),
@@ -130,6 +168,7 @@ def workspace_overview(workspace: Path, context: ProjectContext, args: dict[str,
             "nested": list(context.nested_files),
             "warnings": list(context.warnings),
         },
+        "apple": apple,
         "summary": f"Scanned {len(files)} workspace files and found {len(manifests)} project manifests.",
     }
 
@@ -234,7 +273,7 @@ def repo_map(workspace: Path, target: Path, args: dict[str, Any]) -> dict[str, A
             }
         )
     files = [{"path": path, "symbols": items} for path, items in grouped.items()]
-    return {
+    result: dict[str, Any] = {
         "ok": True,
         "query": query or None,
         "root": target.relative_to(workspace).as_posix() if target != workspace else ".",
@@ -247,9 +286,331 @@ def repo_map(workspace: Path, target: Path, args: dict[str, Any]) -> dict[str, A
         "truncated": bool(source_truncated or candidates_truncated),
         "summary": f"Mapped {len(symbols)} symbols across {len(files)} files.",
     }
+    if bool(args.get("impact", False)):
+        result["impact"] = impact_analysis(workspace, target, args)
+    return result
 
 
-def discover_checks(workspace: Path, target: Path) -> list[dict[str, Any]]:
+IMPACT_GENERIC_SYMBOLS = frozenset(
+    {
+        "main",
+        "run",
+        "add",
+        "call",
+        "close",
+        "create",
+        "delete",
+        "find",
+        "new",
+        "init",
+        "get",
+        "list",
+        "load",
+        "open",
+        "parse",
+        "read",
+        "remove",
+        "resolve",
+        "save",
+        "set",
+        "start",
+        "status",
+        "stop",
+        "update",
+        "write",
+        "data",
+        "value",
+        "result",
+        "error",
+        "test",
+    }
+)
+
+
+def _is_test_path(path: str) -> bool:
+    lower = path.casefold()
+    parts = Path(lower).parts
+    name = Path(lower).name
+    return (
+        any(part in {"test", "tests", "__tests__", "spec", "specs"} for part in parts)
+        or name.startswith("test_")
+        or name.endswith("_test.py")
+        or name.endswith("_test.go")
+        or ".test." in name
+        or ".spec." in name
+        or name.endswith("tests.swift")
+    )
+
+
+def _impact_language_family(path: str) -> str | None:
+    suffix = Path(path).suffix.lower()
+    if suffix in {".py", ".pyi"}:
+        return "python"
+    if suffix in {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"}:
+        return "javascript"
+    if suffix == ".rs":
+        return "rust"
+    if suffix == ".go":
+        return "go"
+    if suffix == ".swift":
+        return "swift"
+    if suffix in {".java", ".kt", ".kts"}:
+        return "jvm"
+    if suffix in {".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh"}:
+        return "c_family"
+    return None
+
+
+def impact_analysis(workspace: Path, target: Path, args: dict[str, Any]) -> dict[str, Any]:
+    changed_paths = [str(item) for item in args.get("changed_paths", []) if str(item)]
+    max_files = int(args.get("max_files", 2_000))
+    max_impact_files = int(args.get("max_impact_files", 100))
+    max_impact_symbols = int(args.get("max_impact_symbols", 40))
+    changed_set = set(changed_paths)
+    warnings: list[str] = []
+    if bool(args.get("impact_git_status_truncated")):
+        warnings.append("git status changed-path seed was truncated to the configured limit")
+    seed_candidates: list[dict[str, Any]] = []
+    seen_symbol_names: set[str] = set()
+
+    code_changed_paths = [
+        rel
+        for rel in changed_paths
+        if (workspace / rel).is_file()
+        and (workspace / rel).suffix.lower() in code_intel.SUPPORTED_SUFFIXES
+    ]
+    production_changed_paths = [rel for rel in code_changed_paths if not _is_test_path(rel)]
+    seed_paths = production_changed_paths or code_changed_paths
+
+    for rel in seed_paths:
+        path = workspace / rel
+        try:
+            path.relative_to(target)
+        except ValueError:
+            warnings.append(f"changed path outside repo_map target ignored: {rel}")
+            continue
+        if not path.is_file() or path.suffix.lower() not in code_intel.SUPPORTED_SUFFIXES:
+            continue
+        symbol_result = code_intel.symbols(
+            workspace,
+            path,
+            {"max_files": 1, "max_results": min(200, max_impact_symbols * 4)},
+        )
+        for item in symbol_result.get("symbols", []):
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", ""))
+            if (
+                len(name) < 3
+                or len(name) > 128
+                or name.startswith("test_")
+                or name.casefold() in IMPACT_GENERIC_SYMBOLS
+                or (name.startswith("__") and name.endswith("__"))
+                or name in seen_symbol_names
+            ):
+                continue
+            seen_symbol_names.add(name)
+            seed_candidates.append(
+                {
+                    "name": name,
+                    "qualified_name": item.get("qualified_name"),
+                    "kind": item.get("kind"),
+                    "path": item.get("path"),
+                    "line": item.get("line"),
+                    "language_family": _impact_language_family(rel),
+                }
+            )
+
+    kind_weight = {
+        "class": 6,
+        "struct": 6,
+        "interface": 6,
+        "protocol": 6,
+        "trait": 6,
+        "enum": 5,
+        "type": 5,
+        "function": 3,
+    }
+
+    def seed_score(item: dict[str, Any]) -> tuple[int, int, str]:
+        name = str(item.get("name", ""))
+        kind = str(item.get("kind", ""))
+        score = kind_weight.get(kind, 1)
+        score += min(len(name), 30) // 10
+        if name[:1].isupper():
+            score += 2
+        if name.startswith("_"):
+            score -= 2
+        return (-score, -len(name), name)
+
+    seed_candidates.sort(key=seed_score)
+    seed_symbols = seed_candidates[:max_impact_symbols]
+    symbol_languages = {
+        str(item["name"]): str(item["language_family"])
+        for item in seed_symbols
+        if item.get("language_family")
+    }
+
+    reference_result = code_intel.references_for_symbols(
+        workspace,
+        target,
+        [str(item["name"]) for item in seed_symbols],
+        max_results=max(500, max_impact_files * 50),
+        max_files=max_files,
+    )
+    aggregate: dict[str, dict[str, Any]] = {}
+    for ref in reference_result.get("references", []):
+        if not isinstance(ref, dict):
+            continue
+        ref_path = str(ref.get("path", ""))
+        if not ref_path or ref_path in changed_set:
+            continue
+        relation = str(ref.get("relation", "reference"))
+        symbol = str(ref.get("symbol", ""))
+        source_language = symbol_languages.get(symbol)
+        reference_language = _impact_language_family(ref_path)
+        if (
+            relation == "reference"
+            and source_language is not None
+            and reference_language is not None
+            and source_language != reference_language
+        ):
+            continue
+        item = aggregate.setdefault(
+            ref_path,
+            {
+                "path": ref_path,
+                "reference_count": 0,
+                "symbols": set(),
+                "lines": set(),
+                "relations": Counter(),
+            },
+        )
+        item["reference_count"] += 1
+        if symbol:
+            item["symbols"].add(symbol)
+        line = ref.get("line")
+        if isinstance(line, int):
+            item["lines"].add(line)
+        item["relations"][relation] += 1
+
+    generic_path_tokens = {
+        "agent",
+        "check",
+        "code",
+        "common",
+        "core",
+        "diagnostics",
+        "environment",
+        "process",
+        "processes",
+        "runtime",
+        "server",
+        "store",
+        "tool",
+        "tools",
+        "utils",
+        "workflow",
+        "workspace",
+    }
+    changed_stems = {
+        token
+        for rel in seed_paths
+        for token in re.findall(r"[A-Za-z0-9]+", Path(rel).stem.casefold())
+        if len(token) >= 4
+        and token not in generic_path_tokens
+        and token not in {"test", "spec", "index", "main"}
+    }
+    candidate_files, filename_scan_truncated = _git_files(workspace, max_files=max_files)
+    for candidate in candidate_files:
+        try:
+            candidate.relative_to(target)
+            rel = candidate.relative_to(workspace).as_posix()
+        except ValueError:
+            continue
+        if (
+            rel in changed_set
+            or candidate.suffix.lower() not in code_intel.SUPPORTED_SUFFIXES
+            or not _is_test_path(rel)
+        ):
+            continue
+        lower = rel.casefold()
+        if changed_stems and any(token in lower for token in changed_stems):
+            item = aggregate.setdefault(
+                rel,
+                {
+                    "path": rel,
+                    "reference_count": 0,
+                    "symbols": set(),
+                    "lines": set(),
+                    "relations": Counter(),
+                },
+            )
+            item["filename_match"] = True
+
+    impacted: list[dict[str, Any]] = []
+    for raw in aggregate.values():
+        symbols = sorted(str(item) for item in raw["symbols"])
+        reference_count = int(raw["reference_count"])
+        relations = raw["relations"] if isinstance(raw.get("relations"), Counter) else Counter()
+        score = (
+            (len(symbols) * 3)
+            + min(reference_count, 5)
+            + (min(int(relations.get("call", 0)), 4) * 2)
+            + min(int(relations.get("import", 0)), 3)
+            + (1 if raw.get("filename_match") else 0)
+        )
+        level = "high" if score >= 10 else "medium" if score >= 5 else "low"
+        impacted.append(
+            {
+                "path": raw["path"],
+                "level": level,
+                "score": score,
+                "reference_count": reference_count,
+                "symbols": symbols[:30],
+                "reference_lines": sorted(int(line) for line in raw["lines"])[:30],
+                "relations": dict(sorted(relations.items())),
+                "is_test": _is_test_path(str(raw["path"])),
+                "filename_match": bool(raw.get("filename_match")),
+            }
+        )
+    impacted.sort(key=lambda item: (-int(item["score"]), str(item["path"])))
+    impacted_truncated = len(impacted) > max_impact_files
+    impacted = impacted[:max_impact_files]
+    likely_tests = [item for item in impacted if item["is_test"]]
+
+    return {
+        "source": str(args.get("impact_source", "explicit")),
+        "changed_paths": changed_paths,
+        "changed_path_count": len(changed_paths),
+        "changed_symbols": seed_symbols,
+        "changed_symbol_count": len(seed_symbols),
+        "impacted_files": impacted,
+        "impacted_file_count": len(impacted),
+        "likely_tests": likely_tests,
+        "likely_test_count": len(likely_tests),
+        "reference_count": int(reference_result.get("count", 0)),
+        "scan_complete": bool(reference_result.get("scan_complete", False)) and not filename_scan_truncated,
+        "truncated": bool(reference_result.get("truncated", False) or filename_scan_truncated or impacted_truncated),
+        "coverage": "changed-file symbols + exact identifier references + test filename heuristics",
+        "limitations": [
+            "This is a deterministic heuristic, not a compiler call graph.",
+            "Dynamic dispatch, reflection, generated code, and deleted-file symbols may be missed.",
+        ],
+        "warnings": warnings,
+        "summary": (
+            f"Impact analysis found {len(impacted)} candidate file(s) and {len(likely_tests)} likely test file(s) "
+            f"from {len(seed_symbols)} changed symbol(s)."
+        ),
+    }
+
+
+def discover_checks(
+    workspace: Path,
+    target: Path,
+    *,
+    env: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
     seen: set[str] = set()
 
@@ -303,7 +664,131 @@ def discover_checks(workspace: Path, target: Path) -> list[dict[str, Any]]:
         add("cargo:test", "cargo test", "Cargo.toml", "test")
     if (target / "go.mod").is_file():
         add("go:test", "go test ./...", "go.mod", "test")
+    if (target / "Package.swift").is_file():
+        add("swift:build", "swift build", "Package.swift", "build")
+        add("swift:test", "swift test", "Package.swift", "test")
+
+    command_env = dict(env or os.environ)
+    path_value = command_env.get("PATH") or command_env.get("Path") or ""
+    xcodebuild = shutil.which("xcodebuild", path=path_value)
+    xcode_containers = sorted(
+        [*target.glob("*.xcworkspace"), *target.glob("*.xcodeproj")],
+        key=lambda path: path.name,
+    )
+    if xcodebuild and len(xcode_containers) == 1:
+        container = xcode_containers[0]
+        flag = "-workspace" if container.suffix == ".xcworkspace" else "-project"
+        command = f"{shlex.quote(xcodebuild)} {flag} {shlex.quote(container.name)} -list -json"
+        add("xcode:list", command, container.name, "metadata")
     return checks
+
+
+CHECK_ECOSYSTEM_BY_LANGUAGE = {
+    "python": {"python"},
+    "javascript": {"npm"},
+    "rust": {"cargo"},
+    "go": {"go"},
+    "swift": {"swift"},
+    "c_family": {"xcode"},
+}
+
+
+def _check_change_ecosystems(path: str) -> set[str]:
+    name = Path(path).name
+    lower = path.casefold()
+    result: set[str] = set()
+    language = _impact_language_family(path)
+    if language:
+        result.update(CHECK_ECOSYSTEM_BY_LANGUAGE.get(language, set()))
+    if name in {"pyproject.toml", "pytest.ini", "mypy.ini", "ruff.toml", ".ruff.toml"} or name.startswith(
+        "requirements"
+    ):
+        result.add("python")
+    if name in {"package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb"}:
+        result.add("npm")
+    if name in {"Cargo.toml", "Cargo.lock"}:
+        result.add("cargo")
+    if name in {"go.mod", "go.sum"}:
+        result.add("go")
+    if name in {"Package.swift", "Package.resolved"}:
+        result.add("swift")
+    if name == "Makefile" or name.endswith(".mk"):
+        result.add("make")
+    if ".xcodeproj/" in lower or ".xcworkspace/" in lower or name == "project.pbxproj":
+        result.add("xcode")
+    return result
+
+
+def recommend_checks(checks: list[dict[str, Any]], changed_paths: list[str]) -> list[dict[str, Any]]:
+    """Rank existing discovered checks from bounded changed-path metadata only."""
+
+    changed = list(dict.fromkeys(path for path in changed_paths if path))[:100]
+    changed_ecosystems: set[str] = set()
+    for path in changed:
+        changed_ecosystems.update(_check_change_ecosystems(path))
+    code_paths = [path for path in changed if _impact_language_family(path) is not None]
+    test_paths = [path for path in code_paths if _is_test_path(path)]
+    xcode_config_changed = "xcode" in changed_ecosystems
+
+    ranked: list[dict[str, Any]] = []
+    for check in checks:
+        item = dict(check)
+        check_id = str(item.get("id", ""))
+        ecosystem = check_id.split(":", 1)[0]
+        kind = str(item.get("kind", ""))
+        score = 0
+        reasons: list[str] = []
+
+        if ecosystem in changed_ecosystems:
+            score += 60
+            reasons.append(f"changed paths affect the {ecosystem} ecosystem")
+        elif ecosystem == "make" and code_paths:
+            score += 25
+            reasons.append("Make checks are a cross-language fallback for changed source files")
+
+        if code_paths and ecosystem in changed_ecosystems:
+            if kind in {"lint", "typecheck"}:
+                score += 20
+                reasons.append(f"{kind} is a fast validation for changed source files")
+            elif kind == "test":
+                score += 10
+                reasons.append("tests validate behavior affected by changed source files")
+            elif kind == "build":
+                score += 5
+                reasons.append("build validation covers changed source files")
+
+        if test_paths and kind == "test" and ecosystem in changed_ecosystems:
+            score += 25
+            reasons.append("test files changed directly")
+
+        if kind == "aggregate" and score:
+            score = max(1, score - 20)
+            reasons.append("aggregate checks are broader, so run focused checks first")
+
+        if kind == "metadata" and ecosystem == "xcode":
+            if xcode_config_changed:
+                score = max(score, 80)
+                reasons.append("Xcode project/workspace metadata changed")
+            else:
+                score = 0
+                reasons = []
+
+        priority = "high" if score >= 90 else "medium" if score >= 60 else "low" if score >= 40 else "none"
+        item.update(
+            recommended=score >= 40,
+            priority=priority,
+            recommendation_score=score,
+            recommendation_reasons=reasons,
+        )
+        ranked.append(item)
+
+    ranked.sort(
+        key=lambda item: (
+            -int(item.get("recommendation_score", 0)),
+            str(item.get("id", "")),
+        )
+    )
+    return ranked
 
 
 def _rel(workspace: Path, path: Path) -> str:

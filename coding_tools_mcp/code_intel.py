@@ -370,3 +370,85 @@ def references(workspace: Path, target: Path, args: dict[str, Any]) -> dict[str,
     if scan_truncated:
         result["truncated_by"] = "max_files"
     return result
+
+
+def references_for_symbols(
+    workspace: Path,
+    target: Path,
+    symbol_names: list[str],
+    *,
+    max_results: int = 5000,
+    max_files: int = 2000,
+) -> dict[str, Any]:
+    """Find exact identifier references for several symbols in one bounded scan.
+
+    This is an internal primitive for impact analysis. It intentionally remains
+    textual rather than pretending to be a compiler call graph.
+    """
+
+    unique_names = sorted(
+        {name for name in symbol_names if name},
+        key=lambda value: (-len(value), value),
+    )
+    if not unique_names:
+        return {
+            "ok": True,
+            "symbols": [],
+            "references": [],
+            "count": 0,
+            "scanned_files": 0,
+            "truncated": False,
+            "scan_complete": True,
+        }
+    alternatives = "|".join(re.escape(name) for name in unique_names)
+    pattern = re.compile(rf"(?<![\w$])(?P<symbol>{alternatives})(?![\w$])")
+    items: list[dict[str, Any]] = []
+    scanned_files = 0
+    paths, scan_truncated = _scan_code_files(workspace, target, max_files)
+    for path in paths:
+        scanned_files += 1
+        lines = _read_lines(path)
+        if lines is None:
+            continue
+        display_path = _display_path(workspace, path)
+        for line_number, line in enumerate(lines, start=1):
+            for match in pattern.finditer(line):
+                items.append(
+                    {
+                        "symbol": match.group("symbol"),
+                        "path": display_path,
+                        "line": line_number,
+                        "column": match.start("symbol") + 1,
+                        "preview": line.strip()[:500],
+                        "relation": (
+                            "call"
+                            if line[match.end("symbol") :].lstrip().startswith("(")
+                            else "import"
+                            if re.search(r"\b(import|from|use|require)\b", line[: match.end("symbol")])
+                            else "reference"
+                        ),
+                    }
+                )
+                if len(items) >= max_results:
+                    return {
+                        "ok": True,
+                        "symbols": unique_names,
+                        "references": items,
+                        "count": len(items),
+                        "scanned_files": scanned_files,
+                        "truncated": True,
+                        "truncated_by": "max_results",
+                        "scan_complete": False,
+                    }
+    result = {
+        "ok": True,
+        "symbols": unique_names,
+        "references": items,
+        "count": len(items),
+        "scanned_files": scanned_files,
+        "truncated": scan_truncated,
+        "scan_complete": not scan_truncated,
+    }
+    if scan_truncated:
+        result["truncated_by"] = "max_files"
+    return result

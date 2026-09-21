@@ -65,9 +65,9 @@ The helper expects `TWINE_USERNAME`/`TWINE_PASSWORD` or `~/.pypirc` credentials.
 ## Individual Gates
 
 ```bash
-make check-dispatch-inputs
 make check-npm-launcher
 make check-release
+make check-tool-surface
 make test-mcp-contract
 make test-tool-golden
 make test-security
@@ -84,9 +84,9 @@ make benchmark-real-workloads
 
 | Command | Coverage |
 | --- | --- |
-| `make check-dispatch-inputs` | Cloudflare Worker dispatch body compared with the sandbox workflow inputs |
 | `make check-npm-launcher` | npm launcher argument forwarding, runner fallback, exit behavior, and package contents |
 | `make check-release` | Python/module/npm versions and release changelog checked against `RELEASE_TAG`, which defaults from `pyproject.toml` |
+| `make check-tool-surface` | Registered tool count and MCP JSON-schema byte budgets; also reports largest schemas and an approximate schema-token footprint |
 | `make test-mcp-contract` | Both protocol eras per method: the handshake, `2026-07-28` `_meta` validation and mirror headers, `tools/list`, schemas, annotations, structured success/error envelopes, protocol errors and their HTTP statuses |
 | `make test-dual-era` | What only shows up with both eras on one server: handshake-era responses carry no modern field, a modern client works without ever handshaking, concurrent clients of either era, workspace races, and the official MCP python SDK driving both transports |
 | `make test-tool-golden` | Golden behavior for read/list/search/patch/exec/stdin/kill/git/image paths |
@@ -111,11 +111,11 @@ Main workflow:
 .github/workflows/compliance.yml
 ```
 
-The main workflow also includes a `windows-msvc-smoke` job. It verifies that
-Windows reports unsupported TTY requests explicitly, force-kills a background
-command without relying on POSIX `SIGKILL`, initializes Visual Studio with
-`vcvarsall.bat x64`, checks the narrow default `core` environment, and confirms
-that `--shell-env-inherit all` can compile and run a single-file `cl.exe` smoke.
+The main compliance workflow runs on macOS 15, matching the supported/tested
+product platform. It also runs `make check-tool-surface` so tool-count and JSON
+schema growth cannot silently expand the model-visible MCP surface. The Desktop
+workflow is likewise macOS-only; Windows/Linux behavior is best-effort rather
+than a CI compatibility target.
 
 Manual SWE-bench workflow:
 

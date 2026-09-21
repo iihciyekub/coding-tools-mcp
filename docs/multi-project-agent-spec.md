@@ -187,7 +187,7 @@ CODING_TOOLS_MCP_BROWSER_SMOKE=1 \
 PYTHONDONTWRITEBYTECODE=1 \
 .venv/bin/python -m unittest discover -s tests -p 'test_*.py'
 
-make lint typecheck check-dispatch-inputs PYTHON=.venv/bin/python
+make lint typecheck PYTHON=.venv/bin/python
 ```
 
 本轮在项目 `.venv` 显式安装 Playwright 1.63.0 及依赖，并在 Playwright 缓存安装其测试 Chromium；没有修改个人 Chrome profile。依赖选择记录在 `pyproject.toml` 的可选 browser extra 和 `uv.lock`，核心运行时不要求安装浏览器依赖。

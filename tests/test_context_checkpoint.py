@@ -50,6 +50,9 @@ class ContextCheckpointTests(unittest.TestCase):
         stale = self.call({"action": "get", "context_checkpoint_id": checkpoint_id})
         self.assertTrue(stale["stale"])
         self.assertIn("capabilities_changed", stale["stale_reasons"])
+        self.assertEqual(stale["resume"]["freshness"], "review_drift")
+        self.assertIn("agent_environment", stale["drift"]["capabilities"]["changed"])
+        self.assertTrue(stale["resume"]["recommended_actions"])
 
         listed = self.call({"action": "list", "max_results": 10})
         self.assertEqual(listed["count"], 1)
@@ -86,6 +89,9 @@ class ContextCheckpointTests(unittest.TestCase):
         context = context_result["structuredContent"]
         self.assertEqual(context["context_checkpoints"][0]["context_checkpoint_id"], created["context_checkpoint_id"])
         self.assertIn("1 context checkpoints", context["summary"])
+        self.assertEqual(context["resume"]["context_checkpoint_id"], created["context_checkpoint_id"])
+        self.assertEqual(context["resume"]["summary"], "Resume from this point.")
+        self.assertEqual(context["resume"]["freshness"], "fresh")
 
 
 if __name__ == "__main__":

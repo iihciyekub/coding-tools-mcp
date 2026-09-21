@@ -33,6 +33,8 @@ from typing import Any, cast
 
 from . import __version__
 from . import agent_environment as agent_environment_tools
+from . import apple_toolchain
+from . import check_diagnostics
 from . import code_intel
 from . import lsp as lsp_tools
 from . import skills as skill_tools
@@ -719,7 +721,8 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         title="Runtime doctor",
         description=(
             "Run a non-destructive runtime health check covering common toolchain commands, workspace access, "
-            "shell snapshot, hooks, LSP availability, sandbox status, and network policy."
+            "shell snapshot, hooks, LSP availability, sandbox status, network policy, and macOS Apple toolchain "
+            "metadata including Xcode, Swift, SourceKit-LSP, codesign, notarytool, xcresulttool, and Homebrew."
         ),
         read_only=True,
         idempotent=True,
@@ -949,21 +952,30 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "lsp_status": ToolSpec(
         title="Language server status",
-        description="Report optional Python, TypeScript/JavaScript, and Rust LSP backend availability and process state.",
+        description=(
+            "Report optional Python, TypeScript/JavaScript, Rust, and Swift/SourceKit-LSP backend availability, "
+            "resolved commands, project roots, and process state."
+        ),
         read_only=True,
         idempotent=True,
         gated_by="enable_workflow_tools",
     ),
     "lsp_definition": ToolSpec(
         title="LSP definition",
-        description="Resolve definitions at a UTF-16-aware source position through the configured language server.",
+        description=(
+            "Resolve definitions through the configured language server. Public line/column inputs are one-based; "
+            "the runtime converts the source column to the LSP UTF-16 position internally."
+        ),
         read_only=True,
         idempotent=True,
         gated_by="enable_workflow_tools",
     ),
     "lsp_references": ToolSpec(
         title="LSP references",
-        description="Resolve semantic references at a source position through the configured language server.",
+        description=(
+            "Resolve semantic references through the configured language server. Public line/column inputs are "
+            "one-based and converted internally to the LSP UTF-16 position."
+        ),
         read_only=True,
         idempotent=True,
         gated_by="enable_workflow_tools",
@@ -1022,14 +1034,20 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "workspace_overview": ToolSpec(
         title="Workspace overview",
-        description="Summarize project manifests, languages, entry points, top-level areas, and instruction files.",
+        description=(
+            "Summarize project manifests, languages, entry points, top-level areas, and instruction files. "
+            "Detected Apple projects also include bounded read-only Xcode, Swift, SDK, and SourceKit-LSP metadata."
+        ),
         read_only=True,
         idempotent=True,
         gated_by="enable_workflow_tools",
     ),
     "repo_map": ToolSpec(
         title="Repository map",
-        description="Return a bounded, task-filtered map of files and code symbols with backend coverage metadata.",
+        description=(
+            "Return a bounded, task-filtered map of files and code symbols with backend coverage metadata. "
+            "Optional impact mode uses explicit or current Git-changed paths to estimate direct reference and likely-test impact."
+        ),
         read_only=True,
         idempotent=True,
         gated_by="enable_workflow_tools",
@@ -1059,8 +1077,9 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         title="Discover local agent environment",
         description=(
             "Discover metadata for installed local agent runtimes such as Codex, Claude Code, Gemini CLI, "
-            "Cursor, and OpenCode. Returns CLI/home paths, skill/plugin/worktree/rule names, and sensitive "
-            "resource presence without reading credentials, cookies, tokens, or browser-session contents."
+            "Cursor, and OpenCode. Returns CLI/home paths, skill/plugin/worktree/rule names, supports filtered "
+            "capability search, and reports sensitive resource presence without reading credentials, cookies, "
+            "tokens, or browser-session contents."
         ),
         read_only=True,
         idempotent=True,
@@ -1068,14 +1087,20 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "checks_discover": ToolSpec(
         title="Discover checks",
-        description="Discover test, lint, typecheck, and build commands from project manifests without running them.",
+        description=(
+            "Discover test, lint, typecheck, and build commands from project manifests without running them. "
+            "By default, current Git changes deterministically rank the existing checks and explain why; explicit changed_paths can override the seed."
+        ),
         read_only=True,
         idempotent=True,
         gated_by="enable_workflow_tools",
     ),
     "checks_run": ToolSpec(
         title="Run discovered check",
-        description="Run one currently discovered check through the existing bounded command and permission engine.",
+        description=(
+            "Run one currently discovered check through the existing bounded command and permission engine, "
+            "and extract bounded structured failure diagnostics while preserving raw output."
+        ),
         destructive=True,
         open_world=True,
         error_status="failed",
@@ -1083,7 +1108,9 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "checks_result": ToolSpec(
         title="Get check evidence",
-        description="Read a persisted check result and report whether its code fingerprint is stale.",
+        description=(
+            "Read persisted check evidence, structured failure diagnostics, and whether its code fingerprint is stale."
+        ),
         read_only=True,
         idempotent=True,
         gated_by="enable_workflow_tools",
@@ -1199,13 +1226,20 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "code_definition": ToolSpec(
         title="Code definition",
-        description="Find language-aware definitions for a symbol under a workspace path.",
+        description=(
+            "Find language-aware definitions for a symbol under a workspace path. When a file path plus line/column "
+            "is supplied, line/column are one-based and semantic LSP is preferred; the runtime converts the column "
+            "to UTF-16 and falls back to the bounded symbol scan if the LSP runtime is unavailable."
+        ),
         read_only=True,
         idempotent=True,
     ),
     "code_references": ToolSpec(
         title="Code references",
-        description="Find bounded exact identifier references for a symbol under a workspace path.",
+        description=(
+            "Find references for a symbol under a workspace path. When a file path plus line/column is supplied, prefer semantic LSP references "
+            "using one-based public positions converted internally to UTF-16; fall back to the bounded exact-identifier scan if the LSP runtime is unavailable."
+        ),
         read_only=True,
         idempotent=True,
     ),
@@ -2986,6 +3020,12 @@ class Runtime:
                 lsp_status = {"ok": False, "error": str(exc)}
                 issue("LSP_STATUS_FAILED", f"Could not inspect LSP status: {exc}", "Check language-server installation and configuration.")
 
+        apple_status = apple_toolchain.probe(
+            cwd=self.workspace.root,
+            env=base_env,
+            include_sdks=False,
+        )
+
         return {
             "status": "warning" if issues else "ok",
             "summary": (
@@ -3032,6 +3072,7 @@ class Runtime:
                 "direct_tool_count": len(self._exposed_tool_names),
                 "deferred_tool_count": len(self._deferred_tool_names),
             },
+            "apple": apple_status,
             "lsp": lsp_status if lsp_status is not None else {"enabled": False},
             "issues": issues,
         }
@@ -4019,6 +4060,7 @@ class Runtime:
             "stderr_dropped_bytes": command.stderr_dropped_bytes,
             "output_refs": output_refs,
         }
+        payload.update(self._command_activity_payload(command))
         if command.completed_at is not None:
             payload["expires_at"] = command.completed_at + COMPLETED_COMMAND_TTL_SECONDS
         if command.status_name() == "running":
@@ -4029,6 +4071,38 @@ class Runtime:
         elif command.stdout_total_bytes or command.stderr_total_bytes:
             stream = "stdout" if command.stdout_total_bytes else "stderr"
             payload["next_action"] = read_output_action(output_refs[stream])
+        return payload
+
+    @staticmethod
+    def _command_activity_payload(command: CommandRun, *, now: float | None = None) -> dict[str, Any]:
+        current = time.time() if now is None else now
+        running = command.status_name() == "running"
+        silence_since = command.last_output_at if command.last_output_at is not None else command.started_at
+        idle_seconds = max(0.0, current - silence_since) if running else 0.0
+        runtime_seconds = max(0.0, (command.completed_at or current) - command.started_at)
+        if not running:
+            activity_state = "completed"
+        elif idle_seconds < 15:
+            activity_state = "recent_output" if command.last_output_at is not None else "starting"
+        elif idle_seconds < 60:
+            activity_state = "quiet"
+        else:
+            activity_state = "long_silent"
+        payload: dict[str, Any] = {
+            "last_output_at": command.last_output_at,
+            "idle_seconds": round(idle_seconds, 3),
+            "runtime_seconds": round(runtime_seconds, 3),
+            "activity_state": activity_state,
+            "needs_attention": activity_state == "long_silent",
+        }
+        if activity_state == "long_silent":
+            payload["attention"] = {
+                "reason": "no_output_for_60_seconds",
+                "message": (
+                    "Command is still running but has produced no output for at least 60 seconds; "
+                    "it may be legitimately quiet or waiting on input/resource activity."
+                ),
+            }
         return payload
 
     def _operation_replay_payload(self, command: CommandRun) -> dict[str, Any]:
@@ -4232,6 +4306,7 @@ class Runtime:
             # snapshot_since_cursor owns the status mapping (running/exited/
             # terminated/timeout) so exec, polling, and kill paths agree.
             payload = command.snapshot_since_cursor(max_output_bytes)
+            payload.update(self._command_activity_payload(command))
             payload["elapsed_ms"] = int((time.time() - start) * 1000)
             self._add_exec_diagnostics(payload)
             return self._format_command_output(command, payload, args)
@@ -4799,6 +4874,7 @@ class Runtime:
                     "completed_at": command.completed_at,
                     "stdout_total_bytes": command.stdout_total_bytes,
                     "stderr_total_bytes": command.stderr_total_bytes,
+                    **self._command_activity_payload(command),
                 }
             )
             if len(items) >= max_results:
@@ -4827,6 +4903,11 @@ class Runtime:
                         "completed_at": None,
                         "stdout_total_bytes": 0,
                         "stderr_total_bytes": 0,
+                        "last_output_at": None,
+                        "idle_seconds": 0.0,
+                        "runtime_seconds": 0.0,
+                        "activity_state": "accepting",
+                        "needs_attention": False,
                     }
                 )
                 if len(items) >= max_results:
@@ -5087,6 +5168,7 @@ class Runtime:
                     if time.time() - first_output_at >= 0.05:
                         break
         payload = command.snapshot_since_cursor(int(args.get("max_output_bytes", 65536)))
+        payload.update(self._command_activity_payload(command))
         return self._format_command_output(command, payload, args)
 
     def _wait_for_command_exit(self, command: CommandRun, wait_seconds: float) -> bool:
@@ -5453,7 +5535,7 @@ class Runtime:
         if len(lines) > max_lines:
             lines = lines[:max_lines]
             truncated = True
-        result = {
+        result: dict[str, Any] = {
             "is_repo": True,
             **repo.metadata(),
             "path_base": "workspace",
@@ -5920,6 +6002,16 @@ class Runtime:
                 category="validation",
                 details={"files": len(changes), "edits": edit_count},
             )
+        affected_paths = [str(item["path"]) for item in changes]
+        patch_plan = [
+            {
+                "path": item["path"],
+                "expected_sha256": item["sha256"],
+                "edit_count": len(item["edits"]),
+                "edits": item["edits"],
+            }
+            for item in changes
+        ]
         return {
             "ok": True,
             "path": resolved.display,
@@ -5928,9 +6020,12 @@ class Runtime:
             "position_encoding": "utf-16",
             "new_name": str(args["new_name"]),
             "changes": changes,
+            "affected_paths": affected_paths,
+            "patch_plan": patch_plan,
             "file_count": len(changes),
             "edit_count": edit_count,
             "applied": False,
+            "guarded_apply_required": True,
             "summary": f"Prepared {edit_count} rename edits across {len(changes)} files; no files were changed.",
         }
 
@@ -6094,15 +6189,84 @@ class Runtime:
         target = self.resolve_existing(str(args.get("path", "."))).path
         if not target.is_dir():
             raise ToolFailure("NOT_A_DIRECTORY", "workspace_overview path must be a directory.", category="validation")
-        result = workspace_insight.workspace_overview(self.workspace.root, self.project_context, args, target=target)
+        result = workspace_insight.workspace_overview(
+            self.workspace.root,
+            self.project_context,
+            args,
+            target=target,
+            env=self._command_env(None),
+        )
         result["applicable_instructions"] = self.project_instructions({"path": args.get("path", ".")})
         return result
+
+    def _changed_paths_for_target(
+        self,
+        *,
+        target: Path,
+        path_arg: str,
+        explicit: Any = None,
+        max_entries: int = 100,
+    ) -> tuple[list[str], str, bool]:
+        changed_paths: list[str] = []
+        if isinstance(explicit, list) and explicit:
+            for raw in explicit:
+                resolved = self.resolve_for_write(str(raw))
+                try:
+                    resolved.path.relative_to(target)
+                except ValueError as exc:
+                    raise ToolFailure(
+                        "INVALID_ARGUMENT",
+                        f"changed path is outside selected target: {raw}",
+                        category="validation",
+                    ) from exc
+                changed_paths.append(resolved.path.relative_to(self.workspace.root).as_posix())
+            return list(dict.fromkeys(changed_paths))[:max_entries], "explicit", False
+
+        status = self.git_status(
+            {
+                "path": path_arg,
+                "max_entries": max_entries,
+                "include_untracked": True,
+            }
+        )
+        if status.get("is_repo") and status.get("repo_root"):
+            repo_root = Path(str(status["repo_root"]))
+            for entry in status.get("entries", []):
+                if not isinstance(entry, dict):
+                    continue
+                for key in ("path", "original_path"):
+                    value = entry.get(key)
+                    if not isinstance(value, str) or not value:
+                        continue
+                    candidate = (repo_root / value).resolve(strict=False)
+                    try:
+                        candidate.relative_to(target)
+                        rel = candidate.relative_to(self.workspace.root).as_posix()
+                    except ValueError:
+                        continue
+                    changed_paths.append(rel)
+        return (
+            list(dict.fromkeys(changed_paths))[:max_entries],
+            "git_status",
+            bool(status.get("truncated")),
+        )
 
     def repo_map(self, args: dict[str, Any]) -> dict[str, Any]:
         target = self.resolve_existing(str(args.get("path", "."))).path
         if not target.is_dir():
             raise ToolFailure("NOT_A_DIRECTORY", "repo_map path must be a directory.", category="validation")
-        return workspace_insight.repo_map(self.workspace.root, target, args)
+        map_args = dict(args)
+        if bool(args.get("impact", False)):
+            changed_paths, source, truncated = self._changed_paths_for_target(
+                target=target,
+                path_arg=str(args.get("path", ".")),
+                explicit=args.get("changed_paths"),
+                max_entries=100,
+            )
+            map_args["impact_source"] = source
+            map_args["impact_git_status_truncated"] = truncated
+            map_args["changed_paths"] = changed_paths
+        return workspace_insight.repo_map(self.workspace.root, target, map_args)
 
     def project_instructions(self, args: dict[str, Any]) -> dict[str, Any]:
         target = self.resolve_existing(str(args.get("path", "."))).path
@@ -6120,6 +6284,8 @@ class Runtime:
             return agent_environment_tools.discover_agent_environment(
                 provider=str(args.get("provider", "all")),
                 max_items=int(args.get("max_items", 200)),
+                query=str(args.get("query", "")),
+                kind=str(args.get("kind", "all")),
             )
         except ValueError as exc:
             raise ToolFailure("INVALID_ARGUMENT", str(exc), category="validation") from exc
@@ -6128,15 +6294,119 @@ class Runtime:
         target = self.resolve_existing(str(args.get("path", "."))).path
         if not target.is_dir():
             raise ToolFailure("NOT_A_DIRECTORY", "checks_discover path must be a directory.", category="validation")
-        checks = workspace_insight.discover_checks(self.workspace.root, target)
-        return {"ok": True, "path": target.relative_to(self.workspace.root).as_posix() or ".", "checks": checks, "count": len(checks), "summary": f"Discovered {len(checks)} checks."}
+        checks = workspace_insight.discover_checks(
+            self.workspace.root,
+            target,
+            env=self._command_env(None),
+        )
+        changed_paths: list[str] = []
+        recommendation_source = "disabled"
+        recommendation_truncated = False
+        if bool(args.get("recommend", True)):
+            changed_paths, recommendation_source, recommendation_truncated = self._changed_paths_for_target(
+                target=target,
+                path_arg=str(args.get("path", ".")),
+                explicit=args.get("changed_paths"),
+                max_entries=100,
+            )
+            checks = workspace_insight.recommend_checks(checks, changed_paths)
+        recommended_ids = [str(item["id"]) for item in checks if item.get("recommended")]
+        return {
+            "ok": True,
+            "path": target.relative_to(self.workspace.root).as_posix() or ".",
+            "checks": checks,
+            "count": len(checks),
+            "changed_paths": changed_paths,
+            "changed_path_count": len(changed_paths),
+            "recommendation_source": recommendation_source,
+            "recommendation_truncated": recommendation_truncated,
+            "recommended_check_ids": recommended_ids,
+            "recommended_count": len(recommended_ids),
+            "summary": (
+                f"Discovered {len(checks)} checks and recommended {len(recommended_ids)} "
+                f"from {len(changed_paths)} changed path(s)."
+                if recommendation_source != "disabled"
+                else f"Discovered {len(checks)} checks."
+            ),
+        }
+
+    @staticmethod
+    def _diagnostic_stream_text(command: CommandRun, stream: str, *, max_chars: int = 262_144) -> str:
+        head, tail, tail_start, total_bytes, _dropped = command.retained_stream_segments(stream)
+        if total_bytes == 0:
+            return ""
+        if tail_start <= len(head):
+            overlap = max(0, len(head) - tail_start)
+            data = head + tail[overlap:]
+        else:
+            data = head + b"\n... retained output gap ...\n" + tail
+        text = data.decode("utf-8", errors="replace")
+        if len(text) <= max_chars:
+            return text
+        half = max_chars // 2
+        return text[:half] + "\n... diagnostic output clipped ...\n" + text[-half:]
+
+    def _attach_check_diagnostics(
+        self,
+        check: dict[str, Any],
+        result: dict[str, Any],
+        *,
+        max_diagnostics: int,
+    ) -> dict[str, Any]:
+        stdout = str(result.get("stdout") or "")
+        stderr = str(result.get("stderr") or "")
+        output_source = "result_snapshot"
+        command_id = result.get("command_id")
+        if isinstance(command_id, str) and command_id:
+            try:
+                command = self._get_output_command(command_id)
+            except ToolFailure as exc:
+                if exc.code != "COMMAND_NOT_FOUND":
+                    raise
+            else:
+                stdout = self._diagnostic_stream_text(command, "stdout")
+                stderr = self._diagnostic_stream_text(command, "stderr")
+                output_source = "retained_command"
+        analysis = check_diagnostics.analyze_check_output(
+            check_id=str(check.get("id") or check.get("check_id") or "check"),
+            command=str(check.get("command") or ""),
+            kind=str(check.get("kind") or "unknown"),
+            stdout=stdout,
+            stderr=stderr,
+            max_diagnostics=max_diagnostics,
+        )
+        existing_diagnostics = result.get("diagnostics")
+        if isinstance(existing_diagnostics, list) and existing_diagnostics:
+            parsed = analysis.get("diagnostics")
+            parsed_items = parsed if isinstance(parsed, list) else []
+            combined = [*existing_diagnostics, *parsed_items][:max_diagnostics]
+            analysis["diagnostics"] = combined
+            analysis["diagnostic_count"] = len(combined)
+            if len(existing_diagnostics) + len(parsed_items) > max_diagnostics:
+                analysis["diagnostics_truncated"] = True
+        context = analysis.get("diagnostic_context")
+        if isinstance(context, dict):
+            context["output_source"] = output_source
+        result.update(analysis)
+        return result
 
     def checks_run(self, args: dict[str, Any]) -> dict[str, Any]:
         target = self.resolve_existing(str(args.get("path", "."))).path
         if not target.is_dir():
             raise ToolFailure("NOT_A_DIRECTORY", "checks_run path must be a directory.", category="validation")
         check_id = str(args.get("check_id", ""))
-        selected = next((item for item in workspace_insight.discover_checks(self.workspace.root, target) if item["id"] == check_id), None)
+        selected = next(
+            (
+                item
+                for item in workspace_insight.discover_checks(
+                    self.workspace.root,
+                    target,
+                    env=self._command_env(None),
+                )
+                if item["id"] == check_id
+            ),
+            None,
+        )
         if selected is None:
             raise ToolFailure("CHECK_NOT_FOUND", f"Discovered check not found: {check_id}", category="not_found", details={"retry_hint": "Call checks_discover again for the same path."})
         command_args = {
@@ -6152,6 +6422,11 @@ class Runtime:
             command_args["operation_id"] = str(args["operation_id"])
         before = workspace_insight.workspace_fingerprint(self.workspace.root, target)
         result = self.exec_command(command_args)
+        self._attach_check_diagnostics(
+            selected,
+            result,
+            max_diagnostics=int(args.get("max_diagnostics", 100)),
+        )
         after = workspace_insight.workspace_fingerprint(self.workspace.root, target)
         evidence = self._workflow_store().record_check_run(
             selected,
@@ -6168,6 +6443,7 @@ class Runtime:
 
     def checks_result(self, args: dict[str, Any]) -> dict[str, Any]:
         check_run_id = str(args["check_run_id"])
+        max_diagnostics = int(args.get("max_diagnostics", 100))
         evidence = self._workflow_store().get_check_run(check_run_id)
         target = self.resolve_existing(str(evidence["workdir"])).path
         if evidence["status"] == "running" and evidence.get("command_id"):
@@ -6176,7 +6452,12 @@ class Runtime:
             except ToolFailure as exc:
                 if exc.code != "COMMAND_NOT_FOUND":
                     raise
+                prior_result_value = evidence.get("result")
+                prior_result: dict[str, Any] = (
+                    prior_result_value if isinstance(prior_result_value, dict) else {}
+                )
                 command_result = {
+                    **prior_result,
                     "status": "unknown",
                     "command_id": evidence["command_id"],
                     "operation_id": evidence.get("operation_id"),
@@ -6188,6 +6469,11 @@ class Runtime:
                         }
                     ],
                 }
+            self._attach_check_diagnostics(
+                evidence,
+                command_result,
+                max_diagnostics=max_diagnostics,
+            )
             after = workspace_insight.workspace_fingerprint(self.workspace.root, target)
             evidence = self._workflow_store().update_check_run_result(
                 check_run_id,
@@ -6203,6 +6489,23 @@ class Runtime:
             f"Check {evidence['check_id']} is {evidence['status']}"
             f"{' and stale' if evidence['stale'] else ''}."
         )
+        retained_result_value = evidence.get("result")
+        retained_result: dict[str, Any] = (
+            retained_result_value if isinstance(retained_result_value, dict) else {}
+        )
+        for key in (
+            "diagnostics",
+            "diagnostic_count",
+            "failing_tests",
+            "failing_test_count",
+            "diagnostics_truncated",
+            "diagnostic_parsers",
+            "diagnostic_parser_version",
+            "diagnostic_summary",
+            "diagnostic_context",
+        ):
+            if key in retained_result:
+                evidence[key] = retained_result[key]
         return evidence
 
     def _get_protocol_task(self, task_id: str) -> dict[str, Any]:
@@ -6365,9 +6668,22 @@ class Runtime:
         )
 
     def task_context(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self._workflow_store().task_context(
+        result = self._workflow_store().task_context(
             str(args["task_id"]), event_limit=int(args.get("event_limit", 50))
         )
+        checkpoints = result.get("context_checkpoints")
+        if isinstance(checkpoints, list) and checkpoints:
+            latest = checkpoints[0]
+            checkpoint_id = latest.get("context_checkpoint_id") if isinstance(latest, dict) else None
+            if isinstance(checkpoint_id, str) and checkpoint_id:
+                checkpoint = self.context_checkpoint(
+                    {"action": "get", "context_checkpoint_id": checkpoint_id}
+                )
+                result["resume"] = {
+                    "context_checkpoint_id": checkpoint_id,
+                    **checkpoint["resume"],
+                }
+        return result
 
     def task_plan_get(self, args: dict[str, Any]) -> dict[str, Any]:
         task = self._workflow_store().get_task(str(args["task_id"]))
@@ -6613,6 +6929,101 @@ class Runtime:
                 reasons.append(reason)
         return reasons
 
+    @staticmethod
+    def _context_checkpoint_drift(saved: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+        saved_git_value = saved.get("git")
+        current_git_value = current.get("git")
+        saved_git: dict[str, Any] = saved_git_value if isinstance(saved_git_value, dict) else {}
+        current_git: dict[str, Any] = current_git_value if isinstance(current_git_value, dict) else {}
+
+        def changed_paths(git_state: dict[str, Any]) -> set[str]:
+            paths: set[str] = set()
+            for item in git_state.get("entries", []):
+                if not isinstance(item, dict):
+                    continue
+                for key in ("path", "original_path"):
+                    value = item.get(key)
+                    if isinstance(value, str) and value:
+                        paths.add(value)
+            return paths
+
+        saved_paths = changed_paths(saved_git)
+        current_paths = changed_paths(current_git)
+
+        def command_ids(state: dict[str, Any]) -> set[str]:
+            result: set[str] = set()
+            for item in state.get("running_commands", []):
+                if not isinstance(item, dict):
+                    continue
+                identity = item.get("operation_id") or item.get("command_id")
+                if isinstance(identity, str) and identity:
+                    result.add(identity)
+            return result
+
+        saved_commands = command_ids(saved)
+        current_commands = command_ids(current)
+        saved_capabilities_value = saved.get("capabilities")
+        current_capabilities_value = current.get("capabilities")
+        saved_capabilities: dict[str, Any] = (
+            saved_capabilities_value if isinstance(saved_capabilities_value, dict) else {}
+        )
+        current_capabilities: dict[str, Any] = (
+            current_capabilities_value if isinstance(current_capabilities_value, dict) else {}
+        )
+        capability_changes = {
+            key: {"before": saved_capabilities.get(key), "now": current_capabilities.get(key)}
+            for key in sorted(set(saved_capabilities) | set(current_capabilities))
+            if saved_capabilities.get(key) != current_capabilities.get(key)
+        }
+        current_paths_sorted = sorted(current_paths)
+        return {
+            "git": {
+                "head_before": saved_git.get("head"),
+                "head_now": current_git.get("head"),
+                "head_changed": saved_git.get("head") != current_git.get("head"),
+                "branch_before": saved_git.get("branch"),
+                "branch_now": current_git.get("branch"),
+                "branch_changed": saved_git.get("branch") != current_git.get("branch"),
+                "new_changed_paths": sorted(current_paths - saved_paths)[:100],
+                "resolved_changed_paths": sorted(saved_paths - current_paths)[:100],
+                "changed_paths_now": current_paths_sorted[:100],
+                "paths_truncated": len(current_paths_sorted) > 100,
+            },
+            "commands": {
+                "started_since_checkpoint": sorted(current_commands - saved_commands)[:100],
+                "finished_since_checkpoint": sorted(saved_commands - current_commands)[:100],
+                "running_now": sorted(current_commands)[:100],
+            },
+            "capabilities": {
+                "changed": capability_changes,
+            },
+        }
+
+    @staticmethod
+    def _context_checkpoint_resume(
+        semantic: dict[str, Any],
+        reasons: list[str],
+        drift: dict[str, Any],
+    ) -> dict[str, Any]:
+        recommended_actions: list[str] = []
+        if "git_state_changed" in reasons:
+            recommended_actions.append("Review current Git diff and changed paths before continuing edits.")
+        if "running_commands_changed" in reasons:
+            recommended_actions.append("Review current command statuses before assuming earlier checks are still running.")
+        if "capabilities_changed" in reasons:
+            recommended_actions.append("Refresh runtime/tool assumptions before resuming the saved plan.")
+        changed_paths = drift.get("git", {}).get("changed_paths_now", [])
+        return {
+            "freshness": "review_drift" if reasons else "fresh",
+            "summary": semantic.get("summary", ""),
+            "decisions": semantic.get("decisions", []),
+            "unresolved": semantic.get("unresolved", []),
+            "next_steps": semantic.get("next_steps", []),
+            "recommended_reads": list(changed_paths[:20]) if isinstance(changed_paths, list) else [],
+            "recommended_actions": recommended_actions,
+            "drift": drift,
+        }
+
     def context_checkpoint(self, args: dict[str, Any]) -> dict[str, Any]:
         action = str(args.get("action", ""))
         store = self._workflow_store()
@@ -6648,10 +7059,13 @@ class Runtime:
             saved = store.get_context_checkpoint(checkpoint_id)
             current = self._context_checkpoint_state()
             reasons = self._context_checkpoint_staleness(saved["deterministic"], current)
+            drift = self._context_checkpoint_drift(saved["deterministic"], current)
             saved.update(
                 current=current,
                 stale=bool(reasons),
                 stale_reasons=reasons,
+                drift=drift,
+                resume=self._context_checkpoint_resume(saved["semantic"], reasons, drift),
                 summary=(
                     f"Context checkpoint {checkpoint_id} is stale: {', '.join(reasons)}."
                     if reasons
@@ -6715,13 +7129,129 @@ class Runtime:
         resolved = self.resolve_existing(str(args.get("path", ".")))
         return code_intel.symbols(self.workspace.root, resolved.path, args)
 
+    @staticmethod
+    def _semantic_location_items(symbol: str, locations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for location in locations:
+            location_range = location.get("range") if isinstance(location, dict) else None
+            start = location_range.get("start") if isinstance(location_range, dict) else None
+            end = location_range.get("end") if isinstance(location_range, dict) else None
+            if not isinstance(start, dict):
+                continue
+            item: dict[str, Any] = {
+                "symbol": symbol,
+                "path": location.get("path"),
+                "line": start.get("line"),
+                "column": start.get("column_utf16"),
+                "backend": "lsp",
+            }
+            if isinstance(end, dict):
+                item["end_line"] = end.get("line")
+                item["end_column_utf16"] = end.get("column_utf16")
+            items.append(item)
+        return items
+
+    @staticmethod
+    def _lsp_fallback_code(code: str) -> bool:
+        return code in {
+            "LSP_UNAVAILABLE",
+            "LSP_TIMEOUT",
+            "LSP_EXITED",
+            "LSP_ERROR",
+            "LSP_LANGUAGE_UNSUPPORTED",
+        }
+
     def code_definition(self, args: dict[str, Any]) -> dict[str, Any]:
         resolved = self.resolve_existing(str(args.get("path", ".")))
-        return code_intel.definition(self.workspace.root, resolved.path, args)
+        prefer_lsp = bool(args.get("prefer_lsp", True))
+        line = args.get("line")
+        column = args.get("column")
+        if prefer_lsp and resolved.path.is_file() and isinstance(line, int) and isinstance(column, int):
+            try:
+                semantic = self.lsp_definition(
+                    {"path": resolved.display, "line": line, "column": column}
+                )
+            except ToolFailure as exc:
+                if not self._lsp_fallback_code(exc.code):
+                    raise
+                fallback = code_intel.definition(self.workspace.root, resolved.path, args)
+                fallback.update(
+                    backend="syntax",
+                    fallback_used=True,
+                    fallback_reason=exc.code,
+                    coverage="symbol scan fallback after LSP runtime unavailability",
+                )
+                return fallback
+            definitions = self._semantic_location_items(str(args["symbol"]), semantic["definitions"])
+            return {
+                "ok": True,
+                "symbol": str(args["symbol"]),
+                "definitions": definitions,
+                "count": len(definitions),
+                "truncated": False,
+                "scan_complete": True,
+                "backend": "lsp",
+                "backend_command": semantic.get("backend"),
+                "position_encoding": "utf-16",
+                "fallback_used": False,
+                "coverage": "language-server semantic definition",
+            }
+        result = code_intel.definition(self.workspace.root, resolved.path, args)
+        result.update(
+            backend="syntax",
+            fallback_used=False,
+            coverage="python AST and language-pattern symbol scan",
+        )
+        return result
 
     def code_references(self, args: dict[str, Any]) -> dict[str, Any]:
         resolved = self.resolve_existing(str(args.get("path", ".")))
-        return code_intel.references(self.workspace.root, resolved.path, args)
+        prefer_lsp = bool(args.get("prefer_lsp", True))
+        line = args.get("line")
+        column = args.get("column")
+        if prefer_lsp and resolved.path.is_file() and isinstance(line, int) and isinstance(column, int):
+            try:
+                semantic = self.lsp_references(
+                    {
+                        "path": resolved.display,
+                        "line": line,
+                        "column": column,
+                        "include_declaration": bool(args.get("include_declaration", True)),
+                        "max_results": int(args.get("max_results", 500)),
+                    }
+                )
+            except ToolFailure as exc:
+                if not self._lsp_fallback_code(exc.code):
+                    raise
+                fallback = code_intel.references(self.workspace.root, resolved.path, args)
+                fallback.update(
+                    backend="text",
+                    fallback_used=True,
+                    fallback_reason=exc.code,
+                    coverage="exact identifier text fallback after LSP runtime unavailability",
+                )
+                return fallback
+            references = self._semantic_location_items(str(args["symbol"]), semantic["references"])
+            return {
+                "ok": True,
+                "symbol": str(args["symbol"]),
+                "references": references,
+                "count": len(references),
+                "truncated": bool(semantic.get("truncated", False)),
+                "scan_complete": not bool(semantic.get("truncated", False)),
+                "backend": "lsp",
+                "backend_command": semantic.get("backend"),
+                "position_encoding": "utf-16",
+                "fallback_used": False,
+                "coverage": "language-server semantic references",
+            }
+        result = code_intel.references(self.workspace.root, resolved.path, args)
+        result.update(
+            backend="text",
+            fallback_used=False,
+            coverage="exact identifier text scan",
+        )
+        return result
 
 
 def walk_files(root: Path) -> Iterator[Path]:
@@ -8349,8 +8879,16 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             {
                 "path": {**string, "default": "."},
                 "query": string,
+                "impact": {**boolean, "default": False},
+                "changed_paths": {
+                    "type": "array",
+                    "items": {**string, "minLength": 1},
+                    "maxItems": 100,
+                },
                 "max_files": {**integer, "minimum": 1, "maximum": 20000, "default": 2000},
                 "max_symbols": {**integer, "minimum": 1, "maximum": 5000, "default": 300},
+                "max_impact_files": {**integer, "minimum": 1, "maximum": 500, "default": 100},
+                "max_impact_symbols": {**integer, "minimum": 1, "maximum": 200, "default": 40},
             }
         ),
         "project_instructions": object_schema({"path": {**string, "default": "."}}),
@@ -8365,10 +8903,26 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                     "enum": ["all", "codex", "claude", "gemini", "cursor", "opencode"],
                     "default": "all",
                 },
+                "query": {**string, "maxLength": 500},
+                "kind": {
+                    **string,
+                    "enum": ["all", "skill", "plugin_skill", "plugin", "rule", "worktree", "capability"],
+                    "default": "all",
+                },
                 "max_items": {**integer, "minimum": 1, "maximum": 500, "default": 200},
             }
         ),
-        "checks_discover": object_schema({"path": {**string, "default": "."}}),
+        "checks_discover": object_schema(
+            {
+                "path": {**string, "default": "."},
+                "recommend": {**boolean, "default": True},
+                "changed_paths": {
+                    "type": "array",
+                    "items": {**string, "minLength": 1},
+                    "maxItems": 100,
+                },
+            }
+        ),
         "checks_run": object_schema(
             {
                 "check_id": {**string, "minLength": 1},
@@ -8378,12 +8932,17 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "timeout_ms": {**integer, "minimum": 1, "maximum": 600000, "default": 30000},
                 "yield_time_ms": {**integer, "minimum": 0, "maximum": 30000, "default": 10000},
                 "max_output_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 65536},
+                "max_diagnostics": {**integer, "minimum": 1, "maximum": 500, "default": 100},
                 "approval_ids": {"type": "array", "items": {**string, "minLength": 1}, "maxItems": 16},
             },
             ["check_id"],
         ),
         "checks_result": object_schema(
-            {"check_run_id": {**string, "minLength": 1}}, ["check_run_id"]
+            {
+                "check_run_id": {**string, "minLength": 1},
+                "max_diagnostics": {**integer, "minimum": 1, "maximum": 500, "default": 100},
+            },
+            ["check_run_id"],
         ),
         "task_create": object_schema(
             {
@@ -8507,251 +9066,6 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             },
             ["path"],
         ),
-        "browser_status": object_schema(
-            {
-                "endpoint": string,
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
-            }
-        ),
-        "browser_tabs": object_schema(
-            {
-                "endpoint": string,
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
-            }
-        ),
-        "browser_active_tab": object_schema(
-            {
-                "endpoint": string,
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
-            }
-        ),
-        "browser_snapshot": object_schema(
-            {
-                "endpoint": string,
-                "tab_index": {**integer, "minimum": 0},
-                "tab_id": {**string, "minLength": 1},
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
-                "max_chars": {**integer, "minimum": 1, "maximum": 200000, "default": 50000},
-                "max_elements": {**integer, "minimum": 1, "maximum": 500, "default": 150},
-            }
-        ),
-        "browser_screenshot": object_schema(
-            {
-                "endpoint": string,
-                "tab_index": {**integer, "minimum": 0},
-                "tab_id": {**string, "minLength": 1},
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
-                "full_page": {**boolean, "default": False},
-            }
-        ),
-        "browser_evaluate": object_schema(
-            {
-                "script": {**string, "minLength": 1},
-                "endpoint": string,
-                "tab_index": {**integer, "minimum": 0},
-                "tab_id": {**string, "minLength": 1},
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
-            },
-            ["script"],
-        ),
-        "browser_click": object_schema(
-            {
-                "selector": {**string, "minLength": 1},
-                "dialog_action": {**string, "enum": ["accept", "dismiss"]},
-                "dialog_text": string,
-                "endpoint": string,
-                "tab_index": {**integer, "minimum": 0},
-                "tab_id": {**string, "minLength": 1},
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
-            },
-            ["selector"],
-        ),
-        "browser_type": object_schema(
-            {
-                "selector": {**string, "minLength": 1},
-                "text": string,
-                "endpoint": string,
-                "tab_index": {**integer, "minimum": 0},
-                "tab_id": {**string, "minLength": 1},
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
-                "clear": {**boolean, "default": True},
-                "delay_ms": {**integer, "minimum": 0, "maximum": 1000, "default": 0},
-            },
-            ["selector", "text"],
-        ),
-        "browser_navigate": object_schema(
-            {
-                "url": {**string, "minLength": 1},
-                "endpoint": string,
-                "tab_index": {**integer, "minimum": 0},
-                "tab_id": {**string, "minLength": 1},
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
-                "wait_until": {**string, "enum": ["commit", "domcontentloaded", "load", "networkidle"], "default": "domcontentloaded"},
-            },
-            ["url"],
-        ),
-        "browser_back": object_schema(
-            {
-                "endpoint": string,
-                "tab_index": {**integer, "minimum": 0},
-                "tab_id": {**string, "minLength": 1},
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
-                "wait_until": {**string, "enum": ["commit", "domcontentloaded", "load", "networkidle"], "default": "domcontentloaded"},
-            }
-        ),
-        "browser_reload": object_schema(
-            {
-                "endpoint": string,
-                "tab_index": {**integer, "minimum": 0},
-                "tab_id": {**string, "minLength": 1},
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
-                "wait_until": {**string, "enum": ["commit", "domcontentloaded", "load", "networkidle"], "default": "domcontentloaded"},
-            }
-        ),
-        "browser_hover": object_schema(
-            {
-                "selector": {**string, "minLength": 1},
-                "endpoint": string,
-                "tab_index": {**integer, "minimum": 0},
-                "tab_id": {**string, "minLength": 1},
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
-            },
-            ["selector"],
-        ),
-        "browser_select": object_schema(
-            {
-                "selector": {**string, "minLength": 1},
-                "values": {"type": "array", "items": string, "minItems": 1, "maxItems": 100},
-                "endpoint": string,
-                "tab_index": {**integer, "minimum": 0},
-                "tab_id": {**string, "minLength": 1},
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
-            },
-            ["selector", "values"],
-        ),
-        "browser_press": object_schema(
-            {
-                "key": {**string, "minLength": 1},
-                "selector": {**string, "minLength": 1},
-                "endpoint": string,
-                "tab_index": {**integer, "minimum": 0},
-                "tab_id": {**string, "minLength": 1},
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
-            },
-            ["key"],
-        ),
-        "browser_upload": object_schema(
-            {
-                "selector": {**string, "minLength": 1},
-                "paths": {"type": "array", "items": {**string, "minLength": 1}, "minItems": 1, "maxItems": 32},
-                "download_ids": {"type": "array", "items": {**string, "pattern": "^[0-9a-f]{24}$"}, "minItems": 1, "maxItems": 32},
-                "endpoint": string,
-                "tab_index": {**integer, "minimum": 0},
-                "tab_id": {**string, "minLength": 1},
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
-            },
-            ["selector"],
-        ),
-        "browser_download": object_schema(
-            {
-                "selector": {**string, "minLength": 1},
-                "url": {**string, "minLength": 1},
-                "filename": {**string, "minLength": 1, "maxLength": 180},
-                "max_bytes": {**integer, "minimum": 1, "maximum": 268435456, "default": 67108864},
-                "endpoint": string,
-                "tab_index": {**integer, "minimum": 0},
-                "tab_id": {**string, "minLength": 1},
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
-            }
-        ),
-        "browser_watch_start": object_schema(
-            {
-                "endpoint": string,
-                "tab_index": {**integer, "minimum": 0},
-                "tab_id": {**string, "minLength": 1},
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
-                "max_entries": {**integer, "minimum": 1, "maximum": 10000, "default": 1000},
-                "dialog_action": {**string, "enum": ["accept", "dismiss"], "default": "dismiss"},
-                "dialog_text": string,
-            }
-        ),
-        "browser_watch_poll": object_schema(
-            {
-                "watch_id": {**string, "pattern": "^[0-9a-f]{24}$"},
-                "after_seq": {**integer, "minimum": 0, "default": 0},
-                "max_entries": {**integer, "minimum": 1, "maximum": 5000, "default": 200},
-                "wait_ms": {**integer, "minimum": 0, "maximum": 30000, "default": 0},
-            },
-            ["watch_id"],
-        ),
-        "browser_watch_stop": object_schema(
-            {
-                "watch_id": {**string, "pattern": "^[0-9a-f]{24}$"},
-            },
-            ["watch_id"],
-        ),
-        "browser_wait": object_schema(
-            {
-                "selector": {**string, "minLength": 1},
-                "url": {**string, "minLength": 1},
-                "text": string,
-                "exact": {**boolean, "default": False},
-                "state": {**string, "enum": ["attached", "detached", "visible", "hidden"], "default": "visible"},
-                "wait_ms": {**integer, "minimum": 0, "maximum": 30000, "default": 0},
-                "endpoint": string,
-                "tab_index": {**integer, "minimum": 0},
-                "tab_id": {**string, "minLength": 1},
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
-            }
-        ),
-        "browser_events": object_schema(
-            {
-                "trigger_selector": {**string, "minLength": 1},
-                "endpoint": string,
-                "tab_index": {**integer, "minimum": 0},
-                "tab_id": {**string, "minLength": 1},
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
-                "wait_ms": {**integer, "minimum": 0, "maximum": 30000, "default": 500},
-                "max_entries": {**integer, "minimum": 1, "maximum": 5000, "default": 300},
-                "reload": {**boolean, "default": False},
-                "dialog_action": {**string, "enum": ["accept", "dismiss"], "default": "dismiss"},
-                "dialog_text": string,
-            }
-        ),
-        "browser_console": object_schema(
-            {
-                "endpoint": string,
-                "tab_index": {**integer, "minimum": 0},
-                "tab_id": {**string, "minLength": 1},
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
-                "wait_ms": {**integer, "minimum": 0, "maximum": 10000, "default": 250},
-                "max_entries": {**integer, "minimum": 1, "maximum": 2000, "default": 200},
-                "reload": {**boolean, "default": False},
-            }
-        ),
-        "browser_network": object_schema(
-            {
-                "endpoint": string,
-                "tab_index": {**integer, "minimum": 0},
-                "tab_id": {**string, "minLength": 1},
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
-                "wait_ms": {**integer, "minimum": 0, "maximum": 10000, "default": 250},
-                "max_entries": {**integer, "minimum": 1, "maximum": 5000, "default": 300},
-                "reload": {**boolean, "default": False},
-                "include_resources": {**boolean, "default": True},
-            }
-        ),
-        "browser_inspect": object_schema(
-            {
-                "selector": {**string, "minLength": 1},
-                "endpoint": string,
-                "tab_index": {**integer, "minimum": 0},
-                "tab_id": {**string, "minLength": 1},
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
-                "max_html_chars": {**integer, "minimum": 1, "maximum": 200000, "default": 20000},
-            },
-            ["selector"],
-        ),
         "code_symbols": object_schema(
             {
                 "path": {**string, "default": "."},
@@ -8765,6 +9079,9 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             {
                 "symbol": {**string, "minLength": 1},
                 "path": {**string, "default": "."},
+                "line": {**integer, "minimum": 1},
+                "column": {**integer, "minimum": 1},
+                "prefer_lsp": {**boolean, "default": True},
                 "max_results": {**integer, "minimum": 1, "maximum": 500, "default": 50},
                 "max_files": {**integer, "minimum": 1, "maximum": 20000, "default": 2000},
             },
@@ -8774,50 +9091,15 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             {
                 "symbol": {**string, "minLength": 1},
                 "path": {**string, "default": "."},
+                "line": {**integer, "minimum": 1},
+                "column": {**integer, "minimum": 1},
+                "prefer_lsp": {**boolean, "default": True},
+                "include_declaration": {**boolean, "default": True},
                 "case_sensitive": {**boolean, "default": True},
                 "max_results": {**integer, "minimum": 1, "maximum": 10000, "default": 500},
                 "max_files": {**integer, "minimum": 1, "maximum": 20000, "default": 2000},
             },
             ["symbol"],
-        ),
-        "chrome_extension_install": object_schema(
-            {
-                "host_path": string,
-                "open_extensions_page": {**boolean, "default": True},
-            }
-        ),
-        "chrome_extension_status": object_schema(
-            {
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
-            }
-        ),
-        "chrome_extensions": object_schema(
-            {
-                "query": string,
-                "max_results": {**integer, "minimum": 1, "maximum": 2000, "default": 200},
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
-            }
-        ),
-        "chrome_extension_tabs": object_schema(
-            {
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
-            }
-        ),
-        "chrome_extension_execute": object_schema(
-            {
-                "tab_id": {**integer, "minimum": 0},
-                "script": {**string, "minLength": 1},
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
-            },
-            ["tab_id", "script"],
-        ),
-        "chrome_extension_send": object_schema(
-            {
-                "extension_id": {**string, "minLength": 1},
-                "message": {},
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 30000, "default": 5000},
-            },
-            ["extension_id", "message"],
         ),
     }
     for name in ("git_status", "git_diff", "git_log", "git_show", "git_blame", "git_branch_list",

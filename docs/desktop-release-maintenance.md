@@ -147,7 +147,7 @@ maintained branch as the workflow source and the immutable tag as the release
 source:
 
 ```bash
-VERSION=0.4.1
+VERSION=0.4.2
 gh workflow run desktop-release.yml \
   -R iihciyekub/coding-tools-mcp \
   --ref iiaide \

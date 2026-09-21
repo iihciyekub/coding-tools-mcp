@@ -1162,6 +1162,14 @@ def _retained_check_result(result: dict[str, Any]) -> dict[str, Any]:
             "stderr_ref",
             "truncated",
             "diagnostics",
+            "diagnostic_count",
+            "failing_tests",
+            "failing_test_count",
+            "diagnostics_truncated",
+            "diagnostic_parsers",
+            "diagnostic_parser_version",
+            "diagnostic_summary",
+            "diagnostic_context",
         )
         if result.get(key) is not None
     }

@@ -8,7 +8,7 @@ import type { DependencyStatus, LogBundle, PermissionMode, RuntimeStatus, Worksp
 import { publicEndpoint, workspaceHue } from "./utils";
 
 const PANEL_WIDTH = 320;
-const APP_VERSION = "0.4.1";
+const APP_VERSION = "0.4.2";
 type Page = "home" | "new-access" | "workspaces" | "environment" | "logs" | "settings" | "workflow" | "more";
 type CopyAction = "server-name" | "server-url" | "credential" | "logs";
 type ConfirmAction = { kind: "stop"; profileId: string } | { kind: "stop-all" } | { kind: "quit" } | null;

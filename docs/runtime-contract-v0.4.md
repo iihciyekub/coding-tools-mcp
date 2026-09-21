@@ -129,7 +129,7 @@ instructions:
     "io.modelcontextprotocol/serverInfo": {
       "name": "coding-tools-mcp",
       "title": "Coding Tools MCP",
-      "version": "0.4.1"
+      "version": "0.4.2"
     }
   }
 }
@@ -493,7 +493,11 @@ read/write access, shell-snapshot state, hook warnings, workflow/deferred-tool
 state, optional LSP status, Landlock availability/enforcement, and the active
 network policy. Actionable findings are returned as bounded `issues` entries
 with a code, message, and suggested fix. The doctor does not make network
-requests and does not mutate the workspace.
+requests and does not mutate the workspace. On macOS it also reports bounded
+Apple toolchain metadata including architecture, macOS version, selected
+developer directory, Xcode/Command Line Tools, Swift, SourceKit-LSP, codesign,
+notarytool, xcresulttool, Homebrew, and Git presence without reading Keychain or
+credential contents.
 
 ### hooks_status
 
@@ -676,8 +680,13 @@ Annotations: `{"title":"Get command","readOnlyHint":true,"destructiveHint":false
 
 Provide exactly one identifier. The result reports status, exit/signal/timeout,
 absolute stdout/stderr byte totals, retained `output_refs`, and expiry metadata
-without advancing any output cursor. An operation still between acceptance and
-process registration reports `status: "accepting"` and is safe to poll again.
+without advancing any output cursor. Running commands also report
+`last_output_at`, `idle_seconds`, `runtime_seconds`, `activity_state`, and
+`needs_attention`. `activity_state="long_silent"` means the process is still
+running but has produced no output for at least 60 seconds; it is an attention
+signal, not an automatic hang verdict, and the runtime does not kill it. An
+operation still between acceptance and process registration reports
+`status: "accepting"` and is safe to poll again.
 
 ### list_commands
 
@@ -686,8 +695,10 @@ Inputs: `"operation_id"`, `"max_results"`, `"workdir"`.
 Annotations: `{"title":"List commands","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
 Lists recent active/retained commands plus any accepting operation record,
-newest first. `"operation_id"` optionally filters the list after a lost HTTP
-response or reconnect.
+newest first. Registered commands include the same activity/idle fields as
+`get_command`, allowing clients to surface long-silent work without consuming
+output. `"operation_id"` optionally filters the list after a lost HTTP response
+or reconnect.
 
 Registered commands carry their canonical absolute `workdir` in execution,
 status, polling and recovery results. Optional `workdir` filters this list by
@@ -701,6 +712,9 @@ Inputs: `"command_id"`, `"chars"`, `"yield_time_ms"`, `"max_output_bytes"`, `"ve
 Annotations: `{"title":"Write stdin","readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false}`.
 
 Poll or interact with a command. Pass empty `chars` to wait for output.
+Polling and initial `exec_command` results include the same activity health fields
+as `get_command`, so a client can detect long-silent work without issuing an
+extra status call.
 
 Poll example: `{"command_id":"abc","chars":"","yield_time_ms":10000}`.
 Input example: `{"command_id":"abc","chars":"yes\n"}`.
@@ -814,275 +828,6 @@ The base64 data appears exactly once, in one MCP image content block. Stable
 `structuredContent` contains metadata only; it has no duplicate base64 or data
 URL. Pillow is optional and used only for requested auto-resize.
 
-> Historical note: the `browser_*` and `chrome_extension_*` sections below
-> document browser-automation tools removed from the live v0.3 catalog. They
-> are not registered, returned by `tools/list`, or callable by current runtimes.
-> They remain here only to make older v0.3 deployments and migration records
-> interpretable.
-
-### browser_status
-
-Inputs: `"endpoint"`, `"timeout_ms"`.
-
-Annotations: `{"title":"Browser status","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
-
-Connects with Playwright to a local loopback Chrome CDP endpoint, defaulting to
-`http://127.0.0.1:9222`, and reports browser version, context count, and tab count.
-
-### browser_tabs
-
-Inputs: `"endpoint"`, `"timeout_ms"`.
-
-Annotations: `{"title":"Browser tabs","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
-
-Lists inspectable Chrome tabs with per-call indexes plus CDP `tab_id` values,
-titles, URLs, and document visibility state. `tab_id` is stable across ordinary
-tab-list reorderings and is preferred for multi-step browser workflows.
-
-### browser_active_tab
-
-Inputs: `"endpoint"`, `"timeout_ms"`.
-
-Annotations: `{"title":"Browser active tab","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
-
-Returns the last tab reporting `document.visibilityState == "visible"`, with a
-fallback to the last inspectable tab when Chrome cannot expose foreground state.
-
-### browser_snapshot
-
-Inputs: `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`, `"max_chars"`, `"max_elements"`.
-
-Annotations: `{"title":"Browser snapshot","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
-
-Returns bounded `document.body.innerText` plus a simplified list of visible
-links, buttons, form controls, ARIA roles, focusable and editable elements with
-unique CSS selectors suitable for subsequent browser calls. Control labels and
-disabled/checked state are included; password values are redacted.
-`element_count` and `elements_truncated` describe the element limit separately
-from `text_truncated`.
-
-### browser_screenshot
-
-Inputs: `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`, `"full_page"`.
-
-Annotations: `{"title":"Browser screenshot","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
-
-Captures the selected tab as PNG. The base64 appears only in the MCP image
-content block; structured content keeps metadata only.
-
-### browser_evaluate
-
-Inputs: `"script"`, `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`.
-
-Annotations: `{"title":"Browser evaluate","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
-
-Evaluates arbitrary JavaScript in the selected page. It is intentionally marked
-mutating because JavaScript can change page state even when a particular script
-only reads it. `timeout_ms` is an execution deadline enforced through CDP, so
-an unresolved Promise or blocked JavaScript execution cannot occupy the tool
-request indefinitely.
-
-### browser_click
-
-Inputs: `"selector"`, `"dialog_action"`, `"dialog_text"`, `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`.
-
-Annotations: `{"title":"Browser click","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
-
-Clicks the first element matching the supplied Playwright selector. Optional
-dialog handling is registered before the click and can accept, dismiss, or
-supply prompt text without leaving the page blocked.
-
-### browser_type
-
-Inputs: `"selector"`, `"text"`, `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`, `"clear"`, `"delay_ms"`.
-
-Annotations: `{"title":"Browser type","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
-
-By default fills the first matching element, replacing its current value. With
-`clear=false`, it types sequentially and optionally applies `delay_ms` between
-characters.
-
-### browser_navigate
-
-Inputs: `"url"`, `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`, `"wait_until"`.
-
-Annotations: `{"title":"Browser navigate","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
-
-Navigates the selected tab to an HTTP(S) URL and returns the resulting tab and
-response status when available.
-
-### browser_back
-
-Inputs: `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`, `"wait_until"`.
-
-Annotations: `{"title":"Browser back","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
-
-Moves the selected tab back once and reports whether a history entry existed.
-
-### browser_reload
-
-Inputs: `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`, `"wait_until"`.
-
-Annotations: `{"title":"Browser reload","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
-
-Reloads the selected tab with a bounded Playwright load-state wait.
-
-### browser_hover
-
-Inputs: `"selector"`, `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`.
-
-Annotations: `{"title":"Browser hover","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
-
-Hovers the first matching element so menus and hover-driven UI can be operated.
-
-### browser_select
-
-Inputs: `"selector"`, `"values"`, `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`.
-
-Annotations: `{"title":"Browser select","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
-
-Selects one or more option values on the first matching native select control.
-
-### browser_press
-
-Inputs: `"key"`, `"selector"`, `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`.
-
-Annotations: `{"title":"Browser press","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
-
-Sends a Playwright key or key chord to a matched element or the active page.
-
-### browser_upload
-
-Inputs: `"selector"`, `"paths"`, `"download_ids"`, `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`.
-
-Annotations: `{"title":"Browser upload","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
-
-Attaches up to 32 files to the first matching file input. Inputs may be explicit
-workspace-confined paths or `download_id` values returned by `browser_download`.
-Direct host paths and unmanaged runtime files are rejected. Managed downloads
-expire with the runtime instance and are not silently copied into the workspace.
-
-### browser_download
-
-Inputs: `"selector"`, `"url"`, `"filename"`, `"max_bytes"`, `"endpoint"`,
-`"tab_index"`, `"tab_id"`, `"timeout_ms"`.
-
-Annotations: `{"title":"Browser download","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
-
-Requires exactly one of `selector` or `url`. A selector must identify an element
-with an `href`; relative URLs are resolved against the selected page. The final
-resource must be HTTP(S). The runtime asks Chrome to load the resource through
-the selected tab's CDP network context with credentials enabled, receives a CDP
-stream, and writes it incrementally into the runtime-private `browser-downloads`
-area. The browser's native Downloads UI and its unreliable default-context
-Playwright download events are not used.
-
-`max_bytes` defaults to 64 MiB and is capped by schema at 256 MiB. A declared
-`Content-Length` above the limit is rejected before streaming; an undeclared or
-incorrect length is still enforced while reading. Partial files are removed on
-failure. A successful result returns a random `download_id`, filename, byte
-count, SHA-256, source URL, HTTP status, content type, and managed path. The
-managed file can be reused by `browser_upload` with its `download_id`.
-
-### browser_watch_start
-
-Inputs: `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`,
-`"max_entries"`, `"dialog_action"`, `"dialog_text"`.
-
-Annotations: `{"title":"Start browser watch","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
-
-Starts one background Playwright/CDP attachment owned by the current Runtime and
-selected tab. The worker continuously services Playwright so console, page-error,
-failed-request, dialog, and popup events remain observable across later MCP tool
-calls. Events receive monotonically increasing `seq` values and Unix timestamps.
-The retained deque is bounded by `max_entries` (default 1000, maximum 10000);
-old entries are dropped rather than growing memory without bound.
-
-The watch installs a dialog handler for its whole lifetime and is therefore
-mutating: dialogs are dismissed by default or accepted when configured. The
-watch is process-local. It is not stored in the workflow database, does not
-survive Runtime restart, and never closes the user's Chrome when stopped.
-
-### browser_watch_poll
-
-Inputs: `"watch_id"`, `"after_seq"`, `"max_entries"`, `"wait_ms"`.
-
-Annotations: `{"title":"Poll browser watch","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
-
-Returns retained events with `seq > after_seq`, up to `max_entries`. `wait_ms`
-optionally waits until at least one new event arrives, the watch stops/fails, or
-the bounded deadline expires. `next_after_seq` is the continuation cursor.
-`dropped_since_cursor` and `dropped_total` disclose buffer loss; `truncated`
-also becomes true when more retained events remain than the current result cap.
-Unknown or previous-runtime ids return `BROWSER_WATCH_NOT_FOUND`.
-
-### browser_watch_stop
-
-Inputs: `"watch_id"`.
-
-Annotations: `{"title":"Stop browser watch","readOnlyHint":false,"destructiveHint":true,"idempotentHint":true,"openWorldHint":true}`.
-
-Signals the watch worker to stop and waits briefly for the dedicated attachment
-thread to exit. Repeating stop for the same retained watch is safe. Runtime
-shutdown stops all remaining watches before command-manager cleanup.
-
-### browser_wait
-
-Inputs: `"selector"`, `"url"`, `"text"`, `"exact"`, `"state"`, `"wait_ms"`, `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`.
-
-Annotations: `{"title":"Browser wait","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
-
-Waits for any supplied selector, URL pattern, text, and bounded delay in order.
-At least one condition is required; unmet conditions return `BROWSER_TIMEOUT`.
-
-### browser_events
-
-Inputs: `"trigger_selector"`, `"endpoint"`, `"tab_index"`, `"tab_id"`,
-`"timeout_ms"`, `"wait_ms"`, `"max_entries"`, `"reload"`,
-`"dialog_action"`, `"dialog_text"`.
-
-Annotations: `{"title":"Capture browser events","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
-
-Samples bounded console, page-error, failed-request, dialog, and popup
-events emitted after the Playwright attachment. When `trigger_selector` is
-provided, listeners are installed before the first matching element is clicked,
-so click-triggered dialogs and new windows can be observed without a cross-call
-race. `dialog_action` controls any dialog seen during the sample.
-This tool is a bounded one-call sample, not a persistent browser subscription;
-events that happened before attachment are not recoverable. Native browser
-download events are still not claimed here; use `browser_download` for bounded,
-managed resource retrieval instead.
-
-### browser_console
-
-Inputs: `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`, `"wait_ms"`, `"max_entries"`, `"reload"`.
-
-Annotations: `{"title":"Browser console","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
-
-Captures console messages and uncaught page errors emitted after the Playwright
-attachment. `reload=true` reloads the selected page first so page-load console
-output can be observed; for that reason the tool is truthfully marked mutating.
-
-### browser_network
-
-Inputs: `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`, `"wait_ms"`, `"max_entries"`, `"reload"`, `"include_resources"`.
-
-Annotations: `{"title":"Browser network","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
-
-Returns current `PerformanceResourceTiming` entries when requested and captures
-responses/request failures emitted after attachment. `reload=true` reloads the
-page to sample page-load traffic, so the tool is marked mutating.
-
-### browser_inspect
-
-Inputs: `"selector"`, `"endpoint"`, `"tab_index"`, `"tab_id"`, `"timeout_ms"`, `"max_html_chars"`.
-
-Annotations: `{"title":"Browser inspect","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
-
-Inspects the first matching element and returns its attributes, bounded
-`outerHTML`, bounding rectangle, selected computed style properties, parent
-chain, visibility, and element-scoped Web Animations state/keyframes.
-
 ### code_symbols
 
 Inputs: `"path"`, `"query"`, `"kind"`, `"max_results"`, `"max_files"`.
@@ -1099,88 +844,33 @@ visited, results report `truncated: true`, `truncated_by: "max_files"`, and
 
 ### code_definition
 
-Inputs: `"symbol"`, `"path"`, `"max_results"`, `"max_files"`.
+Inputs: `"symbol"`, `"path"`, `"line"`, `"column"`, `"prefer_lsp"`,
+`"max_results"`, `"max_files"`.
 
 Annotations: `{"title":"Code definition","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
 Finds exact symbol or qualified-name definitions using the same language-aware
 indexing rules as `code_symbols`. Multiple definitions are returned for
 overloads or duplicate names rather than guessing one winner.
+When `prefer_lsp=true` and `path` is a source file with one-based `line` and
+`column`, the tool first requests an LSP semantic definition. Runtime LSP
+unavailability, timeout, exit, unsupported-language, or server error falls back
+to the existing bounded symbol scan. Path/security/argument failures do not fall
+back. Results identify `backend`, `fallback_used`, and coverage.
 
 ### code_references
 
-Inputs: `"symbol"`, `"path"`, `"case_sensitive"`, `"max_results"`, `"max_files"`.
+Inputs: `"symbol"`, `"path"`, `"line"`, `"column"`, `"prefer_lsp"`,
+`"include_declaration"`, `"case_sensitive"`, `"max_results"`, `"max_files"`.
 
 Annotations: `{"title":"Code references","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
-Finds exact identifier-token occurrences across supported source files and
-returns bounded workspace-relative path, line, column, and preview metadata.
-This is intentionally a lightweight textual reference scan rather than a
-compiler or persistent LSP service.
-
-### chrome_extension_install
-
-Inputs: `"host_path"`, `"open_extensions_page"`.
-
-Annotations: `{"title":"Install Chrome extension bridge","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
-
-On macOS, copies the bundled Manifest V3 bridge extension into the current
-user's application-support directory and writes Chrome's per-user Native
-Messaging host manifest. `host_path` may override discovery of the installed
-`coding-tools-mcp-chrome-host` executable. Module-only Python installations
-receive a small launcher pinned to their current interpreter/import root. `open_extensions_page=true` opens
-`chrome://extensions` to make the one-time approval step immediate. Chrome
-still requires one explicit **Load unpacked** approval from that page.
-
-### chrome_extension_status
-
-Inputs: `"timeout_ms"`.
-
-Annotations: `{"title":"Chrome extension status","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
-
-Reports the stable bridge extension id, install paths, Native Messaging
-manifest state, local Unix-socket state, and live bridge metadata when the
-extension is connected.
-
-### chrome_extensions
-
-Inputs: `"query"`, `"max_results"`, `"timeout_ms"`.
-
-Annotations: `{"title":"Chrome extensions","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
-
-Uses Chrome's `management` extension API through Native Messaging to list
-installed extensions with ids, names, versions, enablement, type, and install
-type. `query` filters by extension name or id.
-
-### chrome_extension_tabs
-
-Inputs: `"timeout_ms"`.
-
-Annotations: `{"title":"Chrome extension tabs","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}`.
-
-Lists tabs through Chrome's extension `tabs` API. This is independent of the
-Playwright/CDP browser tools and does not require a remote-debugging port.
-
-### chrome_extension_execute
-
-Inputs: `"tab_id"`, `"script"`, `"timeout_ms"`.
-
-Annotations: `{"title":"Chrome extension execute","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
-
-Temporarily attaches Chrome's debugger API to the selected tab, evaluates the
-JavaScript expression, returns a by-value result, then detaches. Chrome may
-surface its normal debugger-attached UI while the request is active.
-
-### chrome_extension_send
-
-Inputs: `"extension_id"`, `"message"`, `"timeout_ms"`.
-
-Annotations: `{"title":"Chrome extension send","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
-
-Sends a runtime message to another installed Chrome extension. Chrome security
-rules still apply: the target extension must explicitly permit external
-messages from the bridge extension; this tool does not bypass extension
-isolation.
+Without a semantic position, finds exact identifier-token occurrences across
+supported source files and returns bounded workspace-relative path, line,
+column, and preview metadata. With `prefer_lsp=true` plus file/line/column it
+first requests semantic references, falling back only for the same LSP runtime
+failure classes as `code_definition`. Results identify the backend and whether
+fallback occurred.
 
 ## Opt-in workflow toolset
 
@@ -1200,15 +890,27 @@ Returns bounded manifest, language, entry-point, top-level area, and project
 instruction metadata. `scan_complete` and `truncated` disclose coverage.
 The optional `path` defaults to `.` and limits enumeration before applying the
 file budget. File paths remain workspace-relative. Current applicable rules are
-returned separately from startup discovery metadata.
+returned separately from startup discovery metadata. Apple workspaces also
+return an `apple` block identifying `.xcodeproj`, `.xcworkspace`, `Package.swift`,
+Swift source presence, and bounded local Xcode/Swift/SDK toolchain metadata.
+Discovery is read-only and does not start Xcode.
 
 ### repo_map
 
-Inputs: `"path"`, `"query"`, `"max_files"`, `"max_symbols"`.
+Inputs: `"path"`, `"query"`, `"impact"`, `"changed_paths"`, `"max_files"`,
+`"max_symbols"`, `"max_impact_files"`, `"max_impact_symbols"`.
 
 Returns bounded code symbols grouped by file. `coverage` identifies the current
 Python-AST and language-pattern implementation; this tool does not claim LSP
-reference or call-graph semantics.
+or compiler completeness. With `impact=true`, the tool also returns a bounded
+deterministic change-impact estimate. Explicit `changed_paths` are workspace-
+relative and must stay under the selected `path`; when they are omitted, the
+runtime seeds impact analysis from current Git status. Impact analysis extracts
+symbols from changed files, scans exact identifier references once across the
+selected tree, ranks candidate impacted files, and surfaces likely test files
+using reference and filename heuristics. The result includes `coverage`,
+`limitations`, `scan_complete`, and `truncated`; it is intentionally described
+as a heuristic rather than a compiler call graph.
 
 ### project_instructions
 
@@ -1238,31 +940,56 @@ confinement.
 
 ### agent_environment
 
-Inputs: `"provider"`, `"max_items"`.
+Inputs: `"provider"`, `"query"`, `"kind"`, `"max_items"`.
 
 This tool is exposed only in `permission_mode=host`. It discovers metadata for
 installed local agent environments (`codex`, `claude`, `gemini`, `cursor`, and
 `opencode`) including CLI/home paths, Skill names, Codex enabled Plugin ids,
 Plugin Skill names, worktrees, rule filenames, and selected local capability
 presence. It reports only booleans for auth/browser-session/OAuth-like resources
-and never returns their contents. It does not execute an agent CLI or Skill.
+and never returns their contents. Optional `query` plus `kind` performs a bounded
+cross-environment metadata search over `skill`, `plugin_skill`, `plugin`, `rule`,
+`worktree`, or `capability` entries. Search mode returns compact provider summaries
+plus flattened matches instead of repeating full discovered metadata. It does not
+execute an agent CLI or Skill.
 
 ### checks_discover
 
-Inputs: `"path"`.
+Inputs: `"path"`, `"recommend"`, `"changed_paths"`.
 
 Discovers bounded test, lint, typecheck, aggregate, and build commands from
-recognized project files without executing them.
+recognized project files without executing them. `Package.swift` contributes
+`swift build` and `swift test`. On macOS, when exactly one top-level
+`.xcodeproj` or `.xcworkspace` exists and `xcodebuild` is available, discovery
+adds a read-only `xcodebuild ... -list -json` metadata check; it does not guess
+schemes, destinations, simulators, or devices.
+
+By default, `checks_discover` also reads bounded current Git changes for the
+selected target and ranks only the already-discovered checks. Callers may pass
+explicit `changed_paths` or disable recommendation with `recommend=false`.
+Recommendation is deterministic changed-path metadata only: Python changes
+prefer Python checks, JavaScript/TypeScript prefer npm, Rust prefers Cargo, Go
+prefers Go, Swift prefers SwiftPM, Xcode project metadata prefers the Xcode
+metadata check, and Make checks act as a cross-language fallback. Each check
+reports `recommended`, `priority`, `recommendation_score`, and bounded
+`recommendation_reasons`; the response also includes ordered
+`recommended_check_ids`. Recommendation does not create a new command, execute
+anything, or change `checks_run` semantics.
 
 ### checks_run
 
 Inputs: `"check_id"`, `"path"`, `"task_id"`, `"operation_id"`, `"timeout_ms"`,
-`"yield_time_ms"`, `"max_output_bytes"`, `"approval_ids"`.
+`"yield_time_ms"`, `"max_output_bytes"`, `"max_diagnostics"`, `"approval_ids"`.
 
 Re-discovers the requested check and runs its exact command through the existing
 `exec_command` policy and command manager. Unknown or removed checks return
 `CHECK_NOT_FOUND`; command handles and retry deduplication keep their existing
-semantics.
+semantics. Bounded structured diagnostics are parsed from retained output for
+common pytest/mypy/ruff/rustc/TypeScript/Go/ESLint shapes plus high-signal
+Swift/Clang locations, XCTest failures, Xcode build/test failure markers,
+codesign errors, and notarytool errors. `diagnostics`, `failing_tests`, parser
+metadata, and truncation flags are advisory; raw command output remains
+authoritative and is still available through the normal output references.
 
 Completed and running checks receive a persistent `check_run_id`. When
 `task_id` is supplied, the run is also appended to that task's event history.
@@ -1271,11 +998,15 @@ command.
 
 ### checks_result
 
-Inputs: `"check_run_id"`.
+Inputs: `"check_run_id"`, `"max_diagnostics"`.
 
 Returns persisted check evidence. A retained running command is refreshed from
 the command manager; after a runtime restart an unresolvable running command is
-reported as `unknown`. `stale` is true when the current code fingerprint differs
+reported as `unknown`/interrupted without erasing any previously retained warning.
+Structured diagnostics are preserved in check evidence and can be rebuilt from
+retained command output when a long-running check completes. This parsing is
+heuristic and bounded; the raw output remains the source of truth.
+`stale` is true when the current code fingerprint differs
 from the recorded post-check fingerprint. Unknown ids return
 `CHECK_RUN_NOT_FOUND`.
 
@@ -1391,6 +1122,11 @@ the current workspace, Git state, running-command set, runtime capability state,
 and SHA-256 fingerprints of those deterministic sections. `action="get"`
 recomputes the deterministic state and reports `stale` plus bounded reasons such
 as `git_state_changed`, `running_commands_changed`, or `capabilities_changed`.
+It also returns structured `drift` explaining changed HEAD/branch/paths, commands
+that started or finished, and capability differences, plus a compact `resume`
+packet containing the saved summary/decisions/unresolved/next steps, freshness,
+recommended reads, and recommended actions. `task_context` automatically embeds
+the latest linked checkpoint's compact `resume` packet when one exists.
 `action="list"` returns bounded checkpoint metadata. The combined deterministic
 and semantic payload is limited to 128 KiB. Supplying `task_id` links the context
 checkpoint into `task_context`. The tool does not call Codex compact or any
@@ -1481,11 +1217,14 @@ writers or implement multi-round agent scheduling.
 
 Inputs: none.
 
-Reports available/running Python, TypeScript/JavaScript, and Rust language-server
-backends, their commands and supported extensions. Rust uses `rust-analyzer` and
+Reports available/running Python, TypeScript/JavaScript, Rust, and Swift
+language-server backends, their commands and supported extensions. Rust uses `rust-analyzer` and
 is rooted at the nearest ancestor `Cargo.toml`; a rustup proxy without the actual
 component installed is reported unavailable. Backends start only when a semantic
 operation first needs them.
+Swift uses `sourcekit-lsp`, first from PATH and then from `xcrun --find
+sourcekit-lsp`, and roots at the nearest `Package.swift`, `.xcodeproj`, or
+`.xcworkspace` boundary.
 Python and TypeScript also use nearest language/project configuration markers,
 stopping at the nearest Git worktree boundary instead of borrowing parent/neighbor
 configuration. Backends are reused by language and project root. This does not

@@ -1,5 +1,55 @@
 # Changelog
 
+## Desktop 0.4.2
+
+- Made macOS 15 the authoritative Desktop CI platform and kept stable Desktop releases macOS-only through `releasePlatforms`.
+- Aligned Desktop-facing documentation with the macOS-first Coding Runtime direction while preserving the existing signed/notarized DMG and Homebrew release contract.
+- Removed hosted cloud-sandbox product references from the Desktop/repository surface; local Docker isolation and Remote/Secure MCP tunneling remain available.
+
+## 0.4.2 - 2026-09-22
+
+- Enhanced command recovery/status with non-destructive activity health signals:
+  running commands now report last output time, idle duration, runtime duration,
+  activity state, and a long-silent attention marker without auto-killing quiet
+  processes.
+- Enhanced `agent_environment` with bounded `query` / `kind` search across local
+  Skills, Plugin Skills, Plugins, rules, worktrees, and capability metadata while
+  preserving metadata-only secret handling and compact search responses.
+- Enhanced Context Checkpoint reads with structured Git/command/capability drift,
+  compact resume guidance, recommended reads/actions, and automatic latest-resume
+  integration in `task_context`.
+- Enhanced `repo_map` with optional deterministic Change Impact Analysis seeded
+  from explicit paths or current Git changes. The analysis extracts changed-file
+  symbols, performs a single bounded exact-reference scan, ranks impacted files,
+  and surfaces likely tests while explicitly reporting heuristic coverage and
+  limitations.
+- Enhanced `checks_run` / `checks_result` with bounded structured failure
+  diagnostics for common pytest, mypy, ruff, rustc, TypeScript, Go, and ESLint
+  output shapes. Raw command output remains authoritative and available through
+  the existing output references.
+- Added macOS-first semantic routing: `code_definition` / `code_references` can
+  prefer LSP at an explicit source position and fall back to existing bounded
+  scans; Swift now uses SourceKit-LSP from PATH or `xcrun`.
+- Added bounded Apple toolchain metadata to `workspace_overview` and
+  `runtime_doctor`, SwiftPM build/test discovery, conservative `xcodebuild -list
+  -json` discovery, and Swift/Clang/XCTest/Xcode/codesign/notarytool diagnostic
+  parsing without introducing new MCP tools.
+- Added a CI tool-surface budget (71 tools / ~25.7 KiB schema baseline) and made
+  macOS 15 the compliance runner while removing the Windows-specific MSVC CI
+  gate.
+- Removed the hosted Cloudflare/GitHub-Actions cloud-sandbox control plane and
+  its dispatch-contract CI path. Local disposable Docker sandboxes remain for
+  untrusted-code isolation, and Desktop/Remote MCP tunneling remains for
+  ChatGPT Web access to the user's Mac.
+- Removed unregistered legacy Browser/Chrome tool schemas and their detailed
+  active-v0.4 contract sections. The bounded `browser_check` developer CLI
+  remains available for local Web verification; full browser automation belongs
+  in separately connected tools such as Playwright.
+- Enhanced `checks_discover` with deterministic targeted-check recommendations
+  derived from bounded current Git changes or explicit changed paths. Existing
+  discovered commands are only ranked/explained; no dynamic commands are
+  invented and `checks_run` execution semantics are unchanged.
+
 ## Desktop 0.4.1
 
 - Removed the Application Control page, native macOS helper, Accessibility /

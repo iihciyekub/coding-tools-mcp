@@ -13,7 +13,7 @@ MCP_PORT ?= 8765
 MCP_ARGS ?=
 RUFF_FLAGS ?= --exclude benchmarks/dogfood --ignore=E501
 MYPY_FLAGS ?= --python-version 3.11 --disable-error-code union-attr --disable-error-code assignment --disable-error-code arg-type --disable-error-code no-untyped-def
-.PHONY: start lint typecheck test ci check-dispatch-inputs check-npm-launcher check-release compliance test-protocol test-integration test-mcp-contract test-dual-era test-tool-golden test-security test-e2e test-runtime-semantics test-docs-required test-schema-drift dogfood-mcp dogfood-runner dogfood-smoke benchmark-latency benchmark-smoke benchmark-real-workloads swebench-reference-predictions swebench-preflight swebench-evaluate desktop-check desktop-build install-user publish-testpypi publish-pypi publish-all report
+.PHONY: start lint typecheck test ci check-npm-launcher check-release check-tool-surface compliance test-protocol test-integration test-mcp-contract test-dual-era test-tool-golden test-security test-e2e test-runtime-semantics test-docs-required test-schema-drift dogfood-mcp dogfood-runner dogfood-smoke benchmark-latency benchmark-smoke benchmark-real-workloads swebench-reference-predictions swebench-preflight swebench-evaluate desktop-check desktop-build install-user publish-testpypi publish-pypi publish-all report
 
 start:
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m coding_tools_mcp --workspace "$(MCP_WORKSPACE)" --host "$(MCP_HOST)" --port "$(MCP_PORT)" $(MCP_ARGS)
@@ -21,8 +21,6 @@ start:
 lint:
 	$(PYTHON) -m ruff check $(RUFF_FLAGS) $(PYTHON_SOURCES)
 
-check-dispatch-inputs:
-	$(PYTHON) scripts/check_dispatch_inputs.py
 
 check-npm-launcher:
 	cd packages/npm-launcher && npm test
@@ -31,13 +29,16 @@ check-npm-launcher:
 check-release:
 	$(PYTHON) scripts/check_release_versions.py --tag "$(RELEASE_TAG)"
 
+check-tool-surface:
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) scripts/check_tool_surface_budget.py
+
 typecheck:
 	$(PYTHON) -m mypy $(MYPY_FLAGS) $(MYPY_TARGETS)
 
 test:
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m unittest discover -s tests -p 'test_*.py'
 
-ci: lint typecheck test check-dispatch-inputs check-npm-launcher test-protocol test-integration test-docs-required test-schema-drift dogfood-smoke benchmark-latency benchmark-smoke
+ci: lint typecheck test check-npm-launcher check-tool-surface test-protocol test-integration test-docs-required test-schema-drift dogfood-smoke benchmark-latency benchmark-smoke
 
 compliance:
 	$(COMPLIANCE_RUNNER) --suite all $(REPORT_FLAG)

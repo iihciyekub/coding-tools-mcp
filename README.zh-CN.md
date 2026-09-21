@@ -103,13 +103,7 @@ docker run --rm --init -it -p 8765:8765 -v "$PWD:/workspace" coding-tools-mcp-sa
 容器化的服务器，工具链和缓存都预配好——放心把 agent 指向一个来路不明的
 PR，用完即毁。→ [docs/docker.md](docs/docker.md)
 
-**4. 一个 MCP 调用，起一台云沙箱。**内置的
-[Cloudflare Worker 控制面](infra/cloudflare/sandbox-control/README.md) 把
-`start_coding_tools_sandbox` 暴露为 MCP 工具：一次调用即派发 GitHub Actions
-运行器，启动 Docker 沙箱并发布到带认证的 Cloudflare Tunnel 之后。
-临时算力，无需自备服务器。
-
-**5. 用图形界面操作。**
+**4. 用图形界面操作。**
 
 ```bash
 cd apps/desktop-client
@@ -117,8 +111,8 @@ npm install
 npm run tauri dev
 ```
 
-全新的 Tauri 桌面端使用系统 WebView 和一套 React 界面覆盖 macOS、Windows 与
-Linux：按工作区管理配置、一键启停服务器与隧道、凭证写入系统钥匙串、剪贴板
+全新的 Tauri 桌面端使用系统 WebView，当前以 macOS 为正式支持与持续测试平台：
+按工作区管理配置、一键启停服务器与隧道、凭证写入系统钥匙串、剪贴板
 助手和实时健康检查。右上角可直接复制网页版 ChatGPT 所需的公网 MCP 地址和
 授权口令；公网隧道尚未就绪时不会误复制本地 `127.0.0.1` 地址。支持英文与简体中文。
 → [桌面客户端](apps/desktop-client/README.md)
@@ -210,7 +204,7 @@ SWE-bench 榜单成绩——[docs/swe-bench.md](docs/swe-bench.md) 写明了测�
 | --- | --- |
 | 文档导航 | [按主题浏览文档](docs/README.md) |
 | 上手 | [快速开始](docs/quickstart.md) · [客户端配置](docs/mcp-client-config.md) · [排障](docs/troubleshooting.md) |
-| 远程与沙箱 | [Remote MCP](docs/remote-mcp.md) · [Docker 沙箱](docs/docker.md) · [云沙箱 Worker](infra/cloudflare/sandbox-control/README.md) |
+| 远程与沙箱 | [Remote MCP](docs/remote-mcp.md) · [Docker 沙箱](docs/docker.md) |
 | 工具与契约 | [工具与 Schema](docs/tools-and-schemas.md) · [运行时契约](docs/runtime-contract-v0.4.md) · [迁移到 0.4](docs/migration-0.4.md) · [权限模式](docs/permission-modes.md) |
 | 命令执行 | [Exec 配方](docs/exec-command-recipes.md) · [Exec 排障](docs/troubleshooting-exec.md) |
 | 集成 | [嵌入指南](docs/embedding.md) · [npm 启动器](packages/npm-launcher/README.md) |

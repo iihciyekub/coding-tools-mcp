@@ -16,7 +16,7 @@ capability enabled, the default catalog exposes 28 tools:
 - `server_info`: server, workspace, automatic project context, policy, runtime,
   auth, protocol, and fixed-catalog metadata.
 - `check_exec_environment`: lightweight execution policy and Landlock status.
-- `runtime_doctor`: non-destructive runtime health report with actionable warnings for common toolchain commands, workspace access, shell snapshot, hooks, LSP, sandbox state, and network policy.
+- `runtime_doctor`: non-destructive runtime health report with actionable warnings for common toolchain commands, workspace access, shell snapshot, hooks, LSP, sandbox/network state, and macOS Apple toolchain metadata.
 - `hooks_status`: report whether opt-in workspace hooks are enabled and summarize loaded rules.
 - `shell_snapshot`: capture or refresh the stable command environment reused by later `exec_command` calls.
 - `read_file`: stream a bounded UTF-8 range without loading the whole file.
@@ -28,8 +28,8 @@ capability enabled, the default catalog exposes 28 tools:
 - `tool_search`: browse enabled categories and tool summaries, or search English/Chinese intent and exact names; deferred search matches include invocation metadata and schemas in text and structured results.
 - `apply_patch`: stage and atomically commit add/update/delete/move envelopes.
 - `exec_command`: run a bounded command and optionally deduplicate retries with `operation_id`.
-- `get_command`: read one command's status by `command_id` or `operation_id` without consuming output.
-- `list_commands`: list recent active/retained commands for reconnect recovery.
+- `get_command`: read one command's status by `command_id` or `operation_id` without consuming output, including output-idle/activity health signals.
+- `list_commands`: list recent active/retained commands for reconnect recovery, including long-silent activity signals.
 - `write_stdin`: poll or interact with a running command.
 - `kill_command`: terminate one runtime-owned command.
 - `read_output`: page retained stdout or stderr using absolute byte offsets.
@@ -41,12 +41,12 @@ capability enabled, the default catalog exposes 28 tools:
 - `request_permissions`: request an exact, expiring one-shot desktop approval when workflow tools are enabled.
 - `view_image`: one MCP image content block plus structured metadata.
 - `code_symbols`: list bounded language-aware symbol definitions.
-- `code_definition`: find definitions for one symbol.
-- `code_references`: find exact identifier references for one symbol.
+- `code_definition`: find definitions for one symbol; when file/line/column is supplied, prefer LSP semantics and fall back to the existing bounded symbol scan if the LSP runtime is unavailable.
+- `code_references`: find references for one symbol; when file/line/column is supplied, prefer LSP semantics and fall back to the exact-identifier scan if the LSP runtime is unavailable.
 
 `permission_mode=host` additionally exposes one metadata-only discovery tool:
 
-- `agent_environment`: discover installed local agent runtimes, Skill/Plugin/worktree/rule names, and capability presence without returning auth, cookie, token, or browser-session contents.
+- `agent_environment`: discover or filter installed local agent Skill/Plugin/worktree/rule/capability metadata without returning auth, cookie, token, or browser-session contents.
 
 When deferred workflow exposure is selected, one additional registered gateway
 is directly exposed:
@@ -56,14 +56,14 @@ is directly exposed:
 Starting the server with `--enable-workflow-tools` adds these 41 tools. The
 selection is fixed for that runtime; it does not change during a connection:
 
-- `workspace_overview`: summarize manifests, languages, entry points, top-level areas, and instruction files.
-- `repo_map`: return a bounded file/symbol map with query ranking and coverage metadata.
+- `workspace_overview`: summarize manifests, languages, entry points, top-level areas, instruction files, and bounded Apple/Xcode/Swift metadata for detected macOS projects.
+- `repo_map`: return a bounded file/symbol map with query ranking and coverage metadata; optional impact mode estimates direct-reference and likely-test effects from explicit or current Git changes without adding a separate tool.
 - `project_instructions`: return root and nested instruction files applicable to one path.
 - `skills_list`: list metadata for workspace `.agents/skills/**/SKILL.md` entries.
 - `skills_read`: read one selected workspace Skill without executing scripts.
-- `checks_discover`: discover project-defined verification commands without executing them.
-- `checks_run`: execute one currently discovered check through the existing command policy.
-- `checks_result`: read persisted check evidence and detect code changes after the check.
+- `checks_discover`: discover project-defined verification commands without executing them, including SwiftPM/Xcode metadata checks; current Git changes or explicit changed paths deterministically rank the existing checks with recommendation reasons.
+- `checks_run`: execute one currently discovered check through the existing command policy and extract bounded structured failure diagnostics while retaining raw output.
+- `checks_result`: read persisted check evidence, structured failure diagnostics, and detect code changes after the check.
 - `task_create`: create a persistent workspace task record.
 - `task_get`: read one persistent task record.
 - `task_list`: list persistent task records, optionally by status.
@@ -82,7 +82,7 @@ selection is fixed for that runtime; it does not change during a connection:
 - `git_worktree_list`: list repository worktrees and identify runtime-managed entries.
 - `git_worktree_create`: create an isolated managed worktree after Git state checks.
 - `git_worktree_remove`: remove a clean managed worktree while preserving its branch.
-- `lsp_status`: report optional Python, TypeScript/JavaScript, and Rust language-server availability and process state.
+- `lsp_status`: report optional Python, TypeScript/JavaScript, Rust, and Swift/SourceKit-LSP availability, resolved commands, project roots, and process state.
 - `lsp_definition`: resolve semantic definitions at a source position.
 - `lsp_references`: resolve semantic references at a source position.
 - `lsp_diagnostics`: return bounded diagnostics published for one source file.
@@ -96,7 +96,7 @@ selection is fixed for that runtime; it does not change during a connection:
 - `checkpoint_list`: list persistent workspace checkpoints.
 - `checkpoint_diff`: compare a checkpoint to current files and issue a state-bound restore token.
 - `checkpoint_restore`: atomically restore checkpoint files when the preview token is still current.
-- `context_checkpoint`: create, read, or list compact cross-session context metadata; deterministic Git/command/capability state is captured locally and semantic summary fields come from the current caller rather than another model.
+- `context_checkpoint`: create, read, or list compact cross-session context metadata; reads explain Git/command/capability drift and return a resume packet while semantic summary fields still come from the current caller rather than another model.
 
 `view_image` may be disabled when an installation cannot accept binary image
 content. The workflow toolset is opt-in. With normal workflow exposure the

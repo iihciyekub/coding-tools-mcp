@@ -35,6 +35,7 @@ The documentation keeps stable file paths for existing links, while this index p
 
 - [Single-service multi-project agent specification (简体中文)](multi-project-agent-spec.md)
 - [Local Agent Capability Gateway specification (简体中文)](local-agent-capability-gateway-spec.zh-CN.md)
+- [macOS Coding Agent Runtime specification (简体中文)](macos-coding-agent-runtime-spec.zh-CN.md)
 - [Optional local Web verification through existing MCP tools](browser-verification.md)
 - [CI and tests](ci-and-tests.md)
 - [Desktop release maintenance contract](desktop-release-maintenance.md)
@@ -58,7 +59,6 @@ Some documentation belongs with the component it describes:
 - [Desktop client](../apps/desktop-client/README.md)
 - [Tunnel integrations](../integrations/tunnels/README.md)
 - [npm launcher](../packages/npm-launcher/README.md)
-- [Cloudflare sandbox control](../infra/cloudflare/sandbox-control/README.md)
 - [Promo video sources](../media/promo-video/README.md)
 
 Prefer one authoritative home for each fact and link to it instead of duplicating long explanations.
