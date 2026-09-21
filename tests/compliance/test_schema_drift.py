@@ -5,6 +5,7 @@ import re
 import unittest
 from pathlib import Path
 
+from coding_tools_mcp.computer_contract import COMPUTER_TOOLS
 from coding_tools_mcp.server import KILL_COMMAND_STATUSES, TOOL_REGISTRY, input_schemas, tool_annotations
 from tests.compliance.mcp_client import REQUIRED_TOOLS
 
@@ -26,7 +27,7 @@ class SchemaDriftTests(unittest.TestCase):
         contract = self.CONTRACT_PATH.read_text(encoding="utf-8")
         sections = markdown_tool_sections(contract)
         schemas = input_schemas()
-        for tool_name in REQUIRED_TOOLS:
+        for tool_name in [*REQUIRED_TOOLS, *COMPUTER_TOOLS]:
             with self.subTest(tool=tool_name):
                 section = sections.get(tool_name, "")
                 self.assertTrue(section, f"runtime contract lacks section for {tool_name}")

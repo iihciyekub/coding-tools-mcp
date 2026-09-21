@@ -1,6 +1,22 @@
 export type Language = "en" | "zh-CN";
 
 const zh: Record<string, string> = {
+  "Approval needed": "待授权",
+  "Application control": "应用操作",
+  "Enable application control": "启用应用操作",
+  "Adds app tools to this workspace's MCP connection.": "为此工作区的 MCP 连接提供桌面应用工具。",
+  "Stop the service before changing this switch. After starting it, refresh the tools in ChatGPT.": "先停止服务再修改开关；启动后请在 ChatGPT 刷新工具目录。",
+  "Application control currently requires macOS.": "应用操作目前仅支持 macOS。",
+  "Accessibility settings": "辅助功能权限",
+  "Screen Recording settings": "屏幕录制权限",
+  "Approved window screenshots and text are sent to the connected AI. Access expires and can be stopped here.": "获准访问的窗口截图和文字会发送给已连接的 AI。访问有期限，也可在这里随时停止。",
+  "Invalid access request": "无效的访问请求",
+  "Observe and control": "查看与操作",
+  "Observe only": "仅查看",
+  "minutes": "分钟",
+  "Allow this session": "允许本次会话",
+  "Stop now": "立即停止",
+  "App access requests from ChatGPT will appear here.": "ChatGPT 发起的应用访问请求将显示在这里。",
   "Choose a project folder instead of the filesystem root.": "请选择项目文件夹，不能将磁盘根目录用作工作区。",
   "Choose a project folder inside your home directory instead of the home directory itself.": "请选择主目录内的项目文件夹，不能将整个用户主目录用作工作区。",
   "This workspace is still stopping. Please retry shortly.": "工作区仍在停止中，请稍后重试。",

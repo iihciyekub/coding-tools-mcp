@@ -21,7 +21,7 @@ tool profile: the catalog, the schemas, and what every tool actually does are al
 unchanged, and no tool is hidden. It requires `dangerous` or `host` permission mode, requires
 authentication over HTTP, and is reported by `server_info.annotation_override` and
 the server card, both of which continue to publish the real annotations recorded
-below. Unless that switch is set, the annotations in this document are what
+below. Opt-in computer tools always retain truthful annotations, including when this switch is set. Unless that switch is set, the annotations in this document are what
 `tools/list` returns.
 
 ## Two protocol eras, one server
@@ -784,7 +784,8 @@ URL. Pillow is optional and used only for requested auto-resize.
 > below document GUI-automation tools removed from the live v0.3 catalog. They
 > are not registered, returned by `tools/list`, or callable by current runtimes.
 > They remain here only to make older v0.3 deployments and migration records
-> interpretable.
+> interpretable. Reintroduced `app_list`, `app_windows`, and `app_snapshot` use
+> different session-based signatures in **Opt-in computer control** below; these historical signatures do not apply.
 
 ### browser_status
 
@@ -1627,3 +1628,101 @@ changed for them is the tool catalog and the transport, not the envelope —
 `get_default_cwd` and `set_default_cwd` are gone, relative paths resolve
 against the workspace root, and HTTP no longer has sessions. Every removal, and
 what to do instead, is in [migration-0.3.md](migration-0.3.md).
+
+
+## Opt-in computer control
+
+The authoritative computer-tool behavior and scope are in [Computer use v1](computer-use-spec.md).
+`computer_contract.py` provides live input schemas; `tools/list` exposes all ten tools directly when enabled.
+The existing default catalog is unchanged. Computer annotations always describe real effects, including under the legacy annotation override.
+
+Computer-specific failure codes include:
+
+```json
+[
+  "ACCESSIBILITY_PERMISSION_REQUIRED",
+  "APPROVAL_SCOPE_MISMATCH",
+  "COMPUTER_ACTION_FAILED",
+  "COMPUTER_ACTION_UNKNOWN",
+  "COMPUTER_ACTION_UNSUPPORTED",
+  "COMPUTER_APP_BUSY",
+  "COMPUTER_APP_CHANGED",
+  "COMPUTER_CONTROL_REQUIRED",
+  "COMPUTER_HELPER_FAILED",
+  "COMPUTER_SESSION_INACTIVE",
+  "COMPUTER_OPERATION_LIMIT",
+  "COMPUTER_PROTECTED_APP",
+  "COMPUTER_SESSION_LIMIT",
+  "COMPUTER_SESSION_NOT_FOUND",
+  "COMPUTER_SNAPSHOT_STALE",
+  "COMPUTER_UNAVAILABLE",
+  "COMPUTER_WINDOW_STALE",
+  "COMPUTER_WINDOW_UNAVAILABLE",
+  "INVALID_ARGUMENT",
+  "OPERATION_CONFLICT",
+  "OUTPUT_TOO_LARGE",
+  "SCREEN_RECORDING_PERMISSION_REQUIRED",
+  "UNSUPPORTED_PLATFORM"
+]
+```
+
+
+### computer_status
+
+Inputs: none.
+
+Check native helper availability, system permissions and supported background operations without prompting.
+
+### computer_request_access
+
+Inputs: `"app_id"`, `"access"`, `"reason"`, `"ttl_seconds"`.
+
+Ask the desktop user to authorize one app session. Use an app_id from app_list. Never grants access automatically, including in host mode.
+
+### computer_session_start
+
+Inputs: `"approval_id"`.
+
+Consume an approved app access request and start its bounded session. Reuse the returned session_id for app tools.
+
+### computer_session_get
+
+Inputs: `"session_id"`, `"approval_id"`, `"operation_id"`.
+
+Read an app approval, session or operation receipt. Pass approval_id to check a pending request, session_id for a session, or no arguments to list this runtime's sessions.
+
+### computer_session_stop
+
+Inputs: `"session_id"`.
+
+Revoke an app session and release its control lock. Already completed actions are not undone.
+
+### app_list
+
+Inputs: `"query"`, `"max_results"`.
+
+Find running app identities before requesting access. Does not expose window contents.
+
+### app_windows
+
+Inputs: `"session_id"`.
+
+List windows belonging to an authorized session. Use returned window_id values, never guessed window indices.
+
+### app_snapshot
+
+Inputs: `"session_id"`, `"window_id"`, `"include_image"`, `"max_elements"`, `"max_depth"`, `"max_dimension"`.
+
+Read an authorized window's accessibility elements and optional screenshot. Use returned snapshot_id and element_id for actions. Set include_image=false for accessibility-only inspection.
+
+### app_action
+
+Inputs: `"session_id"`, `"window_id"`, `"snapshot_id"`, `"element_id"`, `"action"`, `"value"`, `"operation_id"`.
+
+Press or set the value of an observed accessible element in a control session. Requires a fresh snapshot and unique operation_id. No foreground keyboard/mouse fallback. Verify the outcome afterwards.
+
+### app_wait
+
+Inputs: `"session_id"`, `"window_id"`, `"snapshot_id"`, `"element_id"`, `"condition"`, `"value"`, `"timeout_ms"`.
+
+Wait for an observed element to become enabled or have an expected value. Returns bounded evidence or timeout and responds to session revocation.

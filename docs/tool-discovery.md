@@ -5,6 +5,12 @@ workflow tools through a static discovery gateway. The CLI retains its existing
 defaults; select the same behavior with
 `--enable-workflow-tools --defer-workflow-tools`.
 
+When `--enable-computer-tools` is selected, the `computer` category and all ten
+[computer tools](computer-use-spec.md) are directly exposed. Call their names
+directly, including `app_snapshot`, so image content reaches the MCP client.
+They do not go through `tool_invoke`. Changing this startup switch requires
+restarting the runtime and refreshing the client's tool catalog.
+
 Use the tools already in `tools/list` for routine file reads, searches, patches,
 commands, and diffs. Discovery is for an unfamiliar capability, not a mandatory
 step before every operation. Tool names, schemas, and permission checks remain

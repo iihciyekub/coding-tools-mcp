@@ -22,6 +22,7 @@ export interface AuthConfig {
 }
 
 export interface RuntimeConfig {
+  computer_enabled: boolean;
   local_port: number;
   permission_mode: PermissionMode;
   file_access_scope: "workspace";
@@ -119,7 +120,16 @@ export interface WorkflowSnapshot {
   reviews: WorkflowReview[];
   approvals: WorkflowApproval[];
   worktrees: WorkflowWorktree[];
+  computer_sessions: ComputerSession[];
   warning: string | null;
+}
+
+export interface ComputerSession {
+  session_id: string;
+  app_name: string;
+  access: "observe" | "control";
+  status: string;
+  expires_at: number;
 }
 
 export interface DependencyStatus {

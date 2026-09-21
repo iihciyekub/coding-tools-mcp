@@ -30,6 +30,7 @@ The Python package and the desktop application are related but independently ver
 - Python/core releases use `v<version>` tags and the existing Python/npm release workflow.
 - Desktop releases use `desktop-v<version>` tags.
 - A desktop version MUST match `apps/desktop-client/package.json` and `apps/desktop-client/src-tauri/tauri.conf.json`.
+- `releasePlatforms` in `apps/desktop-client/package.json` selects the platforms for that version: `["macos"]` or `["macos", "windows"]`. Omitting it preserves the historical two-platform release. A macOS-only release skips Windows entirely; it does not replace the most recent Windows download.
 - A desktop release MUST NOT be forced through the Python package version validator merely to reuse a tag.
 
 Example:
@@ -84,8 +85,8 @@ A desktop release is canonical only when it exists in `iihciyekub/coding-tools-m
 - tag `desktop-v<version>`;
 - target commit from the maintained fork;
 - signed, notarized and stapled DMG asset named `Coding-Tools-MCP-<version>-arm64.dmg`;
-- Windows x64 portable asset named `Coding-Tools-MCP-<version>-win-x64-portable.zip`;
-- `SHA256SUMS.txt` covering both public desktop assets;
+- Windows x64 portable asset named `Coding-Tools-MCP-<version>-win-x64-portable.zip` when `releasePlatforms` includes Windows;
+- `SHA256SUMS.txt` covering every public desktop asset selected for that version;
 - a stable SHA-256 digest for that exact uploaded asset.
 
 Do not replace an already published stable DMG with different bytes under the same tag/version. If the artifact must change, publish a new desktop version.
@@ -129,13 +130,17 @@ For each stable desktop version, `.github/workflows/desktop-release.yml` is the 
 5. Import the Developer ID certificate from Actions secrets
 6. Sign, notarize, staple and validate the app
 7. Create, sign, notarize, staple and validate the final DMG
-8. Build and verify the Windows x64 portable ZIP
+8. Build and verify the Windows x64 portable ZIP if selected by releasePlatforms
 9. Publish the immutable GitHub Release plus SHA256SUMS.txt
 10. Invoke the Homebrew Cask workflow directly
 11. Verify brew style, info, fetch and an isolated install
 ```
 
 Publishing the Homebrew update before the final release asset is immutable is not allowed.
+
+When Apple credentials are available only in the maintainer's local keychain, local build/sign/notarization may supply the same immutable release artifacts. The tag workflow still validates metadata and platform selection. After the verified local assets are published, the `release.published` trigger or a manual dispatch of `homebrew-cask.yml` updates and verifies the Tap. Do not export local Apple secrets merely to enable CI signing.
+
+The platform selector is an additive release-contract change: tag names, macOS asset URLs and Homebrew behavior remain unchanged. For macOS-only versions, Windows users keep using the last version that includes a portable ZIP. Explicit `windows-artifact` dispatches remain available for maintainers independently of the stable release platform selector.
 
 The release workflow requires the following repository or protected environment secrets. Their values MUST never be committed:
 
@@ -188,8 +193,8 @@ Before considering a desktop release complete, confirm:
 - [ ] Desktop version metadata agrees across the desktop package and Tauri config.
 - [ ] The release uses `desktop-v<version>`.
 - [ ] The uploaded asset is `Coding-Tools-MCP-<version>-arm64.dmg`.
-- [ ] The Windows portable asset is `Coding-Tools-MCP-<version>-win-x64-portable.zip`.
-- [ ] `SHA256SUMS.txt` covers both desktop assets.
+- [ ] The Windows portable asset is `Coding-Tools-MCP-<version>-win-x64-portable.zip` when Windows is selected; otherwise no Windows build or asset is required.
+- [ ] `SHA256SUMS.txt` covers every selected desktop asset.
 - [ ] App and DMG notarization/stapling validation pass.
 - [ ] The uploaded asset SHA-256 is recorded by GitHub and matches the local final artifact.
 - [ ] The Cask points to the maintained fork and the exact release asset.

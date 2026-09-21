@@ -163,6 +163,8 @@ impl Default for AuthConfig {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RuntimeConfig {
+    #[serde(default)]
+    pub computer_enabled: bool,
     #[serde(default = "default_port")]
     pub local_port: u16,
     #[serde(default = "default_permission_mode")]
@@ -178,6 +180,7 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
+            computer_enabled: false,
             local_port: default_port(),
             permission_mode: default_permission_mode(),
             file_access_scope: default_file_access_scope(),

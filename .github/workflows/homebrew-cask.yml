@@ -95,6 +95,8 @@ jobs:
     name: Verify Homebrew install
     needs: update-cask
     runs-on: macos-14
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
     steps:
       - name: Tap maintained repository
         shell: bash
@@ -111,6 +113,35 @@ jobs:
           brew fetch --cask iihciyekub/tap/coding-tools-mcp
           brew install --cask iihciyekub/tap/coding-tools-mcp
           test -d "/Applications/Coding Tools MCP.app"
+
+      - name: Verify installed version, signature and launch
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="/Applications/Coding Tools MCP.app"
+          version="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$app/Contents/Info.plist")"
+          test "$version" = "${RELEASE_TAG#desktop-v}"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          spctl --assess --type execute --verbose=4 "$app"
+          python3 - <<'PY'
+          import subprocess
+          process = subprocess.Popen(['/Applications/Coding Tools MCP.app/Contents/MacOS/coding-tools-mcp-desktop'])
+          try:
+              try:
+                  code = process.wait(timeout=5)
+              except subprocess.TimeoutExpired:
+                  print('Installed desktop app stayed running after launch.')
+              else:
+                  raise RuntimeError(f'Desktop app exited during startup: {code}')
+          finally:
+              if process.poll() is None:
+                  process.terminate()
+                  try:
+                      process.wait(timeout=5)
+                  except subprocess.TimeoutExpired:
+                      process.kill()
+                      process.wait()
+          PY
 
       - name: Remove verification install
         if: always()

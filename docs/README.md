@@ -31,6 +31,8 @@ The documentation keeps stable file paths for existing links, while this index p
 
 ## Engineering and evaluation
 
+- [ChatGPT computer-use implementation plan (简体中文)](computer-use-plan.zh-CN.md)
+- [Computer use v1 specification](computer-use-spec.md)
 - [CI and tests](ci-and-tests.md)
 - [Desktop release maintenance contract](desktop-release-maintenance.md)
 - [Competitive analysis](competitive-analysis.md)

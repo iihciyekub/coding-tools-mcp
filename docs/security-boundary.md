@@ -21,6 +21,13 @@ applies. Direct file tools remain limited to the workspace plus explicitly
 configured file-access roots. Treat a host-mode MCP endpoint as remote command
 execution with the authority of the server user.
 
+Opt-in [computer tools](computer-use-spec.md) require an explicit desktop approval
+for a bounded app session, even in host mode. That is a policy for these tools,
+not an OS isolation boundary against host shell access. Workspace clients share
+the same trust domain. Screenshot/text results are sent to the connected client;
+computer tools skip workspace hooks and omit typed text, queries and request
+reasons from diagnostic traces.
+
 The boundary is not:
 
 - a complete OS sandbox on every platform

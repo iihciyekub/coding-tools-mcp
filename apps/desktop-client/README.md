@@ -7,6 +7,12 @@ API.
 
 ## Features
 
+- Opt-in **Application control** for running macOS apps, using a bundled native
+  helper and the same MCP tools available to the LLM. See the
+  [v1 specification and acceptance status](../../docs/computer-use-spec.md) and
+  [Chinese setup/implementation plan](../../docs/computer-use-plan.zh-CN.md).
+  Enabling it adds tools after service restart; each app session still needs a
+  desktop approval. The control page supports permission setup and immediate stop.
 - Compact menu-bar panel with no macOS Dock icon
 - Multiple workspace profiles with one automatically assigned local port per workspace
 - Mode-first profile creation: both Standard and Full Access ask for a workspace
@@ -62,7 +68,7 @@ in `iihciyekub/homebrew-tap`. Maintainers changing release naming, signing,
 notarization, GitHub Release assets, or Homebrew publishing must follow the
 [desktop release maintenance contract](../../docs/desktop-release-maintenance.md).
 
-Windows x64 desktop releases are attached to the same GitHub Release as
+When Windows is included in a version's release platforms, its x64 desktop build is attached to the same GitHub Release as
 `Coding-Tools-MCP-<version>-win-x64-portable.zip`. The ZIP is installation-free:
 extract it, then run `Coding Tools MCP.exe`. The executable and bundled runtime
 source payload are portable, while profiles, OS credentials, downloaded tools,
@@ -75,15 +81,17 @@ locations.
 pipeline. Push an existing version-matched tag such as:
 
 ```bash
-git tag desktop-v0.3.33
-git push origin desktop-v0.3.33
+git tag desktop-v0.3.34
+git push origin desktop-v0.3.34
 ```
 
 The workflow validates the tag against the desktop metadata, builds the Apple
 Silicon app on an arm64 macOS runner, imports the Developer ID certificate,
 signs and notarizes both the app and final DMG, builds the Windows x64 portable
-ZIP, publishes immutable GitHub Release assets and checksums, then updates the
+ZIP when selected by `releasePlatforms` in `package.json`, publishes immutable GitHub Release assets and checksums, then updates the
 Homebrew Tap.
+
+Version 0.3.34 selects macOS only. Existing Windows releases remain available.
 
 The repository must provide these GitHub Actions secrets:
 

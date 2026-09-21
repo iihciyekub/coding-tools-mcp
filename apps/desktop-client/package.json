@@ -1,13 +1,14 @@
 {
   "name": "coding-tools-mcp-desktop",
   "private": true,
-  "version": "0.3.33",
+  "version": "0.3.34",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "build:runtime": "node ./build-bundled-runtime.mjs",
-    "build:bundle": "npm run build:runtime && npm run build",
+    "build:helper": "node ./build-computer-helper.mjs",
+    "build:bundle": "npm run build:runtime && npm run build:helper && npm run build",
     "build:dmg": "bash ./create-dmg.sh",
     "test": "vitest run",
     "check": "tsc --noEmit && vitest run",
@@ -27,5 +28,8 @@
     "typescript": "^5.7.0",
     "vite": "^7.0.0",
     "vitest": "^3.0.0"
-  }
+  },
+  "releasePlatforms": [
+    "macos"
+  ]
 }

@@ -9,6 +9,7 @@ from __future__ import annotations
 import difflib
 import re
 from dataclasses import dataclass
+from .computer_contract import COMPUTER_TOOLS
 
 
 @dataclass(frozen=True)
@@ -138,6 +139,12 @@ _GROUPS: dict[str, tuple[tuple[str, str, tuple[str, ...]], ...]] = {
         ("shell_snapshot", "Capture a reusable command environment or explicitly refresh it after environment changes.", ("环境快照", "刷新环境", "shell snapshot")),
     ),
 }
+
+CATEGORIES["computer"] = ToolCategory(
+    "Computer and apps / 桌面应用", "Observe and operate an explicitly authorized local app; start with computer_status and app_list.",
+    ("屏幕", "截图", "桌面", "应用", "点击", "computer", "desktop", "screenshot"),
+)
+_GROUPS["computer"] = tuple((name, tool.description, (tool.title,)) for name, tool in COMPUTER_TOOLS.items())
 
 TOOL_GUIDES = {
     name: ToolGuide(category, use_when, aliases)

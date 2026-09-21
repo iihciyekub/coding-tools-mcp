@@ -34,6 +34,7 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
       version: ${{ steps.version.outputs.version }}
       mode: ${{ steps.version.outputs.mode }}
+      windows: ${{ steps.version.outputs.windows }}
     steps:
       - name: Check out release source
         uses: actions/checkout@v6.0.2
@@ -72,9 +73,25 @@ jobs:
               exit 1
             fi
           done
+          # Platform selection is versioned with the release source. Older tags
+          # without this field retain the existing macOS + Windows behavior.
+          windows="$(node <<'JS'
+          const platforms = require('./apps/desktop-client/package.json').releasePlatforms ?? ['macos', 'windows'];
+          if (!Array.isArray(platforms) || !platforms.includes('macos') ||
+              platforms.some(value => !['macos', 'windows'].includes(value)) ||
+              new Set(platforms).size !== platforms.length) {
+            throw new Error('releasePlatforms must contain macos and optionally windows');
+          }
+          process.stdout.write(String(platforms.includes('windows')));
+          JS
+          )"
+          if [[ "$BUILD_MODE" == "windows-artifact" ]]; then
+            windows=true
+          fi
           echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "mode=$BUILD_MODE" >> "$GITHUB_OUTPUT"
+          echo "windows=$windows" >> "$GITHUB_OUTPUT"
 
   macos:
     name: macOS arm64 · sign and notarize
@@ -194,6 +211,10 @@ jobs:
           app="src-tauri/target/release/bundle/macos/Coding Tools MCP.app"
           app_zip="$RUNNER_TEMP/Coding-Tools-MCP-${{ needs.validate.outputs.version }}.app.zip"
           test -d "$app"
+          helper="$app/Contents/Resources/computer/Coding Tools MCP App Helper.app"
+          test -d "$helper"
+          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$helper"
+          codesign --verify --deep --strict --verbose=2 "$helper"
           codesign --force --deep --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app"
           codesign --verify --deep --strict --verbose=2 "$app"
           ditto -c -k --keepParent "$app" "$app_zip"
@@ -246,6 +267,7 @@ jobs:
   windows:
     name: Windows x64 · portable ZIP
     needs: validate
+    if: needs.validate.outputs.windows == 'true'
     runs-on: windows-2025
     steps:
       - name: Check out release source
@@ -328,7 +350,12 @@ jobs:
   publish:
     name: Publish GitHub desktop release
     needs: [validate, macos, windows]
-    if: needs.validate.outputs.mode == 'release' && needs.macos.outputs.apple_ready == 'true' && needs.macos.result == 'success' && needs.windows.result == 'success'
+    if: >-
+      always() && !cancelled() && needs.validate.result == 'success' &&
+      needs.validate.outputs.mode == 'release' && needs.macos.outputs.apple_ready == 'true' &&
+      needs.macos.result == 'success' &&
+      (needs.windows.result == 'success' ||
+       (needs.validate.outputs.windows == 'false' && needs.windows.result == 'skipped'))
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -344,11 +371,14 @@ jobs:
         run: |
           set -euo pipefail
           version="${{ needs.validate.outputs.version }}"
-          test -f "release-assets/Coding-Tools-MCP-${version}-arm64.dmg"
-          test -f "release-assets/Coding-Tools-MCP-${version}-win-x64-portable.zip"
+          assets=("Coding-Tools-MCP-${version}-arm64.dmg")
+          if [[ "${{ needs.validate.outputs.windows }}" == "true" ]]; then
+            assets+=("Coding-Tools-MCP-${version}-win-x64-portable.zip")
+          fi
+          for asset in "${assets[@]}"; do test -f "release-assets/$asset"; done
           (
             cd release-assets
-            sha256sum "Coding-Tools-MCP-${version}-arm64.dmg" "Coding-Tools-MCP-${version}-win-x64-portable.zip" > SHA256SUMS.txt
+            sha256sum "${assets[@]}" > SHA256SUMS.txt
           )
 
       - name: Publish immutable GitHub Release
@@ -363,12 +393,16 @@ jobs:
             echo "Release $RELEASE_TAG already exists. Stable desktop assets are immutable; bump the desktop version instead." >&2
             exit 1
           fi
-          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "Coding Tools MCP Desktop $VERSION" --generate-notes "release-assets/Coding-Tools-MCP-${VERSION}-arm64.dmg" "release-assets/Coding-Tools-MCP-${VERSION}-win-x64-portable.zip" "release-assets/SHA256SUMS.txt"
+          assets=("release-assets/Coding-Tools-MCP-${VERSION}-arm64.dmg" "release-assets/SHA256SUMS.txt")
+          if [[ "${{ needs.validate.outputs.windows }}" == "true" ]]; then
+            assets+=("release-assets/Coding-Tools-MCP-${VERSION}-win-x64-portable.zip")
+          fi
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "Coding Tools MCP Desktop $VERSION" --generate-notes "${assets[@]}"
 
   homebrew:
     name: Update Homebrew Cask
     needs: [validate, publish]
-    if: needs.validate.outputs.mode == 'release' && needs.publish.result == 'success'
+    if: always() && !cancelled() && needs.validate.outputs.mode == 'release' && needs.publish.result == 'success'
     uses: ./.github/workflows/homebrew-cask.yml
     with:
       tag: ${{ needs.validate.outputs.tag }}

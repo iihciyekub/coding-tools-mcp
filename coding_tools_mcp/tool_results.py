@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from .computer import render_computer_result
+from .computer_contract import COMPUTER_TOOLS
 
 
 MODEL_TEXT_SAFETY_LIMIT_BYTES = (2 * 1_048_576) + 65_536
@@ -33,6 +35,8 @@ def make_tool_result(
 def render_tool_text(tool_name: str, payload: dict[str, Any], *, is_error: bool) -> str:
     if is_error or payload.get("ok") is False:
         return _render_error(payload)
+    if tool_name in COMPUTER_TOOLS:
+        return render_computer_result(payload)
     renderer = _RENDERERS.get(tool_name)
     if renderer is not None:
         return renderer(payload)

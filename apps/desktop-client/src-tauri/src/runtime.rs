@@ -20,6 +20,12 @@ const START_TIMEOUT: Duration = Duration::from_secs(20);
 const TUNNEL_TIMEOUT: Duration = Duration::from_secs(30);
 const LOG_LIMIT: usize = 16_000;
 
+fn computer_helper_path(resources: &Path) -> PathBuf {
+    resources.join(
+        "computer/Coding Tools MCP App Helper.app/Contents/MacOS/coding-tools-computer-helper",
+    )
+}
+
 struct ManagedChild {
     child: Child,
     group_id: u32,
@@ -172,6 +178,10 @@ impl RuntimeManager {
         }
     }
 
+    pub fn computer_helper_path(&self) -> PathBuf {
+        computer_helper_path(&self.resource_dir)
+    }
+
     pub fn status(&mut self, profile: &WorkspaceProfile) -> RuntimeStatus {
         if self.stopping.contains_key(&profile.id) {
             let mut status = RuntimeStatus::stopped(profile.runtime.local_port);
@@ -282,6 +292,7 @@ pub fn start_workspace(
             log_dir,
             resolved,
             &data,
+            &resources,
             workspace_sequence,
             cancelled,
         )
@@ -422,6 +433,7 @@ fn start_session(
     log_dir: &Path,
     resolved: (PathBuf, Vec<String>),
     data_dir: &Path,
+    resource_dir: &Path,
     workspace_sequence: usize,
     cancelled: &AtomicBool,
 ) -> Result<ManagedSession, String> {
@@ -442,6 +454,7 @@ fn start_session(
         resolved,
         &data_dir.join("workflow"),
         &server_name,
+        Some(&computer_helper_path(resource_dir)),
     )?;
     if let Err(error) = wait_for_port(
         profile.runtime.local_port,
@@ -542,6 +555,7 @@ fn spawn_runtime(
     resolved: (PathBuf, Vec<String>),
     workflow_state_root: &Path,
     server_name: &str,
+    computer_helper: Option<&Path>,
 ) -> Result<ManagedChild, String> {
     let (program, prefix) = resolved;
     let mut command = Command::new(program);
@@ -566,6 +580,18 @@ fn spawn_runtime(
     for root in file_access_roots(profile) {
         command.arg("--file-access-root").arg(root);
     }
+    if profile.runtime.computer_enabled {
+        if !cfg!(target_os = "macos") {
+            return Err("Application control currently requires macOS.".into());
+        }
+        let helper = computer_helper.filter(|path| path.is_file()).ok_or(
+            "The bundled computer helper is missing. Reinstall or rebuild the desktop app.",
+        )?;
+        command
+            .arg("--enable-computer-tools")
+            .arg("--computer-helper")
+            .arg(helper);
+    }
     if profile.runtime.permission_mode == "host" {
         command.arg("--dangerously-fake-readonly-annotations");
     }
@@ -582,6 +608,8 @@ fn spawn_runtime(
         "CODING_TOOLS_MCP_OAUTH_PASSWORD",
         "CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET",
         "CODING_TOOLS_MCP_SERVER_NAME",
+        "CODING_TOOLS_MCP_ENABLE_COMPUTER_TOOLS",
+        "CODING_TOOLS_MCP_COMPUTER_HELPER",
     ] {
         command.env_remove(name);
     }
@@ -1074,6 +1102,7 @@ while True:
                 ),
                 temporary.path(),
                 "test-server",
+                None,
             )
             .unwrap();
             assert!(process.child.wait().unwrap().success());
@@ -1193,6 +1222,7 @@ while True:
                     which::which("python3").unwrap(),
                     vec![script.to_string_lossy().into_owned()],
                 ),
+                temporary.path(),
                 temporary.path(),
                 index + 1,
                 &AtomicBool::new(false),
