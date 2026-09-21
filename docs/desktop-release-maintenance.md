@@ -138,22 +138,41 @@ For each stable desktop version, `.github/workflows/desktop-release.yml` is the 
 
 Publishing the Homebrew update before the final release asset is immutable is not allowed.
 
-When Apple credentials are available only in the maintainer's local keychain, local build/sign/notarization may supply the same immutable release artifacts. The tag workflow still validates metadata and platform selection. After the verified local assets are published, the `release.published` trigger or a manual dispatch of `homebrew-cask.yml` updates and verifies the Tap. Do not export local Apple secrets merely to enable CI signing.
+The canonical CI path uses a protected `production-release` GitHub Environment,
+the same credential model used by WOS Aide: an exported Developer ID Application
+`.p12` plus an App Store Connect Team API Key `.p8`. When Apple credentials are
+available only in the maintainer's local keychain, local build/sign/notarization
+may still supply the same immutable release artifacts. After verified local
+assets are published, the `release.published` trigger or a manual dispatch of
+`homebrew-cask.yml` updates and verifies the Tap.
 
 The platform selector is an additive release-contract change: tag names, macOS asset URLs and Homebrew behavior remain unchanged. For macOS-only versions, Windows users keep using the last version that includes a portable ZIP. Explicit `windows-artifact` dispatches remain available for maintainers independently of the stable release platform selector.
 
-The release workflow requires the following repository or protected environment secrets. Their values MUST never be committed:
+The `production-release` Environment requires these secrets. Their values MUST
+never be committed:
 
 ```text
-APPLE_CERTIFICATE
-APPLE_CERTIFICATE_PASSWORD
-APPLE_ID
-APPLE_PASSWORD
-APPLE_TEAM_ID
-HOMEBREW_TAP_DEPLOY_KEY
+MAC_CSC_P12_BASE64
+MAC_CSC_KEY_PASSWORD
+APPLE_API_KEY_P8_BASE64
+APPLE_API_KEY_ID
+APPLE_API_ISSUER
 ```
 
-`APPLE_CERTIFICATE` is a base64-encoded Developer ID Application `.p12`. `APPLE_PASSWORD` is an Apple app-specific password. The Homebrew deploy key must remain scoped to `iihciyekub/homebrew-tap`.
+`MAC_CSC_P12_BASE64` is a base64-encoded Developer ID Application `.p12`
+including its private key. `APPLE_API_KEY_P8_BASE64`, `APPLE_API_KEY_ID`, and
+`APPLE_API_ISSUER` identify a Team API Key accepted by `notarytool`. The
+environment variable `MAC_CSC_NAME` names the expected signing identity and
+defaults to `Yongjian Li (2NLAH5MYH8)`.
+
+Use `scripts/setup-desktop-release-secrets.sh` to create/update the Environment
+and upload the five Apple values without writing credential material to Git.
+The repository-level `HOMEBREW_TAP_DEPLOY_KEY` remains separate and MUST stay
+scoped to `iihciyekub/homebrew-tap` only.
+
+Stable release jobs MUST fail if any Apple signing/notarization secret is
+missing. They MUST NOT convert a missing-credential condition into a green job
+that silently skips app/DMG production.
 
 ## 8. Required validation after release-pipeline changes
 

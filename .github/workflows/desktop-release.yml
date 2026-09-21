@@ -98,41 +98,23 @@ jobs:
     needs: validate
     if: needs.validate.outputs.mode == 'release'
     runs-on: macos-14
-    outputs:
-      apple_ready: ${{ steps.apple.outputs.ready }}
+    environment: production-release
+    timeout-minutes: 60
+    env:
+      MAC_CSC_NAME: ${{ vars.MAC_CSC_NAME || 'Yongjian Li (2NLAH5MYH8)' }}
     steps:
-      - name: Check Apple release credentials
-        id: apple
-        shell: bash
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          if [[ -n "$APPLE_CERTIFICATE" && -n "$APPLE_CERTIFICATE_PASSWORD" && -n "$APPLE_ID" && -n "$APPLE_PASSWORD" && -n "$APPLE_TEAM_ID" ]]; then
-            echo "ready=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-            echo "Apple release secrets are not configured; cloud macOS signing/notarization is skipped."
-          fi
-
       - name: Check out release tag
-        if: steps.apple.outputs.ready == 'true'
         uses: actions/checkout@v6.0.2
         with:
           ref: ${{ needs.validate.outputs.tag }}
 
       - name: Confirm Apple Silicon runner
-        if: steps.apple.outputs.ready == 'true'
         shell: bash
         run: |
           set -euo pipefail
           test "$(uname -m)" = "arm64"
 
       - name: Set up Node
-        if: steps.apple.outputs.ready == 'true'
         uses: actions/setup-node@v6
         with:
           node-version: "24"
@@ -140,72 +122,79 @@ jobs:
           cache-dependency-path: apps/desktop-client/package-lock.json
 
       - name: Set up Rust
-        if: steps.apple.outputs.ready == 'true'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Set up Python
-        if: steps.apple.outputs.ready == 'true'
         uses: actions/setup-python@v6.2.0
         with:
           python-version: "3.13"
 
       - name: Install runtime packaging tool
-        if: steps.apple.outputs.ready == 'true'
         run: python -m pip install uv==0.11.28
 
       - name: Install frontend dependencies
-        if: steps.apple.outputs.ready == 'true'
         working-directory: apps/desktop-client
         run: npm ci
 
       - name: Check desktop
-        if: steps.apple.outputs.ready == 'true'
         working-directory: apps/desktop-client
         run: npm run check
 
-      - name: Import Developer ID certificate
-        if: steps.apple.outputs.ready == 'true'
+      - name: Import Developer ID and App Store Connect API key
         shell: bash
         env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          MAC_CSC_P12_BASE64: ${{ secrets.MAC_CSC_P12_BASE64 }}
+          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          APPLE_API_KEY_ID_SECRET: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_SECRET: ${{ secrets.APPLE_API_ISSUER }}
         run: |
           set -euo pipefail
+          for name in MAC_CSC_P12_BASE64 MAC_CSC_KEY_PASSWORD APPLE_API_KEY_P8_BASE64 APPLE_API_KEY_ID_SECRET APPLE_API_ISSUER_SECRET; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error title=Missing production-release secret::$name is required for a desktop release"
+              exit 1
+            fi
+          done
+          [[ -n "$MAC_CSC_NAME" ]] || { echo "::error::MAC_CSC_NAME is required"; exit 1; }
+
+          certificate="$RUNNER_TEMP/coding-tools-developer-id.p12"
+          api_key="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID_SECRET}.p8"
           keychain="$RUNNER_TEMP/coding-tools-release.keychain-db"
           keychain_password="$(openssl rand -hex 24)"
-          certificate="$RUNNER_TEMP/developer-id.p12"
-          python3 - "$certificate" <<'PY'
+
+          python3 - "$certificate" "$api_key" <<'PY'
           import base64
           import os
           import pathlib
           import sys
-          pathlib.Path(sys.argv[1]).write_bytes(base64.b64decode(os.environ["APPLE_CERTIFICATE"]))
+          pathlib.Path(sys.argv[1]).write_bytes(base64.b64decode(os.environ["MAC_CSC_P12_BASE64"]))
+          pathlib.Path(sys.argv[2]).write_bytes(base64.b64decode(os.environ["APPLE_API_KEY_P8_BASE64"]))
           PY
+          chmod 600 "$certificate" "$api_key"
+
           security create-keychain -p "$keychain_password" "$keychain"
           security set-keychain-settings -lut 21600 "$keychain"
           security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -k "$keychain" -P "$MAC_CSC_KEY_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
           security list-keychains -d user -s "$keychain"
-          security import "$certificate" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain"
-          identity="$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -1)"
-          test -n "$identity"
+          security find-identity -v -p codesigning "$keychain" | grep -F "Developer ID Application: $MAC_CSC_NAME"
+
           echo "KEYCHAIN_PATH=$keychain" >> "$GITHUB_ENV"
-          echo "APPLE_SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
+          echo "APPLE_SIGNING_IDENTITY=Developer ID Application: $MAC_CSC_NAME" >> "$GITHUB_ENV"
+          echo "APPLE_API_KEY=$api_key" >> "$GITHUB_ENV"
+          echo "APPLE_API_KEY_ID=$APPLE_API_KEY_ID_SECRET" >> "$GITHUB_ENV"
+          echo "APPLE_API_ISSUER=$APPLE_API_ISSUER_SECRET" >> "$GITHUB_ENV"
           rm -f "$certificate"
 
       - name: Build unsigned app bundle
-        if: steps.apple.outputs.ready == 'true'
         working-directory: apps/desktop-client
         run: npm run tauri build -- --bundles app --no-sign --ci
 
       - name: Sign, notarize and staple app
-        if: steps.apple.outputs.ready == 'true'
         shell: bash
         working-directory: apps/desktop-client
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
           app="src-tauri/target/release/bundle/macos/Coding Tools MCP.app"
@@ -218,20 +207,19 @@ jobs:
           codesign --force --deep --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app"
           codesign --verify --deep --strict --verbose=2 "$app"
           ditto -c -k --keepParent "$app" "$app_zip"
-          xcrun notarytool submit "$app_zip" --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+          xcrun notarytool submit "$app_zip" \
+            --key "$APPLE_API_KEY" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait
           xcrun stapler staple "$app"
           xcrun stapler validate "$app"
           codesign --verify --deep --strict --verbose=2 "$app"
           spctl --assess --type execute --verbose=4 "$app"
 
       - name: Create, sign and notarize DMG
-        if: steps.apple.outputs.ready == 'true'
         shell: bash
         working-directory: apps/desktop-client
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
           version="${{ needs.validate.outputs.version }}"
@@ -239,16 +227,20 @@ jobs:
           dmg="src-tauri/target/release/bundle/dmg/Coding-Tools-MCP-${version}-arm64.dmg"
           bash ./create-dmg.sh "$app" "$dmg"
           codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$dmg"
-          codesign --verify --verbose=2 "$dmg"
-          xcrun notarytool submit "$dmg" --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+          codesign --verify --strict --verbose=4 "$dmg"
+          xcrun notarytool submit "$dmg" \
+            --key "$APPLE_API_KEY" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait
           xcrun stapler staple "$dmg"
           xcrun stapler validate "$dmg"
+          spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"
           hdiutil verify "$dmg"
           mkdir -p "$RUNNER_TEMP/release-assets"
           cp "$dmg" "$RUNNER_TEMP/release-assets/"
 
       - name: Upload macOS release asset
-        if: steps.apple.outputs.ready == 'true'
         uses: actions/upload-artifact@v7.0.1
         with:
           name: desktop-macos-arm64
@@ -257,12 +249,14 @@ jobs:
           retention-days: 7
 
       - name: Remove temporary signing keychain
-        if: always() && steps.apple.outputs.ready == 'true'
+        if: always()
         shell: bash
         run: |
-          if [[ -n "${KEYCHAIN_PATH:-}" && -f "$KEYCHAIN_PATH" ]]; then
-            security delete-keychain "$KEYCHAIN_PATH" || true
+          keychain="${KEYCHAIN_PATH:-$RUNNER_TEMP/coding-tools-release.keychain-db}"
+          if [[ -f "$keychain" ]]; then
+            security delete-keychain "$keychain" || true
           fi
+          rm -f "$RUNNER_TEMP/coding-tools-developer-id.p12" "$RUNNER_TEMP"/AuthKey_*.p8 || true
 
   windows:
     name: Windows x64 · portable ZIP
@@ -352,7 +346,7 @@ jobs:
     needs: [validate, macos, windows]
     if: >-
       always() && !cancelled() && needs.validate.result == 'success' &&
-      needs.validate.outputs.mode == 'release' && needs.macos.outputs.apple_ready == 'true' &&
+      needs.validate.outputs.mode == 'release' &&
       needs.macos.result == 'success' &&
       (needs.windows.result == 'success' ||
        (needs.validate.outputs.windows == 'false' && needs.windows.result == 'skipped'))

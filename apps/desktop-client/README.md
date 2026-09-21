@@ -93,21 +93,42 @@ Homebrew Tap.
 
 Version 0.3.35 selects macOS only. Existing Windows releases remain available.
 
-The repository must provide these GitHub Actions secrets:
+The macOS release job uses the protected `production-release` GitHub
+Environment, matching the production signing model used by WOS Aide. Configure
+these environment secrets:
 
 ```text
-APPLE_CERTIFICATE
-APPLE_CERTIFICATE_PASSWORD
-APPLE_ID
-APPLE_PASSWORD
-APPLE_TEAM_ID
-HOMEBREW_TAP_DEPLOY_KEY
+MAC_CSC_P12_BASE64
+MAC_CSC_KEY_PASSWORD
+APPLE_API_KEY_P8_BASE64
+APPLE_API_KEY_ID
+APPLE_API_ISSUER
 ```
 
-`APPLE_CERTIFICATE` is the base64 representation of the exported Developer ID
-Application `.p12`; `APPLE_PASSWORD` is an Apple app-specific password. The
-signing identity is discovered from the imported certificate rather than being
-hard-coded into the workflow.
+`MAC_CSC_P12_BASE64` is the base64 representation of the exported Developer ID
+Application `.p12` including its private key. The three `APPLE_API_*` values
+come from an App Store Connect Team API Key suitable for `notarytool`. The
+environment variable `MAC_CSC_NAME` identifies the expected Developer ID
+identity and defaults to `Yongjian Li (2NLAH5MYH8)`.
+
+The repository-level `HOMEBREW_TAP_DEPLOY_KEY` secret remains separate and is
+used only to update `iihciyekub/homebrew-tap` after the immutable GitHub Release
+has been published.
+
+Configure the Apple environment without committing credentials:
+
+```bash
+scripts/setup-desktop-release-secrets.sh \
+  /secure/coding-tools-developer-id.p12 \
+  /secure/AuthKey_XXXXXXXXXX.p8 \
+  APPLE_KEY_ID \
+  APPLE_ISSUER_ID
+```
+
+The helper securely prompts for the `.p12` password unless
+`MAC_CSC_KEY_PASSWORD` is already set. A production release now fails explicitly
+when any signing/notarization secret is missing; it never reports success after
+silently skipping the DMG build.
 
 ## Development
 
