@@ -27,6 +27,7 @@ TASK_TRANSITIONS = {
 }
 MAX_CHECKPOINT_FILES = 64
 MAX_CHECKPOINT_BYTES = 8 * 1024 * 1024
+MAX_CONTEXT_CHECKPOINT_BYTES = 128 * 1024
 MAX_CHECK_OUTPUT_CHARS = 8_000
 MAX_REVIEW_SNAPSHOT_BYTES = 1024 * 1024
 
@@ -91,6 +92,14 @@ class WorkflowStore:
                     mode INTEGER,
                     digest TEXT,
                     PRIMARY KEY (checkpoint_id, path)
+                );
+                CREATE TABLE IF NOT EXISTS context_checkpoints (
+                    context_checkpoint_id TEXT PRIMARY KEY,
+                    task_id TEXT REFERENCES tasks(task_id) ON DELETE SET NULL,
+                    label TEXT NOT NULL,
+                    deterministic_json TEXT NOT NULL,
+                    semantic_json TEXT NOT NULL,
+                    created_at REAL NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS check_runs (
                     check_run_id TEXT PRIMARY KEY,
@@ -601,11 +610,17 @@ class WorkflowStore:
                 "AND e.artifact_id=c.checkpoint_id WHERE e.task_id=? ORDER BY c.created_at DESC LIMIT 20",
                 (task_id,),
             ).fetchall()
+            context_checkpoint_rows = db.execute(
+                "SELECT context_checkpoint_id,task_id,label,created_at FROM context_checkpoints "
+                "WHERE task_id=? ORDER BY created_at DESC LIMIT 20",
+                (task_id,),
+            ).fetchall()
             review_rows = db.execute(
                 "SELECT * FROM reviews WHERE task_id = ? ORDER BY updated_at DESC LIMIT 20", (task_id,)
             ).fetchall()
         checks = [_check_run_row(row) for row in check_rows]
         checkpoints = [dict(row) for row in checkpoint_rows]
+        context_checkpoints = [dict(row) for row in context_checkpoint_rows]
         reviews = [_review_row(row) for row in review_rows]
         return {
             "ok": True,
@@ -613,11 +628,13 @@ class WorkflowStore:
             "events": events["events"],
             "checks": checks,
             "checkpoints": checkpoints,
+            "context_checkpoints": context_checkpoints,
             "reviews": reviews,
             "latest_check_status": checks[0]["status"] if checks else None,
             "summary": (
                 f"Task {task_id} is {task['status']} with {len(checks)} recent checks, "
-                f"{len(checkpoints)} checkpoints, {len(reviews)} reviews, and {len(events['events'])} events."
+                f"{len(checkpoints)} file checkpoints, {len(context_checkpoints)} context checkpoints, "
+                f"{len(reviews)} reviews, and {len(events['events'])} events."
             ),
         }
 
@@ -891,6 +908,110 @@ class WorkflowStore:
             "count": min(len(rows), limit),
             "truncated": len(rows) > limit,
             "summary": f"Found {min(len(rows), limit)} checkpoints.",
+        }
+
+    def create_context_checkpoint(
+        self,
+        *,
+        label: str,
+        deterministic: dict[str, Any],
+        semantic: dict[str, Any],
+        task_id: str | None = None,
+    ) -> dict[str, Any]:
+        label = label.strip()
+        if not label or len(label) > 200:
+            raise ToolFailure(
+                "CONTEXT_CHECKPOINT_INVALID",
+                "Context checkpoint label must be 1-200 characters.",
+                category="validation",
+            )
+        deterministic_json = json.dumps(deterministic, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        semantic_json = json.dumps(semantic, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        total_bytes = len(deterministic_json.encode("utf-8")) + len(semantic_json.encode("utf-8"))
+        if total_bytes > MAX_CONTEXT_CHECKPOINT_BYTES:
+            raise ToolFailure(
+                "CONTEXT_CHECKPOINT_TOO_LARGE",
+                "Context checkpoint metadata exceeds the supported size.",
+                category="validation",
+                details={"bytes": total_bytes, "max_bytes": MAX_CONTEXT_CHECKPOINT_BYTES},
+            )
+        checkpoint_id = "ctx_" + uuid.uuid4().hex
+        now = time.time()
+        with self._lock, self._connection() as db:
+            if task_id is not None:
+                self._require_task(db, task_id)
+            db.execute(
+                "INSERT INTO context_checkpoints VALUES (?, ?, ?, ?, ?, ?)",
+                (checkpoint_id, task_id, label, deterministic_json, semantic_json, now),
+            )
+            if task_id is not None:
+                self._insert_event(
+                    db,
+                    task_id,
+                    "context_checkpoint_created",
+                    f"Created context checkpoint {label}.",
+                    artifact_type="context_checkpoint",
+                    artifact_id=checkpoint_id,
+                    details={"label": label, "bytes": total_bytes},
+                    now=now,
+                )
+        return {
+            "ok": True,
+            "context_checkpoint_id": checkpoint_id,
+            "task_id": task_id,
+            "label": label,
+            "deterministic": deterministic,
+            "semantic": semantic,
+            "created_at": now,
+            "bytes": total_bytes,
+            "summary": f"Created context checkpoint {checkpoint_id}.",
+        }
+
+    def get_context_checkpoint(self, checkpoint_id: str) -> dict[str, Any]:
+        with self._lock, self._connection() as db:
+            row = db.execute(
+                "SELECT * FROM context_checkpoints WHERE context_checkpoint_id=?",
+                (checkpoint_id,),
+            ).fetchone()
+        if row is None:
+            raise ToolFailure(
+                "CONTEXT_CHECKPOINT_NOT_FOUND",
+                f"Context checkpoint not found: {checkpoint_id}",
+                category="not_found",
+            )
+        return {
+            "ok": True,
+            "context_checkpoint_id": row["context_checkpoint_id"],
+            "task_id": row["task_id"],
+            "label": row["label"],
+            "deterministic": json.loads(row["deterministic_json"]),
+            "semantic": json.loads(row["semantic_json"]),
+            "created_at": row["created_at"],
+        }
+
+    def list_context_checkpoints(self, *, limit: int = 100, task_id: str | None = None) -> dict[str, Any]:
+        if limit < 1 or limit > 1000:
+            raise ToolFailure("INVALID_ARGUMENT", "limit must be between 1 and 1000.", category="validation")
+        with self._lock, self._connection() as db:
+            if task_id is not None:
+                rows = db.execute(
+                    "SELECT context_checkpoint_id,task_id,label,created_at FROM context_checkpoints "
+                    "WHERE task_id=? ORDER BY created_at DESC LIMIT ?",
+                    (task_id, limit + 1),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    "SELECT context_checkpoint_id,task_id,label,created_at FROM context_checkpoints "
+                    "ORDER BY created_at DESC LIMIT ?",
+                    (limit + 1,),
+                ).fetchall()
+        return {
+            "ok": True,
+            "workspace_id": self.workspace_id,
+            "context_checkpoints": [dict(row) for row in rows[:limit]],
+            "count": min(len(rows), limit),
+            "truncated": len(rows) > limit,
+            "summary": f"Found {min(len(rows), limit)} context checkpoints.",
         }
 
     def checkpoint(self, checkpoint_id: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:

@@ -32,6 +32,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
 from . import __version__
+from . import agent_environment as agent_environment_tools
 from . import code_intel
 from . import lsp as lsp_tools
 from . import skills as skill_tools
@@ -96,6 +97,7 @@ from .protocol import (
 from .project_context import ProjectContext, instructions_for_path, load_project_context
 from .repositories import RepositoryContext, discover_repository, git_environment, repository_write_lock
 from .computer import Backend, ComputerService
+from .codex_computer import CodexComputerObservationService, CodexComputerProvider
 from .computer_contract import COMPUTER_TOOLS
 from .telemetry import SessionTelemetry
 from .textutils import DEFAULT_MAX_LINES, TextTruncation, truncate_text_head
@@ -1056,6 +1058,17 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         idempotent=True,
         gated_by="enable_workflow_tools",
     ),
+    "agent_environment": ToolSpec(
+        title="Discover local agent environment",
+        description=(
+            "Discover metadata for installed local agent runtimes such as Codex, Claude Code, Gemini CLI, "
+            "Cursor, and OpenCode. Returns CLI/home paths, skill/plugin/worktree/rule names, and sensitive "
+            "resource presence without reading credentials, cookies, tokens, or browser-session contents."
+        ),
+        read_only=True,
+        idempotent=True,
+        gated_by="enable_agent_environment",
+    ),
     "checks_discover": ToolSpec(
         title="Discover checks",
         description="Discover test, lint, typecheck, and build commands from project manifests without running them.",
@@ -1161,6 +1174,16 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         title="Restore checkpoint",
         description="Restore a checkpoint only when its preview token still matches every current file.",
         destructive=True,
+        gated_by="enable_workflow_tools",
+    ),
+    "context_checkpoint": ToolSpec(
+        title="Context checkpoint",
+        description=(
+            "Create, read, or list a model-free cross-session context checkpoint. The server records current "
+            "Git/command/capability fingerprints; semantic summary fields are supplied by the calling model."
+        ),
+        read_only=False,
+        idempotent=False,
         gated_by="enable_workflow_tools",
     ),
     "view_image": ToolSpec(
@@ -2045,6 +2068,7 @@ class Runtime:
         self.enable_view_image = enable_view_image
         self.enable_workflow_tools = enable_workflow_tools
         self.enable_computer_tools = enable_computer_tools
+        self.enable_agent_environment = permission_mode == "host"
         self.defer_workflow_tools = bool(defer_workflow_tools and enable_workflow_tools)
         self.enable_deferred_tools = self.defer_workflow_tools
         self.enable_hooks = enable_hooks
@@ -2162,7 +2186,18 @@ class Runtime:
         self.computer: ComputerService | None = None
         if enable_computer_tools:
             assert self.workflow_store is not None
-            self.computer = ComputerService(self.workflow_store, computer_helper, backend=computer_backend)
+            codex_observer = None
+            if permission_mode == "host":
+                codex_observer = CodexComputerObservationService(
+                    self.workflow_store,
+                    CodexComputerProvider(self.workspace.root),
+                )
+            self.computer = ComputerService(
+                self.workflow_store,
+                computer_helper,
+                backend=computer_backend,
+                codex_observer=codex_observer,
+            )
             self._tool_handlers.update({name: getattr(self.computer, name) for name in COMPUTER_TOOLS})
 
     def _set_runtime_dir(self, runtime_dir: Path) -> None:
@@ -6125,6 +6160,15 @@ class Runtime:
         resolved = self.resolve_existing(str(args.get("path", "")))
         return skill_tools.read_skill(self.workspace.root, resolved.path)
 
+    def agent_environment(self, args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return agent_environment_tools.discover_agent_environment(
+                provider=str(args.get("provider", "all")),
+                max_items=int(args.get("max_items", 200)),
+            )
+        except ValueError as exc:
+            raise ToolFailure("INVALID_ARGUMENT", str(exc), category="validation") from exc
+
     def checks_discover(self, args: dict[str, Any]) -> dict[str, Any]:
         target = self.resolve_existing(str(args.get("path", "."))).path
         if not target.is_dir():
@@ -6530,6 +6574,147 @@ class Runtime:
             "file_count": len(files),
             "summary": f"Restored {len(files)} files from checkpoint {checkpoint_id}.",
         }
+
+    def _context_checkpoint_state(self) -> dict[str, Any]:
+        git_state: dict[str, Any]
+        try:
+            status = self.git_status({"path": ".", "include_untracked": True, "max_entries": 2000})
+        except ToolFailure as exc:
+            git_state = {"available": False, "reason": exc.code}
+        else:
+            if status.get("is_repo"):
+                entries = [
+                    {
+                        "path": item.get("path"),
+                        "original_path": item.get("original_path"),
+                        "index_status": item.get("index_status"),
+                        "worktree_status": item.get("worktree_status"),
+                    }
+                    for item in status.get("entries", [])
+                    if isinstance(item, dict)
+                ]
+                git_state = {
+                    "available": True,
+                    "repo_root": status.get("repo_root"),
+                    "branch": status.get("branch"),
+                    "head": status.get("head"),
+                    "index_fingerprint": status.get("index_fingerprint"),
+                    "clean": status.get("clean"),
+                    "entries": entries,
+                    "truncated": bool(status.get("truncated")),
+                }
+            else:
+                git_state = {"available": False, "reason": "not_repo"}
+
+        commands_payload = self.list_commands({"max_results": 100})
+        commands = [
+            {
+                "command_id": item.get("command_id"),
+                "operation_id": item.get("operation_id"),
+                "workdir": item.get("workdir"),
+                "status": item.get("status"),
+                "started_at": item.get("started_at"),
+            }
+            for item in commands_payload.get("commands", [])
+            if isinstance(item, dict) and item.get("status") in {"accepting", "running"}
+        ]
+        capabilities = {
+            "server_version": __version__,
+            "permission_mode": self.permission_mode,
+            "workflow": self.enable_workflow_tools,
+            "computer": self.enable_computer_tools,
+            "agent_environment": getattr(self, "enable_agent_environment", False),
+        }
+
+        def fingerprint(value: Any) -> str:
+            return hashlib.sha256(
+                json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+            ).hexdigest()
+
+        return {
+            "workspace": str(self.workspace.root),
+            "git": git_state,
+            "running_commands": commands,
+            "capabilities": capabilities,
+            "fingerprints": {
+                "git": fingerprint(git_state),
+                "commands": fingerprint(commands),
+                "capabilities": fingerprint(capabilities),
+            },
+        }
+
+    @staticmethod
+    def _context_checkpoint_staleness(saved: dict[str, Any], current: dict[str, Any]) -> list[str]:
+        saved_fingerprints = saved.get("fingerprints") if isinstance(saved, dict) else None
+        current_fingerprints = current.get("fingerprints") if isinstance(current, dict) else None
+        if not isinstance(saved_fingerprints, dict) or not isinstance(current_fingerprints, dict):
+            return ["checkpoint_fingerprint_missing"]
+        reasons: list[str] = []
+        for key, reason in (
+            ("git", "git_state_changed"),
+            ("commands", "running_commands_changed"),
+            ("capabilities", "capabilities_changed"),
+        ):
+            if saved_fingerprints.get(key) != current_fingerprints.get(key):
+                reasons.append(reason)
+        return reasons
+
+    def context_checkpoint(self, args: dict[str, Any]) -> dict[str, Any]:
+        action = str(args.get("action", ""))
+        store = self._workflow_store()
+        if action == "create":
+            summary = str(args.get("summary", "")).strip()
+            if not summary:
+                raise ToolFailure(
+                    "CONTEXT_CHECKPOINT_INVALID",
+                    "create requires a non-empty semantic summary supplied by the current model.",
+                    category="validation",
+                )
+            semantic = {
+                "summary": summary,
+                "decisions": list(args.get("decisions", [])),
+                "unresolved": list(args.get("unresolved", [])),
+                "next_steps": list(args.get("next_steps", [])),
+            }
+            deterministic = self._context_checkpoint_state()
+            return store.create_context_checkpoint(
+                label=str(args.get("label", "context checkpoint")),
+                deterministic=deterministic,
+                semantic=semantic,
+                task_id=str(args["task_id"]) if args.get("task_id") else None,
+            )
+        if action == "get":
+            checkpoint_id = str(args.get("context_checkpoint_id", ""))
+            if not checkpoint_id:
+                raise ToolFailure(
+                    "CONTEXT_CHECKPOINT_INVALID",
+                    "get requires context_checkpoint_id.",
+                    category="validation",
+                )
+            saved = store.get_context_checkpoint(checkpoint_id)
+            current = self._context_checkpoint_state()
+            reasons = self._context_checkpoint_staleness(saved["deterministic"], current)
+            saved.update(
+                current=current,
+                stale=bool(reasons),
+                stale_reasons=reasons,
+                summary=(
+                    f"Context checkpoint {checkpoint_id} is stale: {', '.join(reasons)}."
+                    if reasons
+                    else f"Context checkpoint {checkpoint_id} still matches current runtime state."
+                ),
+            )
+            return saved
+        if action == "list":
+            return store.list_context_checkpoints(
+                limit=int(args.get("max_results", 100)),
+                task_id=str(args["task_id"]) if args.get("task_id") else None,
+            )
+        raise ToolFailure(
+            "INVALID_ARGUMENT",
+            "context_checkpoint action must be create, get, or list.",
+            category="validation",
+        )
 
     def view_image(self, args: dict[str, Any]) -> dict[str, Any]:
         resolved = self.resolve_file_existing(str(args.get("path", "")))
@@ -8219,6 +8404,16 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             {"max_results": {**integer, "minimum": 1, "maximum": 1000, "default": 200}}
         ),
         "skills_read": object_schema({"path": {**string, "minLength": 1}}, ["path"]),
+        "agent_environment": object_schema(
+            {
+                "provider": {
+                    **string,
+                    "enum": ["all", "codex", "claude", "gemini", "cursor", "opencode"],
+                    "default": "all",
+                },
+                "max_items": {**integer, "minimum": 1, "maximum": 500, "default": 200},
+            }
+        ),
         "checks_discover": object_schema({"path": {**string, "default": "."}}),
         "checks_run": object_schema(
             {
@@ -8333,6 +8528,20 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "restore_token": {**string, "minLength": 64, "maxLength": 64},
             },
             ["checkpoint_id", "restore_token"],
+        ),
+        "context_checkpoint": object_schema(
+            {
+                "action": {**string, "enum": ["create", "get", "list"]},
+                "context_checkpoint_id": {**string, "minLength": 1},
+                "label": {**string, "minLength": 1, "maxLength": 200, "default": "context checkpoint"},
+                "summary": {**string, "maxLength": 20000},
+                "decisions": {"type": "array", "items": {**string, "maxLength": 2000}, "maxItems": 50},
+                "unresolved": {"type": "array", "items": {**string, "maxLength": 2000}, "maxItems": 50},
+                "next_steps": {"type": "array", "items": {**string, "maxLength": 2000}, "maxItems": 50},
+                "task_id": {**string, "minLength": 1},
+                "max_results": {**integer, "minimum": 1, "maximum": 1000, "default": 100},
+            },
+            ["action"],
         ),
         "view_image": object_schema(
             {

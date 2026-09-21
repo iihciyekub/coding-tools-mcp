@@ -129,7 +129,7 @@ instructions:
     "io.modelcontextprotocol/serverInfo": {
       "name": "coding-tools-mcp",
       "title": "Coding Tools MCP",
-      "version": "0.3.10"
+      "version": "0.4.0"
     }
   }
 }
@@ -354,7 +354,7 @@ Retry: This command_id has expired or never existed; …
 Known tool error codes include:
 
 ```json
-["ABSOLUTE_PATH_DENIED", "ACCESSIBILITY_PERMISSION_REQUIRED", "APPROVAL_EXPIRED", "APPROVAL_NOT_FOUND", "APPROVAL_NOT_USABLE", "APPROVAL_SCOPE_MISMATCH", "APP_CONTROL_ERROR", "APP_HELPER_ERROR", "BINARY_FILE", "BROWSER_DOWNLOAD_NOT_FOUND", "BROWSER_DOWNLOAD_TOO_LARGE", "BROWSER_DOWNLOAD_UNAVAILABLE", "BROWSER_ERROR", "BROWSER_TIMEOUT", "BROWSER_WATCH_NOT_FOUND", "CHECKPOINT_CONFLICT", "CHECKPOINT_NOT_FOUND", "CHECKPOINT_SCOPE_INVALID", "CHECKPOINT_TOO_LARGE", "CHECK_NOT_FOUND", "CHECK_RUN_NOT_FOUND", "CHROME_EXTENSION_ERROR", "CHROME_EXTENSION_UNAVAILABLE", "COMMAND_CLOSED", "COMMAND_LIMIT_REACHED", "COMMAND_NOT_FOUND", "ELICITATION_UNSUPPORTED", "GIT_COMMIT_SCOPE_MISMATCH", "GIT_ERROR", "GIT_NOT_REPOSITORY", "GIT_PATH_SCOPE_REQUIRED", "GIT_STATE_CONFLICT", "GIT_WORKTREE_DIRTY", "GIT_WORKTREE_EXISTS", "GIT_WORKTREE_NOT_FOUND", "HOOK_BLOCKED", "INTERNAL_ERROR", "INVALID_ARGUMENT", "INVALID_GIT_BRANCH", "INVALID_HOOK_CONFIG", "INVALID_TASK_TRANSITION", "IS_DIRECTORY", "LSP_EDIT_TOO_LARGE", "LSP_EDIT_UNSUPPORTED", "LSP_ERROR", "LSP_EXITED", "LSP_LANGUAGE_UNSUPPORTED", "LSP_PATH_OUTSIDE_WORKSPACE", "LSP_TIMEOUT", "LSP_UNAVAILABLE", "NOT_A_DIRECTORY", "NOT_FOUND", "OPERATION_CONFLICT", "OPERATION_NOT_FOUND", "OPERATION_PENDING", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_FILE_SCOPE", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "PROTOCOL_TASK_NOT_FOUND", "REVIEW_CONFLICT", "REVIEW_NOT_FOUND", "REVIEW_TOO_LARGE", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_UNAVAILABLE", "SCREEN_RECORDING_PERMISSION_REQUIRED", "SYMLINK_ESCAPE", "TASK_CONFLICT", "TASK_NOT_FOUND", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING", "UNSUPPORTED_PLATFORM", "WORKFLOW_STORE_ERROR"]
+["ABSOLUTE_PATH_DENIED", "ACCESSIBILITY_PERMISSION_REQUIRED", "APPROVAL_EXPIRED", "APPROVAL_NOT_FOUND", "APPROVAL_NOT_USABLE", "APPROVAL_SCOPE_MISMATCH", "APP_CONTROL_ERROR", "APP_HELPER_ERROR", "BINARY_FILE", "BROWSER_DOWNLOAD_NOT_FOUND", "BROWSER_DOWNLOAD_TOO_LARGE", "BROWSER_DOWNLOAD_UNAVAILABLE", "BROWSER_ERROR", "BROWSER_TIMEOUT", "BROWSER_WATCH_NOT_FOUND", "CHECKPOINT_CONFLICT", "CHECKPOINT_NOT_FOUND", "CHECKPOINT_SCOPE_INVALID", "CHECKPOINT_TOO_LARGE", "CHECK_NOT_FOUND", "CHECK_RUN_NOT_FOUND", "CHROME_EXTENSION_ERROR", "CHROME_EXTENSION_UNAVAILABLE", "COMMAND_CLOSED", "COMMAND_LIMIT_REACHED", "COMMAND_NOT_FOUND", "CONTEXT_CHECKPOINT_INVALID", "CONTEXT_CHECKPOINT_NOT_FOUND", "CONTEXT_CHECKPOINT_TOO_LARGE", "ELICITATION_UNSUPPORTED", "GIT_COMMIT_SCOPE_MISMATCH", "GIT_ERROR", "GIT_NOT_REPOSITORY", "GIT_PATH_SCOPE_REQUIRED", "GIT_STATE_CONFLICT", "GIT_WORKTREE_DIRTY", "GIT_WORKTREE_EXISTS", "GIT_WORKTREE_NOT_FOUND", "HOOK_BLOCKED", "INTERNAL_ERROR", "INVALID_ARGUMENT", "INVALID_GIT_BRANCH", "INVALID_HOOK_CONFIG", "INVALID_TASK_TRANSITION", "IS_DIRECTORY", "LSP_EDIT_TOO_LARGE", "LSP_EDIT_UNSUPPORTED", "LSP_ERROR", "LSP_EXITED", "LSP_LANGUAGE_UNSUPPORTED", "LSP_PATH_OUTSIDE_WORKSPACE", "LSP_TIMEOUT", "LSP_UNAVAILABLE", "NOT_A_DIRECTORY", "NOT_FOUND", "OPERATION_CONFLICT", "OPERATION_NOT_FOUND", "OPERATION_PENDING", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_FILE_SCOPE", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "PROTOCOL_TASK_NOT_FOUND", "REVIEW_CONFLICT", "REVIEW_NOT_FOUND", "REVIEW_TOO_LARGE", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_UNAVAILABLE", "SCREEN_RECORDING_PERMISSION_REQUIRED", "SYMLINK_ESCAPE", "TASK_CONFLICT", "TASK_NOT_FOUND", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING", "UNSUPPORTED_PLATFORM", "WORKFLOW_STORE_ERROR"]
 ```
 
 Error categories are `validation`, `security`, `permission`, `runtime`,
@@ -438,12 +438,12 @@ remain short-lived and process-local. Forwarded headers are ignored unless
 
 The default catalog has 28 tools, including `view_image`. Setting
 `CODING_TOOLS_MCP_ENABLE_VIEW_IMAGE=0` removes that optional binary-content
-tool. `--enable-workflow-tools` adds the 40 tools specified in the opt-in
-workflow section for 68 directly exposed tools. Adding
-`--defer-workflow-tools` instead hides those 40 workflow tools from the direct
+tool. `--enable-workflow-tools` adds the 41 tools specified in the opt-in
+workflow section for 69 directly exposed tools. Adding
+`--defer-workflow-tools` instead hides those 41 workflow tools from the direct
 catalog, exposes `tool_invoke`, and leaves them searchable through
-`tool_search`: 29 tools are direct and 40 are deferred, while all 69 registered
-runtime capabilities remain available. These selections are fixed at startup;
+`tool_search`: 29 tools are direct and 41 are deferred, while all 70 capabilities
+available in that startup configuration remain reachable. These selections are fixed at startup;
 the runtime does not emit dynamic tool-list changes. The desktop launcher
 selects deferred workflow exposure by default; the CLI defaults are unchanged.
 Tool descriptions carry a category and a concise selection hint. Both
@@ -1342,6 +1342,17 @@ Inputs: `"path"`.
 Reads one selected workspace Skill, with a 128 KiB limit and workspace/symlink
 confinement.
 
+### agent_environment
+
+Inputs: `"provider"`, `"max_items"`.
+
+This tool is exposed only in `permission_mode=host`. It discovers metadata for
+installed local agent environments (`codex`, `claude`, `gemini`, `cursor`, and
+`opencode`) including CLI/home paths, Skill names, Codex enabled Plugin ids,
+Plugin Skill names, worktrees, rule filenames, and selected local capability
+presence. It reports only booleans for auth/browser-session/OAuth-like resources
+and never returns their contents. It does not execute an agent CLI or Skill.
+
 ### checks_discover
 
 Inputs: `"path"`.
@@ -1420,8 +1431,9 @@ linked checks, and linked checkpoints also generate events automatically.
 
 Inputs: `"task_id"`, `"event_limit"`.
 
-Returns the task record together with recent events and linked check/checkpoint
-evidence so a client can resume after reconnecting or restarting the runtime.
+Returns the task record together with recent events and linked check, file
+checkpoint, context checkpoint, and review evidence so a client can resume after
+reconnecting or restarting the runtime.
 
 ### task_plan_get
 
@@ -1473,6 +1485,22 @@ Rechecks every path and rejects stale previews with retryable
 `CHECKPOINT_CONFLICT`. A current token restores the complete explicit scope
 through the existing atomic multi-file committer; files absent at checkpoint
 creation are deleted. Git index and external side effects are outside its scope.
+
+### context_checkpoint
+
+Inputs: `"action"`, `"context_checkpoint_id"`, `"label"`, `"summary"`,
+`"decisions"`, `"unresolved"`, `"next_steps"`, `"task_id"`, `"max_results"`.
+
+This is a model-free cross-session context metadata store. `action="create"`
+requires a semantic `summary` supplied by the current caller and locally records
+the current workspace, Git state, running-command set, runtime capability state,
+and SHA-256 fingerprints of those deterministic sections. `action="get"`
+recomputes the deterministic state and reports `stale` plus bounded reasons such
+as `git_state_changed`, `running_commands_changed`, or `capabilities_changed`.
+`action="list"` returns bounded checkpoint metadata. The combined deterministic
+and semantic payload is limited to 128 KiB. Supplying `task_id` links the context
+checkpoint into `task_context`. The tool does not call Codex compact or any
+other model service.
 
 ### git_branch_list
 
@@ -1709,6 +1737,7 @@ Computer-specific failure codes include:
   "COMPUTER_ACTION_UNSUPPORTED",
   "COMPUTER_APP_BUSY",
   "COMPUTER_APP_CHANGED",
+  "COMPUTER_APP_NOT_FOUND",
   "COMPUTER_CONTROL_REQUIRED",
   "COMPUTER_HELPER_FAILED",
   "COMPUTER_SESSION_INACTIVE",
@@ -1728,18 +1757,46 @@ Computer-specific failure codes include:
 ]
 ```
 
+The Local Agent Capability Gateway remains optional and provider-backed. Its
+Codex compatibility probe and host-mode Preview Computer path use the same
+structured failure vocabulary so embedders and diagnostics can distinguish
+install, protocol, isolation, and no-model-turn failures. Its codes are:
+
+```json
+[
+  "CODEX_APP_SERVER_ERROR",
+  "CODEX_APP_SERVER_TIMEOUT",
+  "CODEX_APP_SERVER_UNAVAILABLE",
+  "CODEX_BRIDGE_ISOLATION_FAILED",
+  "CODEX_BROKER_CRASHED",
+  "CODEX_CAPABILITY_UNAVAILABLE",
+  "CODEX_MODEL_TURN_FORBIDDEN",
+  "CODEX_MODEL_TURN_GUARD_FAILED",
+  "CODEX_NOT_INSTALLED",
+  "CODEX_RPC_FORBIDDEN",
+  "CODEX_SCHEMA_INCOMPATIBLE",
+  "OUTPUT_LIMIT_EXCEEDED"
+]
+```
+
+These diagnostics do not imply that a Codex-backed capability is available in
+the current runtime. The read-only Computer provider requires host mode plus
+`--enable-computer-tools`; mutation remains Native-only. The current rollout
+and no-model-turn boundary are specified in
+[Local Agent Capability Gateway](local-agent-capability-gateway-spec.zh-CN.md).
+
 
 ### computer_status
 
 Inputs: none.
 
-Check native helper availability, system permissions and supported background operations without prompting.
+Check Native Computer availability and optional provider status without prompting. `providers.native` reports the stable v1 helper; `providers.codex` reports whether the host-mode Preview route is enabled. Codex observe/control sessions still require explicit desktop approval.
 
 ### computer_request_access
 
-Inputs: `"app_id"`, `"access"`, `"reason"`, `"ttl_seconds"`.
+Inputs: `"provider"`, `"app_id"`, `"access"`, `"reason"`, `"ttl_seconds"`.
 
-Ask the desktop user to authorize one app session. Use an app_id from app_list. Never grants access automatically, including in host mode.
+Ask the desktop user to authorize one app session. `provider` defaults to `native`. The `codex` provider is available only in host mode and supports separately scoped `observe` and `control` approvals. Neither provider grants access automatically, and protected approval/settings applications remain ineligible for control.
 
 ### computer_session_start
 
@@ -1761,9 +1818,9 @@ Revoke an app session and release its control lock. Already completed actions ar
 
 ### app_list
 
-Inputs: `"query"`, `"max_results"`.
+Inputs: `"provider"`, `"query"`, `"max_results"`.
 
-Find running app identities before requesting access. Does not expose window contents.
+Find app identities before requesting access. `provider=native` remains the stable default. `provider=codex` uses the isolated no-model-turn broker and is host-only Preview. This call does not expose window contents.
 
 ### app_windows
 
@@ -1776,6 +1833,34 @@ List windows belonging to an authorized session. Use returned window_id values, 
 Inputs: `"session_id"`, `"window_id"`, `"include_image"`, `"max_elements"`, `"max_depth"`, `"max_dimension"`.
 
 Read an authorized window's accessibility elements and optional screenshot. Use returned snapshot_id and element_id for actions. Set include_image=false for accessibility-only inspection.
+
+### app_observe
+
+Inputs: `"session_id"`, `"include_image"`, `"disable_diff"`, `"max_text_chars"`.
+
+Read whole-app accessibility text and an optional screenshot from an approved
+Codex Preview session. The session is created through the existing
+`computer_request_access` and `computer_session_start` flow with
+`provider=codex`. The result includes a short-lived `snapshot_id` derived from
+the current whole-app accessibility state and may contain one MCP image
+content block; screenshot bytes are not placed in structured content. This
+tool itself has no mutation path and rejects Native v1 sessions, which continue
+to use `app_snapshot`.
+
+### app_interact
+
+Inputs: `"session_id"`, `"snapshot_id"`, `"action"`, `"operation_id"`, `"element_index"`, `"x"`, `"y"`, `"click_count"`, `"mouse_button"`, `"secondary_action"`, `"value"`, `"text"`, `"prefix"`, `"suffix"`, `"selection"`, `"direction"`, `"pages"`, `"from_x"`, `"from_y"`, `"to_x"`, `"to_y"`, `"key"`.
+
+Perform one Computer v2 action in an explicitly approved Codex `control`
+session. Supported actions are `click`, `perform_secondary_action`, `set_value`,
+`select_text`, `scroll`, `drag`, `press_key`, and `type_text`. The caller must
+first call `app_observe` and pass its fresh `snapshot_id`. Immediately before
+the action, the provider re-observes the app and rejects changed or expired
+state with `COMPUTER_SNAPSHOT_STALE`. Every action also requires a unique
+`operation_id`; reusing the same id with identical arguments returns the saved
+receipt, different arguments return `OPERATION_CONFLICT`, and an uncertain
+outcome becomes `COMPUTER_ACTION_UNKNOWN` rather than being retried. The result
+is `verified=false`; callers should observe again to verify the UI outcome.
 
 ### app_action
 

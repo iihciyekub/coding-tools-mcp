@@ -10,7 +10,7 @@ runtimes now select deferred workflow exposure; the CLI defaults are unchanged.
 
 ## Fixed inventory
 
-The implementation declares exactly 79 tools. With the default `view_image`
+The implementation declares exactly 83 tools. With the default `view_image`
 capability enabled, the default catalog exposes 28 tools:
 
 - `server_info`: server, workspace, automatic project context, policy, runtime,
@@ -44,12 +44,16 @@ capability enabled, the default catalog exposes 28 tools:
 - `code_definition`: find definitions for one symbol.
 - `code_references`: find exact identifier references for one symbol.
 
+`permission_mode=host` additionally exposes one metadata-only discovery tool:
+
+- `agent_environment`: discover installed local agent runtimes, Skill/Plugin/worktree/rule names, and capability presence without returning auth, cookie, token, or browser-session contents.
+
 When deferred workflow exposure is selected, one additional registered gateway
 is directly exposed:
 
 - `tool_invoke`: validate and dispatch one workflow tool returned by `tool_search` while keeping that workflow tool out of `tools/list`.
 
-Starting the server with `--enable-workflow-tools` adds these 40 tools. The
+Starting the server with `--enable-workflow-tools` adds these 41 tools. The
 selection is fixed for that runtime; it does not change during a connection:
 
 - `workspace_overview`: summarize manifests, languages, entry points, top-level areas, and instruction files.
@@ -92,14 +96,15 @@ selection is fixed for that runtime; it does not change during a connection:
 - `checkpoint_list`: list persistent workspace checkpoints.
 - `checkpoint_diff`: compare a checkpoint to current files and issue a state-bound restore token.
 - `checkpoint_restore`: atomically restore checkpoint files when the preview token is still current.
+- `context_checkpoint`: create, read, or list compact cross-session context metadata; deterministic Git/command/capability state is captured locally and semantic summary fields come from the current caller rather than another model.
 
 `view_image` may be disabled when an installation cannot accept binary image
 content. The workflow toolset is opt-in. With normal workflow exposure the
-direct catalog contains 68 tools. Adding `--defer-workflow-tools` (selected by
-the desktop launcher) keeps those 40
+direct catalog contains 69 tools. Adding `--defer-workflow-tools` (selected by
+the desktop launcher) keeps those 41
 workflow capabilities available to `tool_search` but removes them from the
 direct `tools/list`; `tool_invoke` is exposed instead, producing a 29-tool
-direct catalog and 40 deferred tools. A deferred intent-search result always includes
+direct catalog and 41 deferred tools. A deferred intent-search result always includes
 its input schema and `invoke_via: "tool_invoke"`. This is a static gateway
 selected at startup, not a dynamic tool-list mutation, so `listChanged` remains
 `false`.
@@ -121,19 +126,21 @@ filesystem sandbox as `exec_command`; a failing blocking `before_tool` hook
 rejects the target call. Hook arguments/results are redacted before being sent
 to hook stdin, and hook stdout/stderr is bounded.
 
-Starting with `--enable-computer-tools` adds these 10 directly exposed tools,
+Starting with `--enable-computer-tools` adds these 12 directly exposed tools,
 including when workflow tools are deferred. Desktop profiles provide this switch
 and the bundled native helper. See [Computer use v1](computer-use-spec.md) for
 the approval, session and platform contract.
 
-- `computer_status`: Check native helper availability, system permissions and supported background operations without prompting.
-- `computer_request_access`: Ask the desktop user to authorize one app session. Use an app_id from app_list. Never grants access automatically, including in host mode.
+- `computer_status`: Check Native Computer availability plus optional provider status without prompting.
+- `computer_request_access`: Ask the desktop user to authorize one app session. `provider=native` remains the default; `provider=codex` is host-only Preview. Observe and control are separately approved scopes; neither is automatic.
 - `computer_session_start`: Consume an approved app access request and start its bounded session. Reuse the returned session_id for app tools.
 - `computer_session_get`: Read an app approval, session or operation receipt. Pass approval_id to check a pending request, session_id for a session, or no arguments to list this runtime's sessions.
 - `computer_session_stop`: Revoke an app session and release its control lock. Already completed actions are not undone.
-- `app_list`: Find running app identities before requesting access. Does not expose window contents.
+- `app_list`: Find app identities before requesting access. `provider=native` is the stable default; `provider=codex` uses the optional host-mode Preview provider. Does not expose window contents.
 - `app_windows`: List windows belonging to an authorized session. Use returned window_id values, never guessed window indices.
 - `app_snapshot`: Read an authorized window's accessibility elements and optional screenshot. Use returned snapshot_id and element_id for actions. Set include_image=false for accessibility-only inspection.
+- `app_observe`: Read whole-app accessibility text and an optional screenshot from an approved Codex Preview session and return a short-lived snapshot_id for v2 actions.
+- `app_interact`: Perform one bounded Computer v2 action in an approved Codex control session. Requires a fresh app_observe snapshot_id plus a unique operation_id; stale state and uncertain outcomes fail closed.
 - `app_action`: Press or set the value of an observed accessible element in a control session. Requires a fresh snapshot and unique operation_id. No foreground keyboard/mouse fallback. Verify the outcome afterwards.
 - `app_wait`: Wait for an observed element to become enabled or have an expected value. Returns bounded evidence or timeout and responds to session revocation.
 

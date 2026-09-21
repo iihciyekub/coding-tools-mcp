@@ -16,7 +16,7 @@ Coding Tools MCP is a **model-neutral coding runtime** served over the
 search, structured multi-file patches, command execution, interactive
 sessions, and git — one server that any MCP client can drive. Claude Desktop,
 Claude Code, Codex, Cursor, Cline, VS Code, Windsurf, Gemini CLI, or an agent
-you build yourself all get the same 51 default tools, workspace-confined
+you build yourself all get the same stable default tool catalog, workspace-confined
 by default and gated by explicit permission modes.
 
 [![Watch the demo](https://img.youtube.com/vi/N9lQaXt1eqQ/maxresdefault.jpg)](https://youtu.be/N9lQaXt1eqQ?si=LyEwvzzQF6QjUxR0)
@@ -71,7 +71,7 @@ Then ask your client: *"run the test suite and fix the first failure."*
 Add `--enable-workflow-tools` to expose project overview, repository map,
 workspace Skills, checks and evidence, persistent tasks, guarded checkpoints,
 semantic LSP queries, structured Git and managed worktrees, review records,
-desktop approvals, and extended browser actions. The desktop app enables this
+desktop approvals, and model-free context checkpoints. The desktop app enables this
 extension for the runtimes it starts.
 
 Prefer HTTP? Drop `--stdio` and the server speaks Streamable HTTP on
@@ -164,7 +164,7 @@ filtered command environment for later executions until explicitly refreshed.
 `runtime_doctor` gives an agent a non-destructive preflight with actionable
 warnings about missing command aliases/tools, workspace access, hooks, LSP,
 sandbox state, and network policy.
-With `--enable-workflow-tools --defer-workflow-tools`, the 40 workflow tools are
+With `--enable-workflow-tools --defer-workflow-tools`, the 41 workflow tools are
 found by `tool_search` and called through `tool_invoke` instead of being placed
 in the initial `tools/list` payload.
 The desktop launcher selects this mode by default. Start with `tool_search({})`

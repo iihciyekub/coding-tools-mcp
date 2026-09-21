@@ -36,13 +36,13 @@ The default catalog contains 28 tools when `view_image` is enabled:
 - code intelligence: `code_symbols`, `code_definition`, `code_references`
 
 `view_image` can be disabled as an installation capability. All other tools are
-fixed by the selected startup configuration. `--enable-workflow-tools` adds 40
+fixed by the selected startup configuration. `--enable-workflow-tools` adds 41
 project insight, Skills, checks, task, and checkpoint tools; see
 [tools and schemas](docs/tools-and-schemas.md) for their authoritative inventory.
-With `--defer-workflow-tools`, those 40 workflow tools are omitted from the
+With `--defer-workflow-tools`, those 41 workflow tools are omitted from the
 direct catalog and are discovered through `tool_search` and invoked through the
 additional `tool_invoke` gateway. This yields 29 directly exposed tools while
-retaining all 69 runtime capabilities.
+retaining all 70 runtime capabilities available in that startup configuration.
 
 `--enable-hooks` loads workspace-confined hook rules from `.agents/hooks.json`
 by default. Hooks run under the same command policy/sandbox as normal command

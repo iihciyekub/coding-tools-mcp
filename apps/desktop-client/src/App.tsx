@@ -9,7 +9,7 @@ import type { DependencyStatus, LogBundle, PermissionMode, RuntimeStatus, Worksp
 import { publicEndpoint, workspaceHue } from "./utils";
 
 const PANEL_WIDTH = 320;
-const APP_VERSION = "0.3.35";
+const APP_VERSION = "0.4.0";
 type Page = "home" | "new-access" | "workspaces" | "environment" | "logs" | "settings" | "workflow" | "computer" | "more";
 type CopyAction = "server-name" | "server-url" | "credential" | "logs";
 type ConfirmAction = { kind: "stop"; profileId: string } | { kind: "stop-all" } | { kind: "quit" } | null;
@@ -338,7 +338,7 @@ function App() {
       <button className={`secondary-button remove-button ${confirmDelete ? "confirm" : ""}`} type="button" disabled={running || busy === "delete"} onClick={() => void removeWorkspace()}>{confirmDelete ? t("Click again to remove workspace") : t("Remove workspace")}</button><p className="hint-copy">{t("This removes the profile, not the workspace directory.")}</p>
     </section>}
 
-    {page === "computer" && selected && <ComputerPanel enabled={selected.runtime.computer_enabled} running={running} approvals={selectedWorkflow?.approvals ?? []} sessions={selectedWorkflow?.computer_sessions ?? []} t={t} onEnabled={saveComputerEnabled} onDecision={decideApproval} onStop={stopComputerSession} onError={setError} />}
+    {page === "computer" && selected && <ComputerPanel enabled={selected.runtime.computer_enabled} fullAccess={selected.runtime.permission_mode === "host"} running={running} approvals={selectedWorkflow?.approvals ?? []} sessions={selectedWorkflow?.computer_sessions ?? []} t={t} onEnabled={saveComputerEnabled} onDecision={decideApproval} onStop={stopComputerSession} onError={setError} />}
 
     {page === "workflow" && <section className="subpage-body workflow-page">{!selectedWorkflow?.available ? <p className="empty-copy">{selectedWorkflow?.warning || t("No workflow activity yet.")}</p> : <>{selectedWorkflow.approvals.filter((item) => item.status === "pending").map((approval) => <div className="approval-item" key={approval.approval_id}><span><strong>{approval.reason}</strong><small>{approval.tool_name} · {approval.permission}</small></span><div><button type="button" disabled={busy === approval.approval_id} onClick={() => void decideApproval(approval.approval_id, false)}>{t("Deny")}</button><button className="approve" type="button" disabled={busy === approval.approval_id} onClick={() => void decideApproval(approval.approval_id, true)}>{t("Approve")}</button></div></div>)}{selectedWorkflow.tasks.slice(0, 5).map((task) => <ActivityRow key={task.task_id} label={t("Task")} title={task.title} detail={`${task.status} · r${task.revision}`} />)}{selectedWorkflow.checks.slice(0, 3).map((check) => <ActivityRow key={check.check_run_id} label={t("Check")} title={check.check_id} detail={check.status} />)}{!selectedWorkflow.approvals.length && !selectedWorkflow.tasks.length && !selectedWorkflow.checks.length && <p className="empty-copy">{t("No workflow activity yet.")}</p>}</>}</section>}
 

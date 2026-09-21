@@ -65,6 +65,7 @@ pub struct WorkflowWorktree {
 pub struct ComputerSession {
     pub session_id: String,
     pub app_name: String,
+    pub provider: String,
     pub access: String,
     pub status: String,
     pub expires_at: f64,
@@ -194,8 +195,14 @@ fn read_computer_sessions(connection: &Connection) -> Result<Vec<ComputerSession
                 session_id: row.get(0)?,
                 app_name: app
                     .get("name")
+                    .or_else(|| app.get("display_name"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("Application")
+                    .into(),
+                provider: app
+                    .get("provider")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("native")
                     .into(),
                 access: row.get(2)?,
                 status,
@@ -483,10 +490,13 @@ mod tests {
         let db = Connection::open(&database).unwrap();
         db.execute_batch("CREATE TABLE computer_sessions (session_id TEXT PRIMARY KEY, runtime_id TEXT, app_json TEXT, access TEXT, status TEXT, helper_id TEXT, expires_at REAL, created_at REAL);
             INSERT INTO computer_sessions VALUES ('live','runtime','{\"name\":\"Fixture\"}','control','active','helper',9999999999,2);
-            INSERT INTO computer_sessions VALUES ('expired','runtime','{\"name\":\"Fixture\"}','observe','active','helper',0,1);").unwrap();
+            INSERT INTO computer_sessions VALUES ('expired','runtime','{\"display_name\":\"Codex Fixture\",\"provider\":\"codex\"}','observe','active','codex',0,1);").unwrap();
         let sessions = read_computer_sessions(&db).unwrap();
         assert_eq!(sessions[0].app_name, "Fixture");
+        assert_eq!(sessions[0].provider, "native");
         assert_eq!(sessions[0].status, "active");
+        assert_eq!(sessions[1].app_name, "Codex Fixture");
+        assert_eq!(sessions[1].provider, "codex");
         assert_eq!(sessions[1].status, "expired");
         stop_computer_session(state.path(), workspace.path(), "live").unwrap();
         assert_eq!(read_computer_sessions(&db).unwrap()[0].status, "stopped");

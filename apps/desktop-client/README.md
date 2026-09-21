@@ -7,12 +7,17 @@ API.
 
 ## Features
 
-- Opt-in **Application control** for running macOS apps, using a bundled native
-  helper and the same MCP tools available to the LLM. See the
+- Opt-in **Application control** for running macOS apps. Native Computer v1 uses
+  the bundled helper and remains the stable default. Full Access profiles can
+  additionally expose the isolated Codex Computer Use Preview provider through
+  the same MCP approval/session surface. See the
   [v1 specification and acceptance status](../../docs/computer-use-spec.md) and
-  [Chinese setup/implementation plan](../../docs/computer-use-plan.zh-CN.md).
+  [Local Agent Capability Gateway specification](../../docs/local-agent-capability-gateway-spec.zh-CN.md).
   Enabling it adds tools after service restart; each app session still needs a
   desktop approval. The control page supports permission setup and immediate stop.
+- Full Access also exposes metadata-only local agent environment discovery so an
+  MCP client can discover installed agent Skills, Plugins, rules, worktrees and
+  capability presence without reading auth/token/cookie contents.
 - Compact menu-bar panel with no macOS Dock icon
 - Multiple workspace profiles with one automatically assigned local port per workspace
 - Mode-first profile creation: both Standard and Full Access ask for a workspace
@@ -81,8 +86,8 @@ locations.
 pipeline. For a new version, push a version-matched tag such as:
 
 ```bash
-git tag desktop-v0.3.35
-git push origin desktop-v0.3.35
+git tag desktop-v0.4.0
+git push origin desktop-v0.4.0
 ```
 
 Pushing the tag automatically starts the complete release workflow. To release
@@ -92,7 +97,7 @@ or retry an **existing** tag, use the standard maintainer/agent command:
 gh workflow run desktop-release.yml \
   -R iihciyekub/coding-tools-mcp \
   --ref iiaide \
-  -f tag=desktop-v0.3.35 \
+  -f tag=desktop-v0.4.0 \
   -f mode=release
 ```
 
@@ -107,7 +112,7 @@ signs and notarizes both the app and final DMG, builds the Windows x64 portable
 ZIP when selected by `releasePlatforms` in `package.json`, publishes immutable GitHub Release assets and checksums, then updates the
 Homebrew Tap.
 
-Version 0.3.35 selects macOS only. Existing Windows releases remain available.
+Version 0.4.0 selects macOS only. Existing Windows releases remain available.
 
 The macOS release job uses the protected `production-release` GitHub
 Environment, matching the production signing model used by WOS Aide. Configure

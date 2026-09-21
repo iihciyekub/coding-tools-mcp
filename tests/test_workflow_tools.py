@@ -88,7 +88,7 @@ class WorkflowToolTests(unittest.TestCase):
             self.assertNotIn("workspace_overview", default.exposed_tool_names())
             self.assertIn("workspace_overview", enhanced.exposed_tool_names())
             self.assertEqual(len(default.exposed_tool_names()), 28)
-            self.assertEqual(len(enhanced.exposed_tool_names()), 68)
+            self.assertEqual(len(enhanced.exposed_tool_names()), 69)
         finally:
             default.close()
             enhanced.close()
@@ -105,7 +105,7 @@ class WorkflowToolTests(unittest.TestCase):
         )
         runtime = build_runtime(args, runtime_policy_from_args(args), emit_warning=False)
         try:
-            self.assertEqual(len(runtime.exposed_tool_names()), 68)
+            self.assertEqual(len(runtime.exposed_tool_names()), 69)
             self.assertEqual(runtime.workflow_store.root.parent.parent, self.state_root)
         finally:
             runtime.close()
@@ -127,8 +127,8 @@ class WorkflowToolTests(unittest.TestCase):
             self.assertEqual(len(names), 29)
             self.assertIn("tool_invoke", names)
             self.assertNotIn("workspace_overview", names)
-            self.assertEqual(len(runtime._deferred_tool_names), 40)
-            self.assertEqual(len(runtime._available_tool_names), 69)
+            self.assertEqual(len(runtime._deferred_tool_names), 41)
+            self.assertEqual(len(runtime._available_tool_names), 70)
         finally:
             runtime.close()
 

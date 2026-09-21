@@ -16,6 +16,7 @@ from pathlib import Path
 from contextlib import contextmanager
 from typing import Any, BinaryIO, Iterator, Protocol
 
+from .codex_computer import CodexComputerObservationService
 from .computer_contract import HELPER_PROTOCOL_VERSION, NATIVE_OPERATIONS
 from .errors import ToolFailure
 from .workflow_store import WorkflowStore, default_state_root
@@ -186,10 +187,11 @@ class ComputerState:
 
 class ComputerService:
     def __init__(self, workflow: WorkflowStore, helper_path: Path | None, *, backend: Backend | None = None,
-                 lock_root: Path | None = None) -> None:
+                 lock_root: Path | None = None, codex_observer: CodexComputerObservationService | None = None) -> None:
         self.workflow = workflow
         self.state = ComputerState(workflow)
         self.backend: Backend = backend or NativeHelper(helper_path)
+        self.codex_observer = codex_observer
         self.runtime_id = uuid.uuid4().hex
         self.lock_root = lock_root or default_state_root() / "computer-locks"
         self.locks: dict[str, BinaryIO] = {}
@@ -203,11 +205,27 @@ class ComputerService:
         while not self.closed.wait(0.25):
             try:
                 with self.lock:
-                    active = {row["session_id"] for row in self.state.sessions(self.runtime_id) if row["status"] == "active"}
+                    rows = self.state.sessions(self.runtime_id)
+                    by_id = {row["session_id"]: row for row in rows}
+                    if self.codex_observer is not None:
+                        for observed in self.codex_observer.list_sessions():
+                            session_id = str(observed.get("session_id", ""))
+                            persisted = by_id.get(session_id)
+                            if observed.get("status") == "active":
+                                if persisted is None or persisted.get("status") != "active":
+                                    self.codex_observer.stop_session(session_id)
+                            elif persisted is not None and persisted.get("status") == "active":
+                                with self.state.connect() as db:
+                                    db.execute(
+                                        "UPDATE computer_sessions SET status=? WHERE session_id=? AND runtime_id=? AND status='active'",
+                                        (str(observed.get("status", "stopped")), session_id, self.runtime_id),
+                                    )
+                        rows = self.state.sessions(self.runtime_id)
+                    active = {row["session_id"] for row in rows if row["status"] == "active"}
                     for session_id in list(self.locks):
                         if session_id not in active:
                             self.locks.pop(session_id).close()
-            except (sqlite3.Error, OSError):
+            except (sqlite3.Error, OSError, ToolFailure):
                 continue
 
     def close(self) -> None:
@@ -219,6 +237,8 @@ class ComputerService:
                 handle.close()
             self.locks.clear()
         self.backend.close()
+        if self.codex_observer is not None:
+            self.codex_observer.close()
         self.reaper.join(timeout=1)
 
     def _active(self, session_id: str, *, control: bool = False) -> dict[str, Any]:
@@ -242,24 +262,103 @@ class ComputerService:
         with self.native_lock:
             return self.backend.call(operation, arguments)
 
+    def _acquire_control_lock(self, app: dict[str, Any]) -> BinaryIO:
+        import fcntl
+
+        identity = str(app.get("bundle_id") or app.get("app_id") or "")
+        if not identity:
+            raise ToolFailure("COMPUTER_APP_CHANGED", "App control identity is unavailable.", category="permission")
+        self.lock_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        filename = self.lock_root / (digest(identity) + ".lock")
+        handle = open(filename, "a+b")
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            handle.close()
+            raise ToolFailure(
+                "COMPUTER_APP_BUSY",
+                "Another session controls this app. Stop that session first.",
+                category="runtime",
+                retryable=True,
+            ) from exc
+        return handle
+
+    def _codex_active(self, session_id: str, *, control: bool = False) -> dict[str, Any]:
+        if self.codex_observer is None:
+            raise ToolFailure("COMPUTER_SESSION_NOT_FOUND", "Codex Computer session is unavailable.", category="not_found")
+        session = self.state.session(session_id, self.runtime_id)
+        if session.get("helper_id") != "codex" or session["status"] != "active" or self.closed.is_set():
+            raise ToolFailure(
+                "COMPUTER_SESSION_INACTIVE",
+                "Codex Computer session expired or was stopped. Request a new session.",
+                category="permission",
+            )
+        if control and session["access"] != "control":
+            raise ToolFailure("COMPUTER_CONTROL_REQUIRED", "This Codex session permits observation only.", category="permission")
+        return session
+
     def computer_status(self, args: dict[str, Any]) -> dict[str, Any]:
         try:
             result = self._backend_call("status", {})
         except ToolFailure as exc:
             return {"ok": True, "available": False, "protocol_version": HELPER_PROTOCOL_VERSION,
+                    "providers": {"native": {"available": False, "reason": exc.code},
+                                  "codex": {"available": self.codex_observer is not None, "mode": "preview_v2"}},
                     "reason": exc.code, "message": exc.message,
                     "summary": f"Computer control unavailable: {exc.message}"}
         result.update(available=True, protocol_version=HELPER_PROTOCOL_VERSION)
+        result["providers"] = {
+            "native": {"available": True, "mode": "stable_v1"},
+            "codex": {"available": self.codex_observer is not None, "mode": "preview_v2"},
+        }
         return result
 
     def app_list(self, args: dict[str, Any]) -> dict[str, Any]:
+        if args.get("provider", "native") == "codex":
+            if self.codex_observer is None:
+                raise ToolFailure(
+                    "CODEX_CAPABILITY_UNAVAILABLE",
+                    "Codex Computer provider requires host mode and an installed Desktop Codex runtime.",
+                    category="permission",
+                )
+            query = str(args.get("query", "")).casefold()
+            max_results = int(args.get("max_results", 30))
+            apps = self.codex_observer.list_apps()
+            if query:
+                apps = [app for app in apps if query in str(app.get("app_id", "")).casefold()
+                        or query in str(app.get("display_name", "")).casefold()]
+            return {"ok": True, "provider": "codex", "apps": apps[:max_results],
+                    "count": min(len(apps), max_results), "truncated": len(apps) > max_results}
         return self._backend_call("list_apps", args)
 
     def computer_request_access(self, args: dict[str, Any]) -> dict[str, Any]:
+        if args.get("provider", "native") == "codex":
+            if self.codex_observer is None:
+                raise ToolFailure(
+                    "CODEX_CAPABILITY_UNAVAILABLE",
+                    "Codex Computer provider requires host mode and an installed Desktop Codex runtime.",
+                    category="permission",
+                )
+            if args["access"] == "control" and str(args["app_id"]) in PROTECTED_CONTROL_APPS:
+                raise ToolFailure(
+                    "COMPUTER_PROTECTED_APP",
+                    "Desktop approval controls and macOS permission settings are human-only. Their applications cannot receive a control session.",
+                    category="permission",
+                )
+            approval = self.codex_observer.request_access(
+                str(args["app_id"]), access=str(args["access"]), reason=str(args["reason"]),
+                ttl_seconds=int(args.get("ttl_seconds", 600))
+            )
+            approval["next_action"] = {
+                "tool": "computer_session_get",
+                "arguments": {"approval_id": approval["approval_id"]},
+                "message": "Approve this Codex app request in Coding Tools MCP Desktop, then start the session using approval_id.",
+            }
+            return approval
         app = self._backend_call("resolve_app", {"app_id": args["app_id"]})["app"]
         if args["access"] == "control" and app.get("bundle_id") in PROTECTED_CONTROL_APPS:
             raise ToolFailure("COMPUTER_PROTECTED_APP", "Desktop approval controls and macOS permission settings are human-only. Their applications cannot receive a control session.", category="permission")
-        scope = {"app": app, "access": args["access"], "ttl_seconds": args.get("ttl_seconds", 600)}
+        scope = {"provider": "native", "app": app, "access": args["access"], "ttl_seconds": args.get("ttl_seconds", 600)}
         approval = self.workflow.create_approval(
             tool_name="computer_session_start", permission=f"computer_{args['access']}", reason=f"{app['name']} [{app.get('bundle_id') or app['app_id']}; PID {app['pid']}] · {scope['access']} · {scope['ttl_seconds']}s — {args['reason']}",
             arguments_hash=digest(scope), displayed_arguments=scope, ttl_seconds=300,
@@ -269,13 +368,56 @@ class ComputerService:
         return approval
 
     def computer_session_start(self, args: dict[str, Any]) -> dict[str, Any]:
+        approval = self.workflow.get_approval(args["approval_id"])
+        scope = approval["arguments"]
+        if isinstance(scope, str):
+            scope = json.loads(scope)
+        if isinstance(scope, dict) and scope.get("provider") == "codex":
+            if self.codex_observer is None:
+                raise ToolFailure("CODEX_CAPABILITY_UNAVAILABLE", "Codex Computer provider is unavailable.", category="runtime")
+            handle: BinaryIO | None = None
+            if scope.get("access") == "control":
+                app_scope = scope.get("app")
+                if not isinstance(app_scope, dict):
+                    raise ToolFailure("APPROVAL_SCOPE_MISMATCH", "Codex control approval has no app identity.", category="permission")
+                handle = self._acquire_control_lock(app_scope)
+            session_id: str | None = None
+            try:
+                result = self.codex_observer.start_session(str(args["approval_id"]))
+                session_id = str(result["session_id"])
+                app = result.get("app") if isinstance(result.get("app"), dict) else scope.get("app", {})
+                app = dict(app) if isinstance(app, dict) else {}
+                app["provider"] = "codex"
+                app.setdefault("name", app.get("display_name") or app.get("app_id") or "Application")
+                with self.state.connect() as db:
+                    db.execute(
+                        "INSERT INTO computer_sessions VALUES (?,?,?,?,?,?,?,?)",
+                        (
+                            session_id,
+                            self.runtime_id,
+                            json.dumps(app, sort_keys=True),
+                            str(result.get("access", scope.get("access", "observe"))),
+                            str(result.get("status", "active")),
+                            "codex",
+                            float(result["expires_at"]),
+                            float(result["created_at"]),
+                        ),
+                    )
+                if handle is not None:
+                    self.locks[session_id] = handle
+                return {**result, "app": app}
+            except BaseException:
+                if session_id is not None:
+                    try:
+                        self.codex_observer.stop_session(session_id)
+                    except ToolFailure:
+                        pass
+                if handle is not None:
+                    handle.close()
+                raise
         with self.lock:
-            approval = self.workflow.get_approval(args["approval_id"])
             if approval["tool_name"] != "computer_session_start":
                 raise ToolFailure("APPROVAL_SCOPE_MISMATCH", "This approval does not authorize app control.", category="permission")
-            scope = approval["arguments"]
-            if isinstance(scope, str):
-                scope = json.loads(scope)
             current = self._backend_call("resolve_app", {"app_id": scope["app"]["app_id"]})
             if current["app"] != scope["app"]:
                 raise ToolFailure("COMPUTER_APP_CHANGED", "The app instance changed after requesting access. Request access again.", category="permission")
@@ -283,16 +425,7 @@ class ComputerService:
                 raise ToolFailure("COMPUTER_SESSION_LIMIT", "Stop an existing app session before starting another.", category="runtime")
             handle: BinaryIO | None = None
             if scope["access"] == "control":
-                import fcntl
-
-                self.lock_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-                filename = self.lock_root / (digest(scope["app"]["app_id"]) + ".lock")
-                handle = open(filename, "a+b")
-                try:
-                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except OSError as exc:
-                    handle.close()
-                    raise ToolFailure("COMPUTER_APP_BUSY", "Another session controls this app. Stop that session first.", category="runtime", retryable=True) from exc
+                handle = self._acquire_control_lock(scope["app"])
             try:
                 self.workflow.consume_approvals([args["approval_id"]], tool_name="computer_session_start",
                                                arguments_hash=digest(scope), required_permissions={f"computer_{scope['access']}"})
@@ -321,7 +454,30 @@ class ComputerService:
         if "session_id" not in args:
             if "operation_id" in args:
                 raise ToolFailure("INVALID_ARGUMENT", "operation_id requires session_id.", category="validation")
-            return {"ok": True, "sessions": self.state.sessions(self.runtime_id)}
+            sessions = self.state.sessions(self.runtime_id)
+            return {"ok": True, "sessions": sessions}
+        if str(args["session_id"]).startswith("codex_computer_"):
+            persisted = self.state.session(str(args["session_id"]), self.runtime_id)
+            result: dict[str, Any] = {"ok": True, **persisted, "provider": "codex"}
+            if self.codex_observer is not None:
+                try:
+                    live = self.codex_observer.get_session(str(args["session_id"]))
+                    result.update({key: value for key, value in live.items() if key not in {"app", "status"}})
+                except ToolFailure:
+                    pass
+            if args.get("operation_id"):
+                with self.state.connect() as db:
+                    row = db.execute(
+                        "SELECT status,result_json FROM computer_operations WHERE session_id=? AND operation_id=?",
+                        (args["session_id"], args["operation_id"]),
+                    ).fetchone()
+                result["operation"] = {"status": "not_found"}
+                if row:
+                    result["operation"] = {
+                        "status": row["status"],
+                        "result": json.loads(row["result_json"]) if row["result_json"] else None,
+                    }
+            return result
         result = {"ok": True, **self.state.session(args["session_id"], self.runtime_id)}
         if args.get("operation_id"):
             with self.state.connect() as db:
@@ -332,6 +488,16 @@ class ComputerService:
         return result
 
     def computer_session_stop(self, args: dict[str, Any]) -> dict[str, Any]:
+        if str(args["session_id"]).startswith("codex_computer_"):
+            if self.codex_observer is None:
+                raise ToolFailure("COMPUTER_SESSION_NOT_FOUND", "Codex observation session is unavailable.", category="not_found")
+            self.state.stop(str(args["session_id"]), self.runtime_id)
+            result = self.codex_observer.stop_session(str(args["session_id"]))
+            with self.lock:
+                handle = self.locks.pop(str(args["session_id"]), None)
+                if handle is not None:
+                    handle.close()
+            return {**result, "status": "stopped"}
         self.state.stop(args["session_id"], self.runtime_id)
         with self.lock:
             handle = self.locks.pop(args["session_id"], None)
@@ -348,35 +514,125 @@ class ComputerService:
         self._active(session["session_id"])
         return result
 
+    def app_observe(self, args: dict[str, Any]) -> dict[str, Any]:
+        session_id = str(args["session_id"])
+        if not session_id.startswith("codex_computer_"):
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "app_observe currently requires a Codex provider observation session; use app_snapshot for Native Computer v1.",
+                category="validation",
+            )
+        if self.codex_observer is None:
+            raise ToolFailure("COMPUTER_SESSION_NOT_FOUND", "Codex observation session is unavailable.", category="not_found")
+        self._codex_active(session_id)
+        result = self.codex_observer.observe(
+            session_id,
+            disable_diff=bool(args.get("disable_diff", True)),
+            max_text_chars=int(args.get("max_text_chars", 50000)),
+            include_image=bool(args.get("include_image", True)),
+        )
+        self._codex_active(session_id)
+        return result
+
+    def _operation_begin(self, session_id: str, operation_id: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
+        fingerprint = digest(arguments)
+        with self.state.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT * FROM computer_operations WHERE session_id=? AND operation_id=?",
+                (session_id, operation_id),
+            ).fetchone()
+            if row:
+                if row["arguments_hash"] != fingerprint:
+                    raise ToolFailure(
+                        "OPERATION_CONFLICT",
+                        "operation_id was used with different arguments.",
+                        category="validation",
+                    )
+                if row["result_json"]:
+                    return {**json.loads(row["result_json"]), "replayed": True}
+                raise ToolFailure(
+                    "COMPUTER_ACTION_UNKNOWN",
+                    "This action has no confirmed result. Inspect the app; do not repeat it.",
+                    category="runtime",
+                )
+            count = db.execute(
+                "SELECT count(*) FROM computer_operations WHERE session_id=?",
+                (session_id,),
+            ).fetchone()[0]
+            if count >= MAX_OPERATIONS_PER_SESSION:
+                raise ToolFailure(
+                    "COMPUTER_OPERATION_LIMIT",
+                    "This session reached its action limit. Stop it and request a new approved session.",
+                    category="runtime",
+                )
+            db.execute(
+                "INSERT INTO computer_operations VALUES (?,?,?,?,?)",
+                (session_id, operation_id, fingerprint, "pending", None),
+            )
+        return None
+
+    def _operation_unknown(self, session_id: str, operation_id: str) -> None:
+        with self.state.connect() as db:
+            db.execute(
+                "UPDATE computer_operations SET status='unknown' WHERE session_id=? AND operation_id=?",
+                (session_id, operation_id),
+            )
+
+    def _operation_complete(self, session_id: str, operation_id: str, result: dict[str, Any]) -> dict[str, Any]:
+        completed = {**result, "operation_id": operation_id, "verified": False}
+        with self.state.connect() as db:
+            db.execute(
+                "UPDATE computer_operations SET status='completed',result_json=? WHERE session_id=? AND operation_id=?",
+                (json.dumps(completed), session_id, operation_id),
+            )
+        return completed
+
+    def app_interact(self, args: dict[str, Any]) -> dict[str, Any]:
+        session_id = str(args["session_id"])
+        operation_id = str(args["operation_id"])
+        if not session_id.startswith("codex_computer_"):
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "app_interact currently requires a Codex provider control session; use app_action for Native Computer v1.",
+                category="validation",
+            )
+        if self.codex_observer is None:
+            raise ToolFailure("COMPUTER_SESSION_NOT_FOUND", "Codex Computer session is unavailable.", category="not_found")
+        with self.lock:
+            self._codex_active(session_id, control=True)
+            replay = self._operation_begin(session_id, operation_id, args)
+            if replay is not None:
+                return replay
+            excluded = {"session_id", "snapshot_id", "action", "operation_id"}
+            arguments = {key: value for key, value in args.items() if key not in excluded}
+            try:
+                result = self.codex_observer.interact(
+                    session_id,
+                    snapshot_id=str(args["snapshot_id"]),
+                    action=str(args["action"]),
+                    arguments=arguments,
+                    guard=lambda: self._codex_active(session_id, control=True),
+                )
+            except BaseException:
+                self._operation_unknown(session_id, operation_id)
+                raise
+            return self._operation_complete(session_id, operation_id, result)
+
     def app_action(self, args: dict[str, Any]) -> dict[str, Any]:
         if (args["action"] == "set_value") != ("value" in args):
             raise ToolFailure("INVALID_ARGUMENT", "set_value requires value; press must not include value.", category="validation")
         with self.lock:
             session = self._active(args["session_id"], control=True)
-            fingerprint = digest(args)
-            with self.state.connect() as db:
-                db.execute("BEGIN IMMEDIATE")
-                row = db.execute("SELECT * FROM computer_operations WHERE session_id=? AND operation_id=?", (args["session_id"], args["operation_id"])).fetchone()
-                if row:
-                    if row["arguments_hash"] != fingerprint:
-                        raise ToolFailure("OPERATION_CONFLICT", "operation_id was used with different arguments.", category="validation")
-                    if row["result_json"]:
-                        return {**json.loads(row["result_json"]), "replayed": True}
-                    raise ToolFailure("COMPUTER_ACTION_UNKNOWN", "This action has no confirmed result. Inspect the app; do not repeat it.", category="runtime")
-                count = db.execute("SELECT count(*) FROM computer_operations WHERE session_id=?", (args["session_id"],)).fetchone()[0]
-                if count >= MAX_OPERATIONS_PER_SESSION:
-                    raise ToolFailure("COMPUTER_OPERATION_LIMIT", "This session reached its action limit. Stop it and request a new approved session.", category="runtime")
-                db.execute("INSERT INTO computer_operations VALUES (?,?,?,?,?)", (args["session_id"], args["operation_id"], fingerprint, "pending", None))
+            replay = self._operation_begin(str(args["session_id"]), str(args["operation_id"]), args)
+            if replay is not None:
+                return replay
             try:
                 result = self._native(session, "action", args)
             except BaseException:
-                with self.state.connect() as db:
-                    db.execute("UPDATE computer_operations SET status='unknown' WHERE session_id=? AND operation_id=?", (args["session_id"], args["operation_id"]))
+                self._operation_unknown(str(args["session_id"]), str(args["operation_id"]))
                 raise
-            result.update(operation_id=args["operation_id"], verified=False)
-            with self.state.connect() as db:
-                db.execute("UPDATE computer_operations SET status='completed',result_json=? WHERE session_id=? AND operation_id=?", (json.dumps(result), args["session_id"], args["operation_id"]))
-            return result
+            return self._operation_complete(str(args["session_id"]), str(args["operation_id"]), result)
 
     def app_wait(self, args: dict[str, Any]) -> dict[str, Any]:
         if (args["condition"] == "value_equals") != ("value" in args):

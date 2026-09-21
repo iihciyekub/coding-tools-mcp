@@ -16,7 +16,7 @@ Coding Tools MCP 是一个**模型中立的编程运行时**，通过
 文件读取与搜索、结构化多文件补丁、命令执行、交互式命令、git 操作——
 一个服务器，任何 MCP 客户端都能驱动。Claude Desktop、Claude Code、Codex、
 Cursor、Cline、VS Code、Windsurf、Gemini CLI，或你自己写的 agent，拿到的
-都是同一套久经考验的 51 个默认工具：默认限定在单一工作区内，由显式权限模式
+都是同一套稳定的默认工具目录：默认限定在单一工作区内，由显式权限模式
 层层把关。
 
 [![观看演示](https://img.youtube.com/vi/N9lQaXt1eqQ/maxresdefault.jpg)](https://youtu.be/N9lQaXt1eqQ?si=LyEwvzzQF6QjUxR0)
@@ -147,7 +147,7 @@ Linux：按工作区管理配置、一键启停服务器与隧道、凭证写入
 命令环境，后续执行持续复用，直到显式刷新。`runtime_doctor` 会进行非破坏性
 运行时体检，并直接给 agent 返回缺失命令/别名、工作区访问、Hook、LSP、沙箱状态
 与网络策略方面的可执行修复建议。使用
-`--enable-workflow-tools --defer-workflow-tools` 时，40 个 workflow 工具不再进入
+`--enable-workflow-tools --defer-workflow-tools` 时，41 个 workflow 工具不再进入
 初始 `tools/list`，而是由 `tool_search` 搜索并通过 `tool_invoke` 调用。
 桌面启动的运行时默认使用此模式：常用工具直接调用，高级能力按需发现。
 `tool_search({})` 返回分类目录，选择分类后查看工具摘要，再按工具名读取参数；

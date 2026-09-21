@@ -36,6 +36,7 @@ class ComputerTool:
 SESSION = {"session_id": text()}
 WINDOW = {**SESSION, "window_id": text()}
 ELEMENT = {**WINDOW, "snapshot_id": text(), "element_id": text()}
+PROVIDER = {"provider": {"type": "string", "enum": ["native", "codex"], "default": "native"}}
 
 COMPUTER_TOOLS: dict[str, ComputerTool] = {
     "computer_status": ComputerTool(
@@ -44,7 +45,7 @@ COMPUTER_TOOLS: dict[str, ComputerTool] = {
     ),
     "computer_request_access": ComputerTool(
         "Request app access", "Ask the desktop user to authorize one app session. Use an app_id from app_list. Never grants access automatically, including in host mode.",
-        obj({"app_id": text(500), "access": {"type": "string", "enum": ["observe", "control"]},
+        obj({**PROVIDER, "app_id": text(500), "access": {"type": "string", "enum": ["observe", "control"]},
              "reason": text(1000), "ttl_seconds": integer(600, 30, 1800)}, ("app_id", "access", "reason")),
     ),
     "computer_session_start": ComputerTool(
@@ -60,8 +61,8 @@ COMPUTER_TOOLS: dict[str, ComputerTool] = {
         obj(SESSION, ("session_id",)), idempotent=True,
     ),
     "app_list": ComputerTool(
-        "List apps", "Find running app identities before requesting access. Does not expose window contents.",
-        obj({"query": {"type": "string", "maxLength": 200}, "max_results": integer(30, 1, 100)}), read_only=True, idempotent=True,
+        "List apps", "Find app identities before requesting access. provider=native is the stable default; provider=codex is an optional host-mode Preview provider. Does not expose window contents.",
+        obj({**PROVIDER, "query": {"type": "string", "maxLength": 200}, "max_results": integer(30, 1, 100)}), read_only=True, idempotent=True,
     ),
     "app_windows": ComputerTool(
         "List app windows", "List windows belonging to an authorized session. Use returned window_id values, never guessed window indices.",
@@ -73,6 +74,38 @@ COMPUTER_TOOLS: dict[str, ComputerTool] = {
              "max_elements": integer(200, 1, 500), "max_depth": integer(8, 1, 20),
              "max_dimension": integer(1600, 320, 2400)}, ("session_id", "window_id")),
         read_only=True, image=True,
+    ),
+    "app_observe": ComputerTool(
+        "Observe app", "Observe a whole application through a provider that supports app-level state. In v2 Preview this is the read-only observation path of the Codex provider; the call never performs a click, keypress, drag, or text input.",
+        obj({**SESSION, "include_image": {"type": "boolean", "default": True},
+             "disable_diff": {"type": "boolean", "default": True},
+             "max_text_chars": integer(50000, 1, 256000)}, ("session_id",)),
+        read_only=True, image=True,
+    ),
+    "app_interact": ComputerTool(
+        "Interact with app", "Perform one Computer v2 action in an explicitly approved Codex control session. Requires a fresh app_observe snapshot_id and unique operation_id; stale state fails closed and an uncertain action is never retried automatically.",
+        obj({
+            **SESSION,
+            "snapshot_id": text(),
+            "action": {"type": "string", "enum": ["click", "perform_secondary_action", "set_value", "select_text", "scroll", "drag", "press_key", "type_text"]},
+            "operation_id": text(),
+            "element_index": {"type": "string", "maxLength": 200},
+            "x": {"type": "number"}, "y": {"type": "number"},
+            "click_count": integer(1, 1, 3),
+            "mouse_button": {"type": "string", "enum": ["left", "right", "middle"]},
+            "secondary_action": {"type": "string", "maxLength": 200},
+            "value": {"type": "string", "maxLength": 10000},
+            "text": {"type": "string", "maxLength": 10000},
+            "prefix": {"type": "string", "maxLength": 2000},
+            "suffix": {"type": "string", "maxLength": 2000},
+            "selection": {"type": "string", "enum": ["text", "cursor_before", "cursor_after"]},
+            "direction": {"type": "string", "enum": ["up", "down", "left", "right"]},
+            "pages": {"type": "number", "minimum": 0.05, "maximum": 20},
+            "from_x": {"type": "number"}, "from_y": {"type": "number"},
+            "to_x": {"type": "number"}, "to_y": {"type": "number"},
+            "key": {"type": "string", "maxLength": 200},
+        }, ("session_id", "snapshot_id", "action", "operation_id")),
+        destructive=True,
     ),
     "app_action": ComputerTool(
         "Act on app element", "Press or set the value of an observed accessible element in a control session. Requires a fresh snapshot and unique operation_id. No foreground keyboard/mouse fallback. Verify the outcome afterwards.",

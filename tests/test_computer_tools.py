@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from coding_tools_mcp.computer import digest
 from coding_tools_mcp.computer_contract import COMPUTER_TOOLS, NATIVE_OPERATIONS
 from coding_tools_mcp.errors import ToolFailure
 from coding_tools_mcp.server import MCPHandler, Runtime, RuntimeHTTPServer, input_schemas, tool_annotations
@@ -59,6 +60,97 @@ class FakeComputer:
             self.inspect_started.set()
             return {**result, "element": {"enabled": True, "value": self.value}}
         raise AssertionError(operation)
+
+
+class FakeCodexObserver:
+    def __init__(self, workflow) -> None:
+        self.workflow = workflow
+        self.closed = False
+        self.sessions: dict[str, dict] = {}
+        self.interactions = 0
+        self.fail_interact = False
+        self.snapshot_id = "codex_snapshot_fixture"
+
+    def close(self) -> None:
+        self.closed = True
+
+    def list_apps(self) -> list[dict]:
+        return [{"app_id": "com.example.codex", "display_name": "Codex Fixture", "is_running": True,
+                 "last_used_date": None, "use_count": 1}]
+
+    def request_access(self, app_id: str, *, access: str = "observe", reason: str, ttl_seconds: int = 600) -> dict:
+        scope = {"provider": "codex", "app": {"app_id": app_id, "display_name": "Codex Fixture"},
+                 "access": access, "ttl_seconds": ttl_seconds}
+        return self.workflow.create_approval(
+            tool_name="computer_session_start",
+            permission=f"computer_{access}",
+            reason=reason,
+            arguments_hash=digest(scope),
+            displayed_arguments=scope,
+            ttl_seconds=300,
+        )
+
+    def start_session(self, approval_id: str) -> dict:
+        approval = self.workflow.get_approval(approval_id)
+        scope = approval["arguments"]
+        self.workflow.consume_approvals(
+            [approval_id], tool_name="computer_session_start", arguments_hash=digest(scope),
+            required_permissions={f"computer_{scope['access']}"},
+        )
+        session_id = "codex_computer_fixture_" + scope["access"]
+        self.sessions[session_id] = {
+            "ok": True, "session_id": session_id, "provider": "codex", "access": scope["access"], "status": "active",
+            "app": scope["app"], "expires_at": 9999999999.0, "created_at": 1.0,
+        }
+        return dict(self.sessions[session_id])
+
+    def get_session(self, session_id: str) -> dict:
+        if session_id not in self.sessions:
+            raise ToolFailure("COMPUTER_SESSION_NOT_FOUND", "missing", category="not_found")
+        return dict(self.sessions[session_id])
+
+    def list_sessions(self) -> list[dict]:
+        return [dict(value) for value in self.sessions.values()]
+
+    def observe(self, session_id: str, **kwargs) -> dict:
+        session = self.get_session(session_id)
+        if session["status"] != "active":
+            raise ToolFailure("COMPUTER_SESSION_INACTIVE", "inactive", category="permission")
+        result = {"ok": True, "session_id": session_id, "provider": "codex", "app": "Codex Fixture",
+                  "text": "AX fixture", "text_truncated": False, "has_screenshot": bool(kwargs.get("include_image", True)),
+                  "snapshot_id": self.snapshot_id, "observed_at": 1.0}
+        if kwargs.get("include_image", True):
+            result.update(_mcp_image_data=PNG, mime_type="image/png")
+        return result
+
+    def interact(self, session_id: str, *, snapshot_id: str, action: str, arguments: dict, guard=None) -> dict:
+        session = self.get_session(session_id)
+        if session["status"] != "active":
+            raise ToolFailure("COMPUTER_SESSION_INACTIVE", "inactive", category="permission")
+        if session["access"] != "control":
+            raise ToolFailure("COMPUTER_CONTROL_REQUIRED", "observe only", category="permission")
+        if snapshot_id != self.snapshot_id:
+            raise ToolFailure("COMPUTER_SNAPSHOT_STALE", "stale", category="conflict")
+        if guard is not None:
+            guard()
+        self.interactions += 1
+        if self.fail_interact:
+            raise ToolFailure("CODEX_CAPABILITY_UNAVAILABLE", "unknown outcome", category="runtime")
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "provider": "codex",
+            "action": action,
+            "status": "submitted",
+            "verified": False,
+            "provider_result": {"arguments": arguments},
+        }
+
+    def stop_session(self, session_id: str) -> dict:
+        session = self.get_session(session_id)
+        session["status"] = "stopped"
+        self.sessions[session_id] = session
+        return dict(session)
 
 
 class ComputerAvailabilityTests(unittest.TestCase):
@@ -134,6 +226,124 @@ class ComputerToolsTests(unittest.TestCase):
         swift = (Path(__file__).resolve().parents[1] / "apps/desktop-client/src-tauri/computer-helper.swift").read_text()
         declaration = re.search(r"let supportedOperations = (\[.*\])", swift).group(1)
         self.assertEqual(set(json.loads(declaration)), NATIVE_OPERATIONS)
+
+    def test_codex_preview_routes_through_existing_approval_and_session_tools(self) -> None:
+        assert self.runtime.computer is not None
+        if self.runtime.computer.codex_observer is not None:
+            self.runtime.computer.codex_observer.close()
+        fake_codex = FakeCodexObserver(self.runtime.workflow_store)
+        self.runtime.computer.codex_observer = fake_codex
+
+        apps = self.call("app_list", {"provider": "codex", "query": "fixture", "max_results": 10})
+        self.assertEqual(apps["provider"], "codex")
+        self.assertEqual(apps["apps"][0]["app_id"], "com.example.codex")
+        approval = self.call(
+            "computer_request_access",
+            {"provider": "codex", "app_id": "com.example.codex", "access": "observe", "reason": "preview fixture"},
+        )
+        self.approve(approval["approval_id"])
+        session = self.call("computer_session_start", {"approval_id": approval["approval_id"]})
+        self.assertTrue(session["session_id"].startswith("codex_computer_"))
+        self.assertEqual(session["provider"], "codex")
+
+        observed_result = self.runtime.call_tool(
+            "app_observe",
+            {"session_id": session["session_id"], "include_image": True, "max_text_chars": 1000},
+        )
+        self.assertFalse(observed_result["isError"], observed_result)
+        observed = observed_result["structuredContent"]
+        self.assertEqual(observed["text"], "AX fixture")
+        self.assertTrue(any(item.get("type") == "image" for item in observed_result["content"] if isinstance(item, dict)))
+
+        sessions = self.call("computer_session_get", {})["sessions"]
+        self.assertTrue(any(item.get("session_id") == session["session_id"] for item in sessions))
+        stopped = self.call("computer_session_stop", {"session_id": session["session_id"]})
+        self.assertEqual(stopped["status"], "stopped")
+
+    def test_codex_control_requires_fresh_snapshot_and_deduplicates_actions(self) -> None:
+        assert self.runtime.computer is not None
+        if self.runtime.computer.codex_observer is not None:
+            self.runtime.computer.codex_observer.close()
+        fake_codex = FakeCodexObserver(self.runtime.workflow_store)
+        self.runtime.computer.codex_observer = fake_codex
+
+        observe_approval = self.call(
+            "computer_request_access",
+            {"provider": "codex", "app_id": "com.example.codex", "access": "observe", "reason": "observe only"},
+        )
+        self.approve(observe_approval["approval_id"])
+        observe_session = self.call("computer_session_start", {"approval_id": observe_approval["approval_id"]})
+        observed = self.call("app_observe", {"session_id": observe_session["session_id"], "include_image": False})
+        self.error(
+            "app_interact",
+            {
+                "session_id": observe_session["session_id"], "snapshot_id": observed["snapshot_id"],
+                "action": "press_key", "key": "Escape", "operation_id": "obs-op",
+            },
+            "COMPUTER_CONTROL_REQUIRED",
+        )
+
+        control_approval = self.call(
+            "computer_request_access",
+            {"provider": "codex", "app_id": "com.example.codex", "access": "control", "reason": "control fixture"},
+        )
+        self.approve(control_approval["approval_id"])
+        control_session = self.call("computer_session_start", {"approval_id": control_approval["approval_id"]})
+        control_observed = self.call("app_observe", {"session_id": control_session["session_id"], "include_image": False})
+        action = {
+            "session_id": control_session["session_id"], "snapshot_id": control_observed["snapshot_id"],
+            "action": "press_key", "key": "Escape", "operation_id": "codex-op-1",
+        }
+        first = self.call("app_interact", action)
+        self.assertFalse(first["verified"])
+        self.assertEqual(fake_codex.interactions, 1)
+        replay = self.call("app_interact", action)
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(fake_codex.interactions, 1)
+        self.error("app_interact", {**action, "key": "Enter"}, "OPERATION_CONFLICT")
+        receipt = self.call(
+            "computer_session_get",
+            {"session_id": control_session["session_id"], "operation_id": "codex-op-1"},
+        )
+        self.assertEqual(receipt["operation"]["status"], "completed")
+        self.error(
+            "app_interact",
+            {**action, "operation_id": "codex-op-stale", "snapshot_id": "stale"},
+            "COMPUTER_SNAPSHOT_STALE",
+        )
+
+    def test_desktop_style_db_revocation_stops_codex_session(self) -> None:
+        assert self.runtime.computer is not None
+        if self.runtime.computer.codex_observer is not None:
+            self.runtime.computer.codex_observer.close()
+        fake_codex = FakeCodexObserver(self.runtime.workflow_store)
+        self.runtime.computer.codex_observer = fake_codex
+        approval = self.call(
+            "computer_request_access",
+            {"provider": "codex", "app_id": "com.example.codex", "access": "observe", "reason": "desktop revoke"},
+        )
+        self.approve(approval["approval_id"])
+        session = self.call("computer_session_start", {"approval_id": approval["approval_id"]})
+        with self.runtime.computer.state.connect() as db:
+            db.execute("UPDATE computer_sessions SET status='stopped' WHERE session_id=?", (session["session_id"],))
+        for _ in range(20):
+            if fake_codex.sessions[session["session_id"]]["status"] == "stopped":
+                break
+            threading.Event().wait(0.05)
+        self.assertEqual(fake_codex.sessions[session["session_id"]]["status"], "stopped")
+        self.error("app_observe", {"session_id": session["session_id"]}, "COMPUTER_SESSION_INACTIVE")
+
+    def test_codex_preview_is_unavailable_outside_host_mode(self) -> None:
+        workspace = self.root / "safe"
+        workspace.mkdir(exist_ok=True)
+        runtime = Runtime(
+            workspace,
+            state_root=self.root / "safe-state",
+            enable_computer_tools=True,
+            computer_backend=FakeComputer(),
+        )
+        self.addCleanup(runtime.close)
+        self.error("app_list", {"provider": "codex"}, "CODEX_CAPABILITY_UNAVAILABLE", runtime)
 
     def test_host_still_requires_exact_single_use_operator_approval(self) -> None:
         approval_id = self.request()

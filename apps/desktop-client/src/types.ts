@@ -128,6 +128,7 @@ export interface WorkflowSnapshot {
 export interface ComputerSession {
   session_id: string;
   app_name: string;
+  provider: "native" | "codex";
   access: "observe" | "control";
   status: string;
   expires_at: number;

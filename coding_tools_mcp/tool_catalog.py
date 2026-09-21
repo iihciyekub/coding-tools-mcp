@@ -98,6 +98,7 @@ _GROUPS: dict[str, tuple[tuple[str, str, tuple[str, ...]], ...]] = {
         ("project_instructions", "Read root and nested instructions applicable to the path you will edit.", ("项目规则", "项目指令", "嵌套规则", "agents.md", "project instructions")),
         ("skills_list", "List workspace skill summaries before choosing one to read.", ("技能列表", "发现技能", "list skills")),
         ("skills_read", "Read one selected workspace skill; reading it does not execute its scripts.", ("读取技能", "查看技能", "read skill")),
+        ("agent_environment", "Discover metadata for installed local agent runtimes and their reusable skills/capabilities without reading secrets.", ("本机agent", "本地agent", "codex技能", "agent environment", "local agents", "installed agents")),
     ),
     "checks": (
         ("checks_discover", "Find project-defined test, lint, or build commands when the verification entry point is unknown.", ("发现测试", "测试入口", "检查入口", "discover tests", "find checks")),
@@ -125,6 +126,7 @@ _GROUPS: dict[str, tuple[tuple[str, str, tuple[str, ...]], ...]] = {
         ("checkpoint_list", "Find a saved checkpoint before previewing its differences.", ("检查点列表", "快照列表", "list checkpoints")),
         ("checkpoint_diff", "Preview a checkpoint against current files and obtain a fresh restore token.", ("预览恢复", "检查点差异", "恢复预览", "preview restore")),
         ("checkpoint_restore", "Apply an intended restore using the fresh token from checkpoint_diff; re-preview if files changed.", ("恢复检查点", "回滚文件", "恢复文件", "restore checkpoint")),
+        ("context_checkpoint", "Persist or resume compact cross-agent task context without calling another model; get reports whether runtime state has gone stale.", ("上下文检查点", "会话压缩", "任务续接", "context checkpoint", "session compact", "resume context")),
     ),
     "access": (
         ("request_permissions", "Request the exact operation reported as needing permission; wait for its decision before retrying.", ("请求权限", "申请授权", "request permission")),
