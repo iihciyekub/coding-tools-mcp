@@ -22,11 +22,8 @@ META_PROTOCOL_VERSION = "io.modelcontextprotocol/protocolVersion"
 META_CLIENT_CAPABILITIES = "io.modelcontextprotocol/clientCapabilities"
 META_CLIENT_INFO = "io.modelcontextprotocol/clientInfo"
 META_SERVER_INFO = "io.modelcontextprotocol/serverInfo"
-TASKS_EXTENSION = "io.modelcontextprotocol/tasks"
-
 UNSUPPORTED_PROTOCOL_VERSION = -32022
 MISSING_REQUIRED_CLIENT_CAPABILITY = -32021
-TASKS_MISSING_REQUIRED_CLIENT_CAPABILITY = -32003
 HEADER_MISMATCH = -32020
 
 # SEP-2243 lets a gateway route a modern request on its headers alone, so the
@@ -38,9 +35,6 @@ MIRRORED_NAME_METHODS = {
     "tools/call": "name",
     "resources/read": "uri",
     "prompts/get": "name",
-    "tasks/get": "taskId",
-    "tasks/update": "taskId",
-    "tasks/cancel": "taskId",
 }
 BASE64_SENTINEL_PREFIX = "=?base64?"
 BASE64_SENTINEL_SUFFIX = "?="
@@ -58,9 +52,6 @@ MODERN_METHODS = frozenset(
         "ping",
         "tools/list",
         "tools/call",
-        "tasks/get",
-        "tasks/update",
-        "tasks/cancel",
     }
 )
 MODERN_CACHEABLE_METHODS = frozenset({DISCOVER_METHOD, "tools/list"})
@@ -333,18 +324,11 @@ def modern_request_context(params: Mapping[str, Any]) -> RequestContext:
 
     version = validate_modern_meta(params)
     declared = params["_meta"].get(META_CLIENT_INFO)
-    capabilities = params["_meta"].get(META_CLIENT_CAPABILITIES)
-    extensions = capabilities.get("extensions") if isinstance(capabilities, dict) else None
-    client_extensions = frozenset(
-        {TASKS_EXTENSION}
-        if isinstance(extensions, dict) and isinstance(extensions.get(TASKS_EXTENSION), dict)
-        else set()
-    )
     return RequestContext(
         era=MODERN_ERA,
         protocol_version=version,
         client_info=bounded_client_info(declared) if isinstance(declared, dict) else None,
-        client_extensions=client_extensions,
+        client_extensions=frozenset(),
     )
 
 
@@ -463,26 +447,6 @@ def _dispatch_modern(
         return runtime.discover_payload()
     if method == "tools/list":
         return runtime.list_tools()
-    if method in {"tasks/get", "tasks/update", "tasks/cancel"}:
-        if not runtime.protocol_tasks_enabled():
-            raise JsonRpcError(-32601, f"Unknown method: {method}")
-        if TASKS_EXTENSION not in context.client_extensions:
-            raise JsonRpcError(
-                TASKS_MISSING_REQUIRED_CLIENT_CAPABILITY,
-                "Missing required client capability",
-                {"requiredCapabilities": {"extensions": {TASKS_EXTENSION: {}}}},
-            )
-        task_id = params.get("taskId")
-        if not isinstance(task_id, str) or not task_id:
-            raise JsonRpcError(-32602, f"{method} requires params.taskId")
-        if method == "tasks/get":
-            return runtime.protocol_task_get(task_id)
-        if method == "tasks/update":
-            input_responses = params.get("inputResponses")
-            if not isinstance(input_responses, dict):
-                raise JsonRpcError(-32602, "tasks/update requires params.inputResponses as an object")
-            return runtime.protocol_task_update(task_id, input_responses)
-        return runtime.protocol_task_cancel(task_id)
     return _call_tool(runtime, params, context)
 
 
@@ -537,9 +501,4 @@ def _call_tool(runtime: Any, params: dict[str, Any], context: RequestContext) ->
     arguments = params.get("arguments") or {}
     if not isinstance(arguments, dict):
         raise JsonRpcError(-32602, "tools/call arguments must be an object")
-    result = runtime.call_tool(params["name"], arguments, context=context)
-    if TASKS_EXTENSION in context.client_extensions and runtime.protocol_tasks_enabled():
-        task = runtime.maybe_create_protocol_task(params["name"], arguments, result)
-        if task is not None:
-            return task
-    return result
+    return runtime.call_tool(params["name"], arguments, context=context)

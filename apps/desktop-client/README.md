@@ -7,9 +7,6 @@ API.
 
 ## Features
 
-- Full Access also exposes metadata-only local agent environment discovery so an
-  MCP client can discover installed agent Skills, Plugins, rules, worktrees and
-  capability presence without reading auth/token/cookie contents.
 - Compact menu-bar panel with no macOS Dock icon
 - Multiple workspace profiles with one automatically assigned local port per workspace
 - Mode-first profile creation: both Standard and Full Access ask for a workspace
@@ -18,13 +15,12 @@ API.
 - One-click OAuth runtime startup through Cloudflare Quick Tunnels
 - A simplified per-workspace access menu: **Standard** maps to the workspace-confined
   trusted runtime, while **Full Access** maps to host mode for agent workflows that
-  intentionally need the wider Mac environment. Legacy safe/dangerous profiles remain
-  readable until the user explicitly chooses one of the two desktop modes.
+  intentionally need the wider Mac environment. Desktop profiles use only these two modes.
 - **Allowed folders** apply to Standard access: ordinary file tools and `apply_patch`
   can use the workspace plus explicitly selected folders. In Full Access, file tools
   and host commands can use the host filesystem; relative paths still resolve from
-  the workspace. Git, LSP, workflow state, checks, reviews, and project context stay
-  anchored to the selected workspace rather than following arbitrary host paths.
+  the workspace. Git evidence, LSP, check discovery, project instructions, and project
+  context stay anchored to the selected workspace rather than following arbitrary host paths.
 - **Full Access** launches host mode with SSH/Git credentials and compatibility
   annotations enabled for clients that otherwise refuse command tools. On macOS,
   the launcher also recovers `SSH_AUTH_SOCK` from the GUI environment, login shell,
@@ -36,15 +32,11 @@ API.
 - Secrets stored in the operating-system keychain
 - English and Simplified Chinese UI, including the fixed menu-bar panel with a persisted language selector
 - Native process-group cleanup when the app exits
-- Project context, checks/evidence, tasks, checkpoints, LSP, structured Git,
-  reviews, approvals, and managed-worktree registration are enabled for
-  desktop-launched runtimes. Workflow tools use progressive discovery by default:
-  browse `tool_search({})`, retrieve a selected tool's parameters, then call
-  `tool_invoke`. Everyday tools stay directly available. See the
-  [tool discovery guide](../../docs/tool-discovery.md).
+- Desktop-launched runtimes expose the same small direct primitive catalog as
+  other clients, plus gateway-scoped `project_context`. Planning, review, task,
+  checkpoint, and Git-write workflows stay with the calling model and native CLIs.
 - The compact panel surfaces pending approval decisions only when user action is
-  required and keeps routine task/check activity behind progressive navigation.
-  Runtime and installation logs remain directly accessible in the same panel.
+  required. Runtime and installation logs remain directly accessible in the same panel.
 
 The first launch imports the previous PySide client's `profiles.json`. Legacy
 `secrets.json` values are moved into the system keychain and the plaintext file

@@ -554,10 +554,11 @@ assert result.returncode == 0, result.stderr
 responses = [json.loads(line) for line in result.stdout.splitlines()]
 catalog = next(x['result']['tools'] for x in responses if x.get('id') == 2)
 assert any(x['name'] == 'read_files' for x in catalog)
-assert any(x['name'] == 'tool_search' for x in catalog)
 assert any(x['name'] == 'runtime_doctor' for x in catalog)
-assert any(x['name'] == 'hooks_status' for x in catalog)
-assert any(x['name'] == 'shell_snapshot' for x in catalog)
+assert any(x['name'] == 'workspace_overview' for x in catalog)
+assert not any(x['name'] == 'tool_search' for x in catalog)
+assert not any(x['name'] == 'tool_invoke' for x in catalog)
+assert not any(x['name'] == 'shell_snapshot' for x in catalog)
 print(len(catalog))
 "#]).arg(temporary.path());
         assert_eq!(probe(handshake).as_deref(), Some("28"));

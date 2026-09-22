@@ -11,7 +11,7 @@
 [![release](https://github.com/xyTom/coding-tools-mcp/actions/workflows/release.yml/badge.svg)](https://github.com/xyTom/coding-tools-mcp/actions/workflows/release.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Coding Tools MCP is a **model-neutral coding runtime** served over the
+Coding Tools MCP is a **macOS-first, model-neutral coding runtime** served over the
 [Model Context Protocol](https://modelcontextprotocol.io): file reading and
 search, structured multi-file patches, command execution, interactive
 sessions, and git — one server that any MCP client can drive. Claude Desktop,
@@ -32,9 +32,9 @@ by default and gated by explicit permission modes.
   destructive commands. On Linux, [Landlock](docs/security-boundary.md) adds
   kernel-level filesystem confinement. Explicit `host` mode opts command
   execution out of that boundary for full local development.
-- **It is model- and vendor-neutral.** A truthfully annotated catalog with an
-  opt-in workflow extension. Swap models or clients freely; the runtime and
-  its behavior stay put.
+- **It stays below the agent layer.** The runtime exposes coding primitives;
+  planning, review state, task tracking, Skills, and agent orchestration stay
+  with the calling model/client.
 - **It is engineered for context windows.** Results are summarized, paginated,
   and capped by design; serialized tool-result bytes dropped 37%
   release-over-release on the deterministic dogfood workload with unchanged
@@ -68,18 +68,17 @@ if you prefer Node):
 
 Then ask your client: *"run the test suite and fix the first failure."*
 
-Add `--enable-workflow-tools` to expose project overview, repository map,
-workspace Skills, checks and evidence, persistent tasks, guarded checkpoints,
-semantic LSP queries, structured Git and managed worktrees, review records,
-desktop approvals, and model-free context checkpoints. The desktop app enables this
-extension for the runtimes it starts.
+The complete tool set is deliberately small and exposed directly. Helpers such as
+`runtime_doctor`, project overview/instructions, check discovery, code diagnostics,
+and Git history need no secondary discovery call. There is no separate workflow
+engine.
 
 Prefer HTTP? Drop `--stdio` and the server speaks Streamable HTTP on
 `http://127.0.0.1:8765/mcp`. Both protocol eras are served on either
-transport: MCP `2026-07-28` in full, with stable tools as the base capability
-and the Tasks extension additionally advertised by workflow-enabled runtimes,
-plus the handshake era `2025-11-25` with `2025-06-18` compatibility. Neither
-era has transport sessions. A one-line installer, per-client
+transport: MCP `2026-07-28` plus the handshake era `2025-11-25` with
+`2025-06-18` compatibility. The persistent Project Gateway uses MCP sessions
+only to bind a connection to an explicit project; ordinary single-workspace
+runtimes remain stateless at the transport layer. A one-line installer, per-client
 walkthroughs, and troubleshooting live in
 [docs/quickstart.md](docs/quickstart.md) and
 [docs/mcp-client-config.md](docs/mcp-client-config.md).
@@ -139,32 +138,20 @@ speak MCP to this server and inherit the whole safety boundary. →
 
 ## The tool catalog
 
-One stable, truthfully annotated default set — permission modes change command
-*policy*, never which tools the model sees. Startup flags may opt into workflow
-tools or place them behind the static deferred gateway described below.
-`apply_patch` is the sole direct
-text/source-editing primitive: staged, baseline-checked, atomic across files,
-with rollback. Workflow Git operations, checkpoint restore, and workflow-state
-updates have their own explicit guarded mutation semantics rather than acting as
-alternate general-purpose source editors.
+One deliberately small, truthfully annotated coding surface. `apply_patch` is
+the sole direct text/source-editing primitive: staged, baseline-checked, atomic
+across files, with rollback. Git writes, branches, worktrees, build systems,
+Xcode, SwiftPM, Homebrew, and other developer workflows use their native CLIs
+through `exec_command` instead of dedicated wrapper tools.
 
-The live category directory comes from `tool_search({})`; it groups enabled
-capabilities by purpose and gives selection hints. The complete inventory is
-maintained in [Tools and schemas](docs/tools-and-schemas.md).
+Every enabled capability appears directly in `tools/list`; the complete inventory
+and selection hints are maintained in [Tools and schemas](docs/tools-and-schemas.md).
+There is no MCP-internal tool-discovery workflow.
 
-`--enable-hooks` activates workspace-confined `before_tool`, `after_tool`, and
-`tool_error` hooks from `.agents/hooks.json`. `shell_snapshot` freezes the
-filtered command environment for later executions until explicitly refreshed.
-`runtime_doctor` gives an agent a non-destructive preflight with actionable
-warnings about missing command aliases/tools, workspace access, hooks, LSP,
-sandbox state, and network policy.
-With `--enable-workflow-tools --defer-workflow-tools`, the 41 workflow tools are
-found by `tool_search` and called through `tool_invoke` instead of being placed
-in the initial `tools/list` payload.
-The desktop launcher selects this mode by default. Start with `tool_search({})`
-for the category directory, browse summaries, then retrieve only the parameters
-you need. English/Chinese intent search can skip browsing. See
-[Progressive tool discovery and selection](docs/tool-discovery.md).
+`runtime_doctor` gives an agent a non-destructive macOS-oriented preflight with
+actionable information about Xcode, Swift, SourceKit-LSP, codesign,
+notarytool, Homebrew, Git, workspace access, LSP, sandbox state, and network
+policy.
 
 Network command policy can be selected independently with
 `--network-policy deny|allowlist|unrestricted`. In allowlist mode, repeat
@@ -228,7 +215,7 @@ measured. More: [COMPLIANCE.md](COMPLIANCE.md) · [BENCHMARK.md](BENCHMARK.md) �
 | Documentation map | [Browse docs by topic](docs/README.md) |
 | Getting started | [Quickstart](docs/quickstart.md) · [Client configuration](docs/mcp-client-config.md) · [Troubleshooting](docs/troubleshooting.md) |
 | Remote & sandboxed | [Remote MCP](docs/remote-mcp.md) · [Docker sandbox](docs/docker.md) |
-| Tools & contract | [Tools and schemas](docs/tools-and-schemas.md) · [Runtime contract](docs/runtime-contract-v0.4.md) · [Migrating to 0.4](docs/migration-0.4.md) · [Permission modes](docs/permission-modes.md) |
+| Tools & contract | [Tools and schemas](docs/tools-and-schemas.md) · [Runtime contract](docs/runtime-contract-v0.4.md) · [Permission modes](docs/permission-modes.md) |
 | Execution | [Exec recipes](docs/exec-command-recipes.md) · [Exec troubleshooting](docs/troubleshooting-exec.md) |
 | Integration | [Embedding](docs/embedding.md) · [npm launcher](packages/npm-launcher/README.md) |
 | Security & quality | [Security policy](SECURITY.md) · [Security boundary](docs/security-boundary.md) · [CI and tests](docs/ci-and-tests.md) · [Limitations](docs/limitations.md) · [Competitive analysis](docs/competitive-analysis.md) |

@@ -61,7 +61,7 @@ fn valid_oauth_token_secret(secret: &str) -> bool {
         && secret.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct TunnelConfig {
     #[serde(default = "default_tunnel_type")]
     pub r#type: String,
@@ -93,7 +93,7 @@ impl Default for TunnelConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct AuthConfig {
     #[serde(default = "default_auth_type")]
     pub r#type: String,
@@ -148,6 +148,80 @@ impl Default for RuntimeConfig {
             file_access_scope: default_file_access_scope(),
             allowed_paths: default_allowed_paths(),
             environment_variables: default_environment_variables(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct GatewayConfig {
+    #[serde(default = "default_server_name_prefix")]
+    pub server_name_prefix: String,
+    #[serde(default = "default_port")]
+    pub local_port: u16,
+    #[serde(default)]
+    pub tunnel: TunnelConfig,
+    #[serde(default)]
+    pub auth: AuthConfig,
+}
+
+impl Default for GatewayConfig {
+    fn default() -> Self {
+        Self {
+            server_name_prefix: default_server_name_prefix(),
+            local_port: default_port(),
+            tunnel: TunnelConfig::default(),
+            auth: AuthConfig::default(),
+        }
+    }
+}
+
+impl GatewayConfig {
+    pub fn from_workspace_profile(profile: &WorkspaceProfile) -> Self {
+        Self {
+            server_name_prefix: profile.runtime.server_name_prefix.clone(),
+            local_port: profile.runtime.local_port,
+            tunnel: profile.tunnel.clone(),
+            auth: profile.auth.clone(),
+        }
+    }
+
+    pub fn apply_to_workspace_profile(&self, profile: &mut WorkspaceProfile) {
+        profile.runtime.server_name_prefix = self.server_name_prefix.clone();
+        profile.runtime.local_port = self.local_port;
+        profile.tunnel = self.tunnel.clone();
+        profile.auth = self.auth.clone();
+    }
+
+    pub fn repair_oauth_token_secret(&mut self) -> bool {
+        self.auth.repair_oauth_token_secret()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ProjectProfile {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    #[serde(default = "default_permission_mode")]
+    pub permission_mode: String,
+    #[serde(default = "default_file_access_scope")]
+    pub file_access_scope: String,
+    #[serde(default = "default_allowed_paths")]
+    pub allowed_paths: Vec<String>,
+    #[serde(default = "default_environment_variables")]
+    pub environment_variables: Vec<EnvironmentVariable>,
+}
+
+impl ProjectProfile {
+    pub fn from_workspace_profile(profile: &WorkspaceProfile) -> Self {
+        Self {
+            id: profile.id.clone(),
+            name: profile.name.clone(),
+            path: profile.path.clone(),
+            permission_mode: profile.runtime.permission_mode.clone(),
+            file_access_scope: profile.runtime.file_access_scope.clone(),
+            allowed_paths: profile.runtime.allowed_paths.clone(),
+            environment_variables: profile.runtime.environment_variables.clone(),
         }
     }
 }
@@ -233,10 +307,7 @@ impl WorkspaceProfile {
         if self.runtime.local_port < 1024 {
             return Err("Local port must be between 1024 and 65535.".into());
         }
-        if !matches!(
-            self.runtime.permission_mode.as_str(),
-            "safe" | "trusted" | "dangerous" | "host"
-        ) {
+        if !matches!(self.runtime.permission_mode.as_str(), "trusted" | "host") {
             return Err("Unknown permission mode.".into());
         }
         if self.runtime.file_access_scope != "workspace" {

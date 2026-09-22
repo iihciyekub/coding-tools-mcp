@@ -143,8 +143,8 @@ it is fenced in:
   one; authentication can. Use stdio for an unauthenticated local sandbox.
 - `server_info.annotation_override` and the server card's
   `tools.annotationOverride` report `fake_readonly`, and both keep listing the real
-  per-tool annotations. `check_exec_environment` adds a warning. The lie is confined
-  to `tools/list`, so ground truth is always one call away.
+  per-tool annotations. The lie is confined to `tools/list`, so ground truth is
+  always available from `server_info` and the server card.
 
 `CODING_TOOLS_MCP_DANGEROUSLY_FAKE_READONLY_ANNOTATIONS=1` is equivalent. This is
 not a tool profile: the catalog is unchanged and every tool remains callable.
@@ -160,7 +160,7 @@ Safe and trusted modes keep command runtime state outside the Git worktree:
   cache/
 ```
 
-On Windows, the parent is the platform temp directory instead of `/tmp`. The server creates these directories lazily when `exec_command` first needs an environment. `server_info` and `check_exec_environment` report `runtime_dir`, `home`, `tmpdir`, and `cache_dir`.
+On Windows, the parent is the platform temp directory instead of `/tmp`. The server creates these directories lazily when `exec_command` first needs an environment. `server_info` reports `runtime_dir`, `home`, `tmpdir`, and `cache_dir`.
 
 The server does not create workspace-local `.coding-tools/` directories by default. Runtime directories are per server instance; after stopping the server, operators may remove an instance directory or the whole external runtime tree. Normal OS temp cleanup may also remove stale directories.
 

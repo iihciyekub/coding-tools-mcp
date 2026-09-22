@@ -88,6 +88,9 @@ button:focus-visible, select:focus-visible { outline: 2px solid var(--focus); ou
 .power-button.confirm { color: #fff; border-color: var(--danger); background: var(--danger); }
 
 .connection-block { padding: 7px 12px; border-bottom: 1px solid var(--line); }
+.gateway-label { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 5px 3px 7px; }
+.gateway-label strong { font-size: 11px; font-weight: 650; color: var(--text); }
+.gateway-label small { min-width: 0; color: var(--muted); font-size: 9px; text-align: right; line-height: 1.25; }
 .value-button-wrap { position: relative; }
 .value-button-wrap + .value-button-wrap { margin-top: 2px; }
 .value-button { display: grid; width: 100%; min-height: 48px; grid-template-columns: minmax(0, 1fr) 52px; align-items: center; gap: 7px; padding: 4px 3px; text-align: left; border: 0; border-radius: 6px; background: transparent; cursor: pointer; }
@@ -181,7 +184,7 @@ button:focus-visible, select:focus-visible { outline: 2px solid var(--focus); ou
 @keyframes progress { from { transform: translateX(-60%); } to { transform: translateX(220%); } }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-.environment-page, .logs-page, .settings-page, .workflow-page, .more-page { max-height: 503px; overflow-y: auto; }
+.environment-page, .logs-page, .settings-page, .approvals-page, .more-page { max-height: 503px; overflow-y: auto; }
 .log-section + .log-section { margin-top: 7px; }
 .log-section > strong { display: block; margin-bottom: 4px; color: var(--muted); font-size: 11px; font-weight: 500; }
 .log-section pre { max-height: 133px; overflow: auto; margin: 0; padding: 7px; color: var(--text); border-radius: 6px; background: var(--hover); user-select: text; white-space: pre-wrap; word-break: break-word; font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
@@ -246,5 +249,6 @@ button:focus-visible, select:focus-visible { outline: 2px solid var(--focus); ou
 .error-banner { display: flex; align-items: flex-start; gap: 7px; padding: 7px 11px; color: var(--danger); background: var(--danger-bg); font-size: 11px; line-height: 1.45; }
 .error-banner span { min-width: 0; flex: 1; user-select: text; }
 .error-banner button { padding: 0; color: inherit; border: 0; background: transparent; cursor: pointer; font-size: 13px; line-height: 1; }
+.migration-banner { padding: 7px 11px; color: var(--text); background: var(--hover); border-bottom: 1px solid var(--line); font-size: 10px; line-height: 1.4; }
 
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }

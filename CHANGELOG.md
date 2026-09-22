@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased - macOS Runtime Simplification
+
+- Reframed Coding Tools MCP as a macOS-first primitive coding runtime rather
+  than a second agent/workflow engine.
+- Reduced the registered MCP surface to 31 tools: 22 direct tools in a normal
+  project runtime, 8 deferred helpers, plus gateway-only `project_context`.
+- Removed persistent Task/Plan, Review, Checkpoint/Context Checkpoint,
+  `checks_run`/`checks_result`, Protocol Tasks, workspace Skills, local-agent
+  discovery, Repo Map/change-impact analysis, semantic rename preview, shell
+  snapshot, and the lightweight exec-environment tool.
+- Removed Git branch/stage/commit/worktree wrapper tools. Git writes and
+  worktree workflows now use native `git` through `exec_command`, while the MCP
+  keeps high-value read-only Git evidence (`status`, `diff`, `log`, `show`,
+  `blame`).
+- Removed the optional Playwright/browser-check helper and its dependency;
+  browser automation is outside this coding runtime.
+- Kept Project Gateway session isolation and made Project Root the default
+  context boundary while permission scope remains the maximum authority.
+- Tightened the CI tool-surface budget to 32 registered tools, 16,000 bytes of
+  total input schemas, and 2,048 bytes per schema.
+- Replaced legacy runtime/migration/archive documentation with the single live
+  macOS-first contract and specification.
+
 ## Desktop 0.4.2
 
 - Made macOS 15 the authoritative Desktop CI platform and kept stable Desktop releases macOS-only through `releasePlatforms`.

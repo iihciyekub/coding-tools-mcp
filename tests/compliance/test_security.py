@@ -296,15 +296,13 @@ class SecurityComplianceTests(ComplianceTestCase):
                 "arguments": {"cmd": "curl https://example.com"},
             },
         )
-        self.assertTrue(result.get("isError"), f"permission request must not silently grant access: {result!r}")
+        requested = self.assert_tool_success(result)
+        self.assertEqual(requested.get("status"), "pending")
+        self.assertIsInstance(requested.get("approval_id"), str)
+
         payload = self.assert_denied_or_permission_required(
-            "request_permissions",
-            {
-                "tool_name": "exec_command",
-                "permission": "destructive_command",
-                "reason": "verify compliance denial shape",
-                "arguments": {"cmd": "git reset --hard"},
-            },
+            "exec_command",
+            {"cmd": "curl https://example.com"},
         )
         self.assertFalse(payload.get("ok", True))
 

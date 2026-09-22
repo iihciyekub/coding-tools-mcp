@@ -4,128 +4,58 @@ The normative behavior is [runtime-contract-v0.4.md](runtime-contract-v0.4.md).
 Live JSON Schemas come from `tools/list`; CI compares their names, input
 properties, annotations, and error codes with the contract.
 
-For the category directory, progressive parameter loading, and tool selection
-strategy, see [Progressive tool discovery](tool-discovery.md). Desktop-launched
-runtimes now select deferred workflow exposure; the CLI defaults are unchanged.
+The runtime is macOS-first and intentionally exposes a small direct set of coding
+primitives rather than an agent workflow engine or a second tool-discovery layer.
 
 ## Fixed inventory
 
-The implementation declares exactly 71 tools. With the default `view_image`
-capability enabled, the default catalog exposes 28 tools:
+The implementation declares exactly 29 tools. A normal macOS project runtime
+exposes every enabled capability directly in one stable `tools/list`; Gateway mode
+adds only `project_context`. There is no workflow-tool or discovery-gateway mode.
 
-- `server_info`: server, workspace, automatic project context, policy, runtime,
-  auth, protocol, and fixed-catalog metadata.
-- `check_exec_environment`: lightweight execution policy and Landlock status.
-- `runtime_doctor`: non-destructive runtime health report with actionable warnings for common toolchain commands, workspace access, shell snapshot, hooks, LSP, sandbox/network state, and macOS Apple toolchain metadata.
-- `hooks_status`: report whether opt-in workspace hooks are enabled and summarize loaded rules.
-- `shell_snapshot`: capture or refresh the stable command environment reused by later `exec_command` calls.
-- `read_file`: stream a bounded UTF-8 range without loading the whole file.
-- `read_files`: batch several bounded UTF-8 file reads under one total byte budget.
-- `list_dir`: list immediate or bounded-recursive directory entries.
-- `list_files`: iterate files with glob, ignore, hidden-file, sort, and cap
-  controls.
-- `search_text`: literal or regex search; ripgrep stops after the result cap.
-- `tool_search`: browse enabled categories and tool summaries, or search English/Chinese intent and exact names; deferred search matches include invocation metadata and schemas in text and structured results.
-- `apply_patch`: stage and atomically commit add/update/delete/move envelopes.
-- `exec_command`: run a bounded command and optionally deduplicate retries with `operation_id`.
-- `get_command`: read one command's status by `command_id` or `operation_id` without consuming output, including output-idle/activity health signals.
-- `list_commands`: list recent active/retained commands for reconnect recovery, including long-silent activity signals.
-- `write_stdin`: poll or interact with a running command.
-- `kill_command`: terminate one runtime-owned command.
-- `read_output`: page retained stdout or stderr using absolute byte offsets.
-- `git_status`: structured working-tree status.
-- `git_diff`: bounded unified staged/unstaged diff.
-- `git_log`: structured bounded commit history.
-- `git_show`: bounded revision metadata/content/diff.
-- `git_blame`: structured bounded line attribution.
-- `request_permissions`: request an exact, expiring one-shot desktop approval when workflow tools are enabled.
-- `view_image`: one MCP image content block plus structured metadata.
-- `code_symbols`: list bounded language-aware symbol definitions.
-- `code_definition`: find definitions for one symbol; when file/line/column is supplied, prefer LSP semantics and fall back to the existing bounded symbol scan if the LSP runtime is unavailable.
-- `code_references`: find references for one symbol; when file/line/column is supplied, prefer LSP semantics and fall back to the exact-identifier scan if the LSP runtime is unavailable.
+- `project_context`: **gateway-only direct** — List projects registered with a persistent gateway, inspect the project bound to this MCP session, or explicitly bind this session to another project without restarting the gateway.
+- `server_info`: **direct** — Return server, workspace, project-context, auth, policy, and fixed-tool metadata.
+- `runtime_doctor`: **direct** — Run a non-destructive runtime health check covering common toolchain commands, workspace access, shell snapshot, LSP availability, sandbox status, network policy, and macOS Apple toolchain metadata including Xcode, Swift, SourceKit-LSP, codesign, notarytool, xcresulttool, and Homebrew.
+- `read_file`: **direct** — Read a UTF-8 text file slice inside the configured file scope. Relative paths are workspace-relative; host mode also accepts host absolute and ~/... paths.
+- `read_files`: **direct** — Read bounded UTF-8 slices from multiple files in the configured file scope.
+- `list_dir`: **direct** — List directory entries inside the configured file scope.
+- `list_files`: **direct** — List files in the configured file scope using glob filters.
+- `search_text`: **direct** — Search UTF-8 files in the configured file scope for text or regex matches.
+- `apply_patch`: **direct** — Stage, validate, and atomically apply a patch envelope. Example: *** Begin Patch *** Update File: app.py @@ -old +new *** End Patch
+- `exec_command`: **direct** — Run a bounded command under runtime policy. Pass workdir explicitly for reconnect-safe paths. A still-running command returns command_id. Example: {"cmd":"pytest -q","workdir":".","yield_time_ms":30000}. Retained output is bounded per stream; for very large output redirect to a file (cmd > out.log 2>&1) and page it with read_file or search_text.
+- `get_command`: **direct** — Read command status without consuming output cursors. Resolve by command_id or operation_id; returned output_refs can be paged with read_output.
+- `list_commands`: **direct** — List recent server-managed commands and operation_ids for reconnect/recovery. This is read-only and does not consume command output.
+- `write_stdin`: **direct** — Poll or interact with a running command by command_id. Empty chars wait for output; non-empty chars writes to stdin. Example: {"command_id":"abc","chars":"","yield_time_ms":10000}.
+- `kill_command`: **direct** — Terminate a server-managed command by command_id. Example: {"command_id":"abc","signal":"KILL"}.
+- `read_output`: **direct** — Read retained command output using an output_ref returned by exec_command/write_stdin. Each stream retains the earliest output (head) plus the most recent output (rolling tail); bytes between them may be evicted and are reported via evicted_gap_bytes. Example: {"output_ref":"command:abc:stdout","offset":0,"limit":4096}.
+- `git_status`: **direct** — Return git working tree status for the workspace.
+- `git_diff`: **direct** — Return unified git diff for workspace changes.
+- `git_log`: **direct** — Return recent git commits with bounded structured metadata.
+- `git_show`: **direct** — Return bounded git show output for a revision.
+- `git_blame`: **direct** — Return bounded git blame metadata for a workspace file.
+- `code_diagnostics`: **direct** — Open or refresh a source file and return bounded published language-server diagnostics.
+- `request_permissions`: **direct** — Create an exact, expiring operator approval request without silently granting operations.
+- `workspace_overview`: **direct** — Summarize project manifests, languages, entry points, top-level areas, and instruction files. Detected Apple projects also include bounded read-only Xcode, Swift, SDK, and SourceKit-LSP metadata.
+- `project_instructions`: **direct** — Resolve root and nested project instruction files that apply to one workspace path.
+- `checks_discover`: **direct** — Discover test, lint, typecheck, and build commands from project manifests without running them. By default, current Git changes deterministically rank the existing checks and explain why; explicit changed_paths can override the seed.
+- `view_image`: **direct when image content is enabled** — Return a workspace image as MCP image content.
+- `code_symbols`: **direct** — List bounded language-aware symbol definitions under a workspace path.
+- `code_definition`: **direct** — Find language-aware definitions for a symbol under a workspace path. When a file path plus line/column is supplied, line/column are one-based and semantic LSP is preferred; the runtime converts the column to UTF-16 and falls back to the bounded symbol scan if the LSP runtime is unavailable.
+- `code_references`: **direct** — Find references for a symbol under a workspace path. When a file path plus line/column is supplied, prefer semantic LSP references using one-based public positions converted internally to UTF-16; fall back to the bounded exact-identifier scan if the LSP runtime is unavailable.
 
-`permission_mode=host` additionally exposes one metadata-only discovery tool:
+The direct catalog contains file reads/search, `apply_patch`, command lifecycle, Git
+evidence, code navigation/diagnostics, project-safe permission requests, project
+orientation/instructions, check discovery, and runtime diagnostics. `project_context`
+appears only on the persistent Project Gateway; `view_image` is present when image
+content is enabled. `listChanged` remains `false` because the catalog is fixed for
+the Runtime lifetime.
 
-- `agent_environment`: discover or filter installed local agent Skill/Plugin/worktree/rule/capability metadata without returning auth, cookie, token, or browser-session contents.
-
-When deferred workflow exposure is selected, one additional registered gateway
-is directly exposed:
-
-- `tool_invoke`: validate and dispatch one workflow tool returned by `tool_search` while keeping that workflow tool out of `tools/list`.
-
-Starting the server with `--enable-workflow-tools` adds these 41 tools. The
-selection is fixed for that runtime; it does not change during a connection:
-
-- `workspace_overview`: summarize manifests, languages, entry points, top-level areas, instruction files, and bounded Apple/Xcode/Swift metadata for detected macOS projects.
-- `repo_map`: return a bounded file/symbol map with query ranking and coverage metadata; optional impact mode estimates direct-reference and likely-test effects from explicit or current Git changes without adding a separate tool.
-- `project_instructions`: return root and nested instruction files applicable to one path.
-- `skills_list`: list metadata for workspace `.agents/skills/**/SKILL.md` entries.
-- `skills_read`: read one selected workspace Skill without executing scripts.
-- `checks_discover`: discover project-defined verification commands without executing them, including SwiftPM/Xcode metadata checks; current Git changes or explicit changed paths deterministically rank the existing checks with recommendation reasons.
-- `checks_run`: execute one currently discovered check through the existing command policy and extract bounded structured failure diagnostics while retaining raw output.
-- `checks_result`: read persisted check evidence, structured failure diagnostics, and detect code changes after the check.
-- `task_create`: create a persistent workspace task record.
-- `task_get`: read one persistent task record.
-- `task_list`: list persistent task records, optionally by status.
-- `task_update`: update a task with optimistic revision checking.
-- `task_event_add`: append a progress, decision, evidence, or note event to a task.
-- `task_events`: list the recent event history for a task.
-- `task_context`: restore a task summary with its recent events, checks, and checkpoints.
-- `task_plan_get`: read the ordered plan and current task revision.
-- `task_plan_update`: atomically replace plan steps with task revision checking.
-- `git_branch_list`: list local branches and the current HEAD/index fingerprints.
-- `git_branch_create`: create a validated branch against reviewed Git state.
-- `git_conflicts`: list unmerged paths and their index stages.
-- `git_stage`: stage only explicit paths after HEAD/index concurrency checks.
-- `git_unstage`: unstage only explicit paths after HEAD/index concurrency checks.
-- `git_commit`: commit exactly the declared staged path set.
-- `git_worktree_list`: list repository worktrees and identify runtime-managed entries.
-- `git_worktree_create`: create an isolated managed worktree after Git state checks.
-- `git_worktree_remove`: remove a clean managed worktree while preserving its branch.
-- `lsp_status`: report optional Python, TypeScript/JavaScript, Rust, and Swift/SourceKit-LSP availability, resolved commands, project roots, and process state.
-- `lsp_definition`: resolve semantic definitions at a source position.
-- `lsp_references`: resolve semantic references at a source position.
-- `lsp_diagnostics`: return bounded diagnostics published for one source file.
-- `lsp_rename_preview`: return workspace-confined rename edits and source hashes without writing files.
-- `review_prepare`: persist a bounded diff, applicable rules, task evidence, and code fingerprint.
-- `review_record`: record structured findings with optimistic revision checking.
-- `review_get`: read a review and report whether its code snapshot is stale.
-- `approval_get`: read one persistent approval request and its current state.
-- `approval_list`: list bounded approval requests, optionally filtered by state.
-- `checkpoint_create`: snapshot an explicit bounded set of UTF-8 files outside Git state.
-- `checkpoint_list`: list persistent workspace checkpoints.
-- `checkpoint_diff`: compare a checkpoint to current files and issue a state-bound restore token.
-- `checkpoint_restore`: atomically restore checkpoint files when the preview token is still current.
-- `context_checkpoint`: create, read, or list compact cross-session context metadata; reads explain Git/command/capability drift and return a resume packet while semantic summary fields still come from the current caller rather than another model.
-
-`view_image` may be disabled when an installation cannot accept binary image
-content. The workflow toolset is opt-in. With normal workflow exposure the
-direct catalog contains 69 tools. Adding `--defer-workflow-tools` (selected by
-the desktop launcher) keeps those 41
-workflow capabilities available to `tool_search` but removes them from the
-direct `tools/list`; `tool_invoke` is exposed instead, producing a 29-tool
-direct catalog and 41 deferred tools. A deferred intent-search result always includes
-its input schema and `invoke_via: "tool_invoke"`. This is a static gateway
-selected at startup, not a dynamic tool-list mutation, so `listChanged` remains
-`false`.
-
-Network command gating has three startup-selected modes: `deny`, `allowlist`,
-and `unrestricted`. `--network-allow-domain` may be repeated and
-`CODING_TOOLS_MCP_NETWORK_ALLOW_DOMAINS` accepts a comma-separated list.
-Allowlist rules are exact domains or `*.example.com` subdomain patterns.
-This is command-policy enforcement: statically detected targets outside the
-allowlist, plus network-intent commands whose target cannot be resolved from
-the command line, require explicit permission. It is deliberately not described
-as an OS-level egress firewall; that belongs to a future sandbox layer.
-
-Workspace hooks are separately opt-in with `--enable-hooks`. The default config
-path is `.agents/hooks.json` (override with `--hooks-file` or
-`CODING_TOOLS_MCP_HOOKS_FILE`). Supported events are `before_tool`,
-`after_tool`, and `tool_error`. Hooks execute under the same command policy and
-filesystem sandbox as `exec_command`; a failing blocking `before_tool` hook
-rejects the target call. Hook arguments/results are redacted before being sent
-to hook stdin, and hook stdout/stderr is bounded.
-
+Planning, task history, review records, check-result persistence, checkpoints,
+protocol Tasks, workspace Skills, local-agent discovery, Git write workflows,
+and workspace hooks are intentionally not MCP capabilities. The model/client
+owns planning and review context; native macOS/Unix developer tools invoked via
+`exec_command` own build, Git-write, worktree, and automation workflows;
+`command_id` is the single lifecycle for long-running commands.
 ## Result envelope
 
 Every successful tool call has:

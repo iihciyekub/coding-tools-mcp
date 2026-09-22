@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "coding-tools-mcp"
 version = "0.4.2"
-description = "Workspace-confined coding tools exposed as an MCP server."
+description = "macOS-first coding primitives exposed as a lightweight MCP runtime."
 requires-python = ">=3.11"
 dependencies = [
   "PyJWT>=2.8",
@@ -36,10 +36,6 @@ dev = [
 image = [
   "Pillow>=10.0",
 ]
-browser = [
-  "playwright>=1.58,<2",
-]
-
 [project.scripts]
 coding-tools-mcp = "coding_tools_mcp.server:main"
 

@@ -11,7 +11,7 @@
 [![release](https://github.com/xyTom/coding-tools-mcp/actions/workflows/release.yml/badge.svg)](https://github.com/xyTom/coding-tools-mcp/actions/workflows/release.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Coding Tools MCP 是一个**模型中立的编程运行时**，通过
+Coding Tools MCP 是一个**macOS 优先、模型中立的编程运行时**，通过
 [Model Context Protocol](https://modelcontextprotocol.io) 对外提供服务：
 文件读取与搜索、结构化多文件补丁、命令执行、交互式命令、git 操作——
 一个服务器，任何 MCP 客户端都能驱动。Claude Desktop、Claude Code、Codex、
@@ -30,8 +30,8 @@ Cursor、Cline、VS Code、Windsurf、Gemini CLI，或你自己写的 agent，�
   展开、内联脚本和破坏性命令逐项把关；Linux 上还有
   [Landlock](docs/security-boundary.md) 提供内核级文件系统隔离。显式启用
   `host` 模式后，命令执行会退出这层边界，以满足完整本机开发需要。
-- **模型与厂商中立。** 如实标注的默认目录及可选工作流扩展。随意更换模型
-  或客户端，运行时行为保持不变。
+- **运行时不替模型做 Agent 工作。** 它只提供编程原语；计划、审查状态、任务
+  跟踪、Skills 与 Agent 编排都留给调用它的模型或客户端。
 - **为上下文窗口精打细算。** 工具结果按设计做摘要、分页与封顶；在确定性
   dogfood 工作负载上，序列化结果字节数相比上一版本下降 37%，任务完成率不变。
 
@@ -62,16 +62,14 @@ Gemini CLI 或 Cline——各家的 JSON 配置完全相同（偏好 Node 的话
 
 然后对你的客户端说一句：*"跑一下测试，把第一个失败修了。"*
 
-增加 `--enable-workflow-tools` 可启用项目概览、Repo Map、工作区 Skills、
-检查与证据、持久任务、带冲突保护的 Checkpoint、LSP 语义查询、结构化 Git、
-受管 worktree、Review、桌面审批和完整浏览器动作。桌面 App 启动的运行时会
-自动启用这组扩展。
+完整工具集保持精简并直接暴露。`runtime_doctor`、项目概览/规则、检查发现、
+代码诊断和 Git 历史都无需二次工具发现。运行时不再内置另一套 workflow 引擎。
 
 想用 HTTP？去掉 `--stdio`，服务器就在
 `http://127.0.0.1:8765/mcp` 上讲 Streamable HTTP。两代协议在两种 transport
-上同时提供：完整支持 MCP `2026-07-28`，基础 capability 为稳定的 `tools`，
-启用工作流工具的运行时还会额外声明 Tasks 扩展；同时继续支持握手时代的
-`2025-11-25` 与 `2025-06-18`。两代都没有传输会话。
+上同时提供：支持 MCP `2026-07-28`，同时继续支持握手时代的
+`2025-11-25` 与 `2025-06-18`。Persistent Project Gateway 只用 MCP session
+绑定明确的 Project；普通单 workspace runtime 不维护传输会话。
 一行安装脚本、各客户端的完整接入指南和排障见
 [docs/quickstart.md](docs/quickstart.md) 与
 [docs/mcp-client-config.md](docs/mcp-client-config.md)。
@@ -127,27 +125,17 @@ npm run tauri dev
 
 ## 工具目录
 
-默认提供一套稳定且如实标注的目录——权限模式改变的是命令*策略*，而不是模型
-看到哪些工具。启动参数可以额外启用 workflow 工具，或把它们放到静态 deferred
-网关后面。`apply_patch` 是唯一的直接文本/源码编辑原语：分阶段、基线校验、跨文件
-原子提交并支持回滚。工作流中的 Git 写操作、Checkpoint 恢复和工作流状态更新
-具有各自明确且受保护的写语义，不是绕过 Patch 引擎的通用源码编辑器。
+默认提供一套刻意保持精简且如实标注的目录。`apply_patch` 是唯一的直接文本/
+源码编辑原语：分阶段、基线校验、跨文件原子提交并支持回滚。Git 写入、branch、
+worktree、构建系统、Xcode、SwiftPM、Homebrew 等工作流直接通过 `exec_command`
+调用系统原生命令，不再各自包装成 MCP 工具。
 
-`tool_search({})` 提供实时分类目录，按用途组织已启用的能力并说明选用场景。
-完整工具清单统一维护在 [工具与 Schema](docs/tools-and-schemas.md)。
+所有启用能力都直接出现在 `tools/list`；完整工具清单与选用提示统一维护在
+[工具与 Schema](docs/tools-and-schemas.md)，不再内置 MCP 二次工具发现流程。
 
-`--enable-hooks` 会从 `.agents/hooks.json` 启用工作区范围内的
-`before_tool`、`after_tool`、`tool_error` hooks。`shell_snapshot` 会冻结过滤后的
-命令环境，后续执行持续复用，直到显式刷新。`runtime_doctor` 会进行非破坏性
-运行时体检，并直接给 agent 返回缺失命令/别名、工作区访问、Hook、LSP、沙箱状态
-与网络策略方面的可执行修复建议。使用
-`--enable-workflow-tools --defer-workflow-tools` 时，41 个 workflow 工具不再进入
-初始 `tools/list`，而是由 `tool_search` 搜索并通过 `tool_invoke` 调用。
-桌面启动的运行时默认使用此模式：常用工具直接调用，高级能力按需发现。
-`tool_search({})` 返回分类目录，选择分类后查看工具摘要，再按工具名读取参数；
-也可直接用“运行测试”“恢复任务”等中英文意图搜索，跳过目录浏览。
-无需为每个小修改建立任务、计划、审查和检查点。详见
-[渐进式工具发现与选用策略](docs/tool-discovery.md)。
+`runtime_doctor` 会进行非破坏性的 macOS 运行时体检，返回 Xcode、Swift、
+SourceKit-LSP、codesign、notarytool、Homebrew、Git、LSP、沙箱状态与网络策略。
+无需为普通修改建立任务、计划、审查和检查点。
 
 网络命令策略可独立选择 `--network-policy deny|allowlist|unrestricted`。
 allowlist 模式下可重复使用 `--network-allow-domain github.com`，子域可写成
@@ -205,7 +193,7 @@ SWE-bench 榜单成绩——[docs/swe-bench.md](docs/swe-bench.md) 写明了测�
 | 文档导航 | [按主题浏览文档](docs/README.md) |
 | 上手 | [快速开始](docs/quickstart.md) · [客户端配置](docs/mcp-client-config.md) · [排障](docs/troubleshooting.md) |
 | 远程与沙箱 | [Remote MCP](docs/remote-mcp.md) · [Docker 沙箱](docs/docker.md) |
-| 工具与契约 | [工具与 Schema](docs/tools-and-schemas.md) · [运行时契约](docs/runtime-contract-v0.4.md) · [迁移到 0.4](docs/migration-0.4.md) · [权限模式](docs/permission-modes.md) |
+| 工具与契约 | [工具与 Schema](docs/tools-and-schemas.md) · [运行时契约](docs/runtime-contract-v0.4.md) · [权限模式](docs/permission-modes.md) |
 | 命令执行 | [Exec 配方](docs/exec-command-recipes.md) · [Exec 排障](docs/troubleshooting-exec.md) |
 | 集成 | [嵌入指南](docs/embedding.md) · [npm 启动器](packages/npm-launcher/README.md) |
 | 安全与质量 | [安全策略](SECURITY.md) · [安全边界](docs/security-boundary.md) · [CI 与测试](docs/ci-and-tests.md) · [已知限制](docs/limitations.md) · [竞品分析](docs/competitive-analysis.md) |

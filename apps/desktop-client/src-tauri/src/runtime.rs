@@ -8,6 +8,7 @@ use regex::Regex;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
+use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
@@ -114,6 +115,34 @@ struct ManagedSession {
     server_name: String,
 }
 
+struct ManagedProjectRuntime {
+    runtime: ManagedChild,
+    port: u16,
+    fingerprint: String,
+}
+
+struct ManagedGatewaySession {
+    gateway: ManagedSession,
+    projects: HashMap<String, ManagedProjectRuntime>,
+    registry_path: PathBuf,
+    resolved_runtime: (PathBuf, Vec<String>),
+}
+
+#[derive(Serialize)]
+struct GatewayRegistryDocument {
+    generation: u128,
+    default_project_id: Option<String>,
+    projects: Vec<GatewayRegistryProject>,
+}
+
+#[derive(Serialize)]
+struct GatewayRegistryProject {
+    id: String,
+    name: String,
+    path: String,
+    endpoint: String,
+}
+
 fn new_server_name(prefix: &str) -> String {
     let random_code = Alphanumeric
         .sample_string(&mut rand::rng(), 2)
@@ -128,6 +157,9 @@ fn new_server_name(prefix: &str) -> String {
 
 pub struct RuntimeManager {
     sessions: HashMap<String, ManagedSession>,
+    gateway: Option<ManagedGatewaySession>,
+    gateway_preparing: Option<Arc<PendingOperation>>,
+    gateway_stopping: Option<Arc<PendingOperation>>,
     preparing: HashMap<String, Arc<PendingOperation>>,
     stopping: HashMap<String, Arc<PendingOperation>>,
     shutting_down: bool,
@@ -148,6 +180,9 @@ impl RuntimeManager {
     pub fn new() -> Self {
         Self {
             sessions: HashMap::new(),
+            gateway: None,
+            gateway_preparing: None,
+            gateway_stopping: None,
             preparing: HashMap::new(),
             stopping: HashMap::new(),
             shutting_down: false,
@@ -166,8 +201,10 @@ impl RuntimeManager {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let (managed_runtime_ready, runtime_version) =
             environment::readiness(&self.resource_dir, &self.data_dir, &effective_path());
-        let runtime_ready =
-            managed_runtime_ready || self.runtime_ready_hint || !self.sessions.is_empty();
+        let runtime_ready = managed_runtime_ready
+            || self.runtime_ready_hint
+            || self.gateway.is_some()
+            || !self.sessions.is_empty();
         DependencyStatus {
             uv: resource_installer::is_managed_installed("uv", &self.data_dir)
                 || which::which_in("uv", Some(effective_path()), &cwd).is_ok(),
@@ -178,6 +215,21 @@ impl RuntimeManager {
     }
 
     pub fn status(&mut self, profile: &WorkspaceProfile) -> RuntimeStatus {
+        if self.gateway_stopping.is_some() {
+            let mut status = RuntimeStatus::stopped(profile.runtime.local_port);
+            status.state = "stopping".into();
+            status.local_message = "Stopping shared Gateway".into();
+            return status;
+        }
+        if self.gateway_preparing.is_some() {
+            let mut status = RuntimeStatus::stopped(profile.runtime.local_port);
+            status.state = "starting".into();
+            status.local_message = "Preparing shared Gateway".into();
+            return status;
+        }
+        if self.gateway.is_some() {
+            return self.gateway_status(profile);
+        }
         if self.stopping.contains_key(&profile.id) {
             let mut status = RuntimeStatus::stopped(profile.runtime.local_port);
             status.state = "stopping".into();
@@ -239,11 +291,312 @@ impl RuntimeManager {
         }
     }
 
-    pub fn workflow_state_root(&self) -> PathBuf {
-        self.data_dir.join("workflow")
+    pub fn runtime_state_root(&self) -> PathBuf {
+        self.data_dir.join("state")
+    }
+
+    pub fn gateway_is_active(&mut self) -> bool {
+        if let Some(session) = self.gateway.as_mut() {
+            if session.gateway.runtime.is_running() {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn gateway_status(&mut self, profile: &WorkspaceProfile) -> RuntimeStatus {
+        let Some(session) = self.gateway.as_mut() else {
+            return RuntimeStatus::stopped(profile.runtime.local_port);
+        };
+        if !session.gateway.runtime.is_running() {
+            if let Some(tunnel) = session.gateway.tunnel.as_mut() {
+                tunnel.terminate();
+            }
+            if let Some(mut dead) = self.gateway.take() {
+                terminate_gateway_session(&mut dead);
+            }
+            return RuntimeStatus::stopped(profile.runtime.local_port);
+        }
+        let runtime_pid = session.gateway.runtime.child.id();
+        let public_url = session
+            .gateway
+            .public_url
+            .lock()
+            .map(|value| value.clone())
+            .unwrap_or_default();
+        let tunnel_ok = profile.tunnel.r#type == "frp"
+            || session
+                .gateway
+                .tunnel
+                .as_mut()
+                .is_some_and(ManagedChild::is_running);
+        let (state, public_message) = if tunnel_ok {
+            if profile.tunnel.r#type == "cloudflare" && public_url.is_empty() {
+                (
+                    "error",
+                    "Waiting for Cloudflare to assign a public URL".into(),
+                )
+            } else if profile.tunnel.r#type == "frp" {
+                ("running", "External FRP client required".into())
+            } else {
+                ("running", public_url.clone())
+            }
+        } else {
+            ("error", "The Cloudflare tunnel is not connected".into())
+        };
+        RuntimeStatus {
+            state: state.into(),
+            pid: Some(runtime_pid),
+            server_name: session.gateway.server_name.clone(),
+            local_message: format!(
+                "Shared Gateway listening on 127.0.0.1:{}",
+                profile.runtime.local_port
+            ),
+            public_message,
+            public_url,
+            local_url: format!(
+                "http://127.0.0.1:{}{MCP_ENDPOINT_PATH}",
+                profile.runtime.local_port
+            ),
+        }
     }
 }
 
+pub fn start_gateway(
+    manager: &Arc<Mutex<RuntimeManager>>,
+    profiles: &[WorkspaceProfile],
+    registry_path: &Path,
+) -> Result<RuntimeStatus, String> {
+    let gateway_profile = profiles
+        .first()
+        .cloned()
+        .ok_or("Add at least one project before starting the Gateway.")?;
+    for profile in profiles {
+        profile.validate()?;
+    }
+    let operation = Arc::new(PendingOperation::default());
+    let cancelled = &operation.cancelled;
+    let (resources, data) = {
+        let mut state = manager
+            .lock()
+            .map_err(|_| "Runtime manager is unavailable")?;
+        if state.shutting_down {
+            return Err("The desktop app is shutting down.".into());
+        }
+        if state.gateway_stopping.is_some() {
+            return Err("The shared Gateway is still stopping. Please retry shortly.".into());
+        }
+        if state.gateway_is_active() {
+            return Ok(state.gateway_status(&gateway_profile));
+        }
+        if state.gateway_preparing.is_some() {
+            return Err("The shared Gateway is already preparing its runtime.".into());
+        }
+        state.gateway_preparing = Some(Arc::clone(&operation));
+        (state.resource_dir.clone(), state.data_dir.clone())
+    };
+
+    let log_dir = data.join("logs").join("gateway");
+    fs::create_dir_all(&log_dir).map_err(|error| error.to_string())?;
+    let resolved = environment::resolve(&resources, &data, &log_dir, &effective_path(), cancelled);
+    let runtime_ready = resolved.is_ok();
+    let startup = resolved.and_then(|resolved| {
+        if gateway_profile.tunnel.r#type == "cloudflare" && resolve_cloudflared(&data).is_err() {
+            resource_installer::install("cloudflared", &data, cancelled)?;
+        }
+        start_gateway_session(
+            profiles,
+            &gateway_profile,
+            registry_path,
+            &log_dir,
+            resolved,
+            &data,
+            cancelled,
+        )
+    });
+
+    let mut state = manager
+        .lock()
+        .map_err(|_| "Runtime manager is unavailable")?;
+    let owns_start = state
+        .gateway_preparing
+        .as_ref()
+        .is_some_and(|signal| Arc::ptr_eq(signal, &operation));
+    if runtime_ready {
+        state.runtime_ready_hint = true;
+    }
+    if cancelled.load(Ordering::Relaxed) || !owns_start {
+        drop(state);
+        if let Ok(mut session) = startup {
+            terminate_gateway_session(&mut session);
+        }
+        let mut state = manager
+            .lock()
+            .map_err(|_| "Runtime manager is unavailable")?;
+        if owns_start {
+            state.gateway_preparing = None;
+        }
+        operation.finish();
+        return Err("Gateway startup was cancelled.".into());
+    }
+    state.gateway_preparing = None;
+    operation.finish();
+    let session = startup?;
+    state.gateway = Some(session);
+    Ok(state.gateway_status(&gateway_profile))
+}
+
+pub fn stop_gateway(
+    manager: &Arc<Mutex<RuntimeManager>>,
+    profile: &WorkspaceProfile,
+) -> Result<RuntimeStatus, String> {
+    stop_gateway_processes(manager)?;
+    Ok(RuntimeStatus::stopped(profile.runtime.local_port))
+}
+
+fn stop_gateway_processes(manager: &Arc<Mutex<RuntimeManager>>) -> Result<(), String> {
+    let existing_stop = {
+        let state = manager
+            .lock()
+            .map_err(|_| "Runtime manager is unavailable")?;
+        state.gateway_stopping.clone()
+    };
+    if let Some(existing) = existing_stop {
+        existing.wait();
+        return Ok(());
+    }
+    let (preparing, mut session, completion) = {
+        let mut state = manager
+            .lock()
+            .map_err(|_| "Runtime manager is unavailable")?;
+        let preparing = state.gateway_preparing.take();
+        if let Some(signal) = &preparing {
+            signal.cancelled.store(true, Ordering::Relaxed);
+        }
+        let completion = Arc::new(PendingOperation::default());
+        state.gateway_stopping = Some(Arc::clone(&completion));
+        (preparing, state.gateway.take(), completion)
+    };
+    if let Some(preparing) = preparing {
+        preparing.wait();
+    }
+    if let Some(ref mut session) = session {
+        terminate_gateway_session(session);
+    }
+    let mut state = manager
+        .lock()
+        .map_err(|_| "Runtime manager is unavailable")?;
+    state.gateway_stopping = None;
+    completion.finish();
+    Ok(())
+}
+
+pub fn reconcile_gateway_projects(
+    manager: &Arc<Mutex<RuntimeManager>>,
+    profiles: &[WorkspaceProfile],
+) -> Result<(), String> {
+    for profile in profiles {
+        profile.validate()?;
+    }
+    let (resolved, data, registry_path, current_ids, current_fingerprints) = {
+        let state = manager
+            .lock()
+            .map_err(|_| "Runtime manager is unavailable")?;
+        let Some(session) = state.gateway.as_ref() else {
+            return Ok(());
+        };
+        (
+            session.resolved_runtime.clone(),
+            state.data_dir.clone(),
+            session.registry_path.clone(),
+            session.projects.keys().cloned().collect::<Vec<_>>(),
+            session
+                .projects
+                .iter()
+                .map(|(id, project)| (id.clone(), project.fingerprint.clone()))
+                .collect::<HashMap<_, _>>(),
+        )
+    };
+    let desired = profiles
+        .iter()
+        .map(|profile| (profile.id.clone(), project_runtime_fingerprint(profile)))
+        .collect::<HashMap<_, _>>();
+    let removed = current_ids
+        .iter()
+        .filter(|id| !desired.contains_key(*id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let restart = profiles
+        .iter()
+        .filter(|profile| {
+            current_fingerprints
+                .get(&profile.id)
+                .is_some_and(|fingerprint| fingerprint != &desired[&profile.id])
+        })
+        .map(|profile| profile.id.clone())
+        .collect::<Vec<_>>();
+
+    let mut to_stop = Vec::new();
+    {
+        let mut state = manager
+            .lock()
+            .map_err(|_| "Runtime manager is unavailable")?;
+        let session = state
+            .gateway
+            .as_mut()
+            .ok_or("Gateway stopped during reconciliation.")?;
+        for id in removed.iter().chain(restart.iter()) {
+            if let Some(project) = session.projects.remove(id) {
+                to_stop.push(project);
+            }
+        }
+    }
+    for mut project in to_stop {
+        project.runtime.terminate();
+    }
+
+    for profile in profiles {
+        let needs_start = {
+            let state = manager
+                .lock()
+                .map_err(|_| "Runtime manager is unavailable")?;
+            state
+                .gateway
+                .as_ref()
+                .is_some_and(|session| !session.projects.contains_key(&profile.id))
+        };
+        if !needs_start {
+            continue;
+        }
+        let project_log_dir = data.join("logs").join("projects").join(&profile.id);
+        let project = spawn_project_runtime(
+            profile,
+            &project_log_dir,
+            resolved.clone(),
+            &data.join("state"),
+            profile.runtime.local_port,
+        )?;
+        let mut state = manager
+            .lock()
+            .map_err(|_| "Runtime manager is unavailable")?;
+        let session = state
+            .gateway
+            .as_mut()
+            .ok_or("Gateway stopped during reconciliation.")?;
+        session.projects.insert(profile.id.clone(), project);
+    }
+
+    let state = manager
+        .lock()
+        .map_err(|_| "Runtime manager is unavailable")?;
+    let session = state
+        .gateway
+        .as_ref()
+        .ok_or("Gateway stopped during reconciliation.")?;
+    write_gateway_registry(&registry_path, profiles, &session.projects)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn start_workspace(
     manager: &Arc<Mutex<RuntimeManager>>,
     profile: &WorkspaceProfile,
@@ -314,6 +667,7 @@ pub fn start_workspace(
     Ok(state.status(profile))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn stop_workspace(
     manager: &Arc<Mutex<RuntimeManager>>,
     profile: &WorkspaceProfile,
@@ -329,6 +683,7 @@ pub fn stop_workspace(
 }
 
 pub fn stop_all_workspaces(manager: &Arc<Mutex<RuntimeManager>>) -> Result<(), String> {
+    stop_gateway_processes(manager)?;
     let requests = {
         let mut state = manager
             .lock()
@@ -414,6 +769,375 @@ fn finish_stop(manager: &Arc<Mutex<RuntimeManager>>, request: StopRequest) -> Re
     Ok(())
 }
 
+fn project_runtime_fingerprint(profile: &WorkspaceProfile) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    profile.path.hash(&mut hasher);
+    profile.runtime.permission_mode.hash(&mut hasher);
+    profile.runtime.file_access_scope.hash(&mut hasher);
+    profile.runtime.allowed_paths.hash(&mut hasher);
+    for variable in &profile.runtime.environment_variables {
+        variable.name.hash(&mut hasher);
+        variable.value.hash(&mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
+}
+
+fn free_project_port(excluded: u16) -> Result<u16, String> {
+    for _ in 0..16 {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .map_err(|error| format!("Could not allocate a project runtime port: {error}"))?;
+        let port = listener
+            .local_addr()
+            .map_err(|error| error.to_string())?
+            .port();
+        drop(listener);
+        if port != excluded {
+            return Ok(port);
+        }
+    }
+    Err("Could not allocate a project runtime port distinct from the Gateway port.".into())
+}
+
+fn spawn_project_runtime(
+    profile: &WorkspaceProfile,
+    log_dir: &Path,
+    resolved: (PathBuf, Vec<String>),
+    runtime_state_root: &Path,
+    gateway_port: u16,
+) -> Result<ManagedProjectRuntime, String> {
+    let port = free_project_port(gateway_port)?;
+    fs::create_dir_all(log_dir).map_err(|error| error.to_string())?;
+    let (program, prefix) = resolved;
+    let mut command = Command::new(program);
+    command
+        .args(prefix)
+        .args([
+            "--workspace",
+            &profile.path,
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "--permission-mode",
+            &profile.runtime.permission_mode,
+            "--shell-env-inherit",
+            "all",
+        ])
+        .arg("--state-root")
+        .arg(runtime_state_root);
+    for root in file_access_roots(profile) {
+        command.arg("--file-access-root").arg(root);
+    }
+    command
+        .current_dir(&profile.path)
+        .env("PATH", effective_path());
+    if let Some(ssh_auth_sock) = effective_ssh_auth_sock() {
+        command.env("SSH_AUTH_SOCK", ssh_auth_sock);
+    }
+    for name in [
+        "CODING_TOOLS_MCP_AUTH_MODE",
+        "CODING_TOOLS_MCP_AUTH_TOKEN",
+        "CODING_TOOLS_MCP_OAUTH_MODE",
+        "CODING_TOOLS_MCP_OAUTH_PASSWORD",
+        "CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET",
+        "CODING_TOOLS_MCP_SERVER_URL",
+        "CODING_TOOLS_MCP_SERVER_NAME",
+    ] {
+        command.env_remove(name);
+    }
+    for variable in runtime_environment_variables(profile) {
+        command.env(variable.name.trim(), &variable.value);
+    }
+    command.env(
+        "CODING_TOOLS_MCP_SERVER_NAME",
+        format!("project-{}", profile.id),
+    );
+    let stdout = File::create(log_dir.join("stdout.log")).map_err(|error| error.to_string())?;
+    let stderr = File::create(log_dir.join("stderr.log")).map_err(|error| error.to_string())?;
+    command.stdout(stdout).stderr(stderr).stdin(Stdio::null());
+    configure_process_group(&mut command);
+    let child = command
+        .spawn()
+        .map_err(|error| format!("Could not start project runtime {}: {error}", profile.name))?;
+    let group_id = child.id();
+    let mut runtime = ManagedChild { child, group_id };
+    if let Err(error) = wait_for_port(port, &mut runtime, START_TIMEOUT, &AtomicBool::new(false)) {
+        runtime.terminate();
+        return Err(error);
+    }
+    Ok(ManagedProjectRuntime {
+        runtime,
+        port,
+        fingerprint: project_runtime_fingerprint(profile),
+    })
+}
+
+fn write_gateway_registry(
+    path: &Path,
+    profiles: &[WorkspaceProfile],
+    projects: &HashMap<String, ManagedProjectRuntime>,
+) -> Result<(), String> {
+    let entries = profiles
+        .iter()
+        .filter_map(|profile| {
+            projects
+                .get(&profile.id)
+                .map(|project| GatewayRegistryProject {
+                    id: profile.id.clone(),
+                    name: profile.name.clone(),
+                    path: profile.path.clone(),
+                    endpoint: format!("http://127.0.0.1:{}{MCP_ENDPOINT_PATH}", project.port),
+                })
+        })
+        .collect::<Vec<_>>();
+    let generation = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_millis();
+    let document = GatewayRegistryDocument {
+        generation,
+        default_project_id: entries.first().map(|entry| entry.id.clone()),
+        projects: entries,
+    };
+    let parent = path.parent().ok_or("Invalid Gateway registry path.")?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let temporary = parent.join(format!(
+        ".{}.tmp-{}",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id()
+    ));
+    let mut file = File::create(&temporary).map_err(|error| error.to_string())?;
+    file.write_all(
+        serde_json::to_string_pretty(&document)
+            .map_err(|error| error.to_string())?
+            .as_bytes(),
+    )
+    .map_err(|error| error.to_string())?;
+    file.sync_all().map_err(|error| error.to_string())?;
+    fs::rename(&temporary, path).map_err(|error| error.to_string())
+}
+
+fn spawn_gateway_runtime(
+    profile: &WorkspaceProfile,
+    control_dir: &Path,
+    registry_path: &Path,
+    log_dir: &Path,
+    resolved: (PathBuf, Vec<String>),
+    runtime_state_root: &Path,
+    server_name: &str,
+) -> Result<ManagedChild, String> {
+    let (program, prefix) = resolved;
+    let mut command = Command::new(program);
+    command
+        .args(prefix)
+        .args([
+            "--workspace",
+            &control_dir.to_string_lossy(),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &profile.runtime.local_port.to_string(),
+            "--permission-mode",
+            "trusted",
+            "--shell-env-inherit",
+            "all",
+            "--project-gateway",
+            "--project-registry-only",
+            "--project-registry-file",
+            &registry_path.to_string_lossy(),
+        ])
+        .arg("--state-root")
+        .arg(runtime_state_root);
+    command
+        .current_dir(control_dir)
+        .env("PATH", effective_path());
+    if let Some(ssh_auth_sock) = effective_ssh_auth_sock() {
+        command.env("SSH_AUTH_SOCK", ssh_auth_sock);
+    }
+    for name in [
+        "CODING_TOOLS_MCP_AUTH_MODE",
+        "CODING_TOOLS_MCP_AUTH_TOKEN",
+        "CODING_TOOLS_MCP_OAUTH_MODE",
+        "CODING_TOOLS_MCP_OAUTH_PASSWORD",
+        "CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET",
+        "CODING_TOOLS_MCP_SERVER_URL",
+        "CODING_TOOLS_MCP_SERVER_NAME",
+    ] {
+        command.env_remove(name);
+    }
+    command.env("CODING_TOOLS_MCP_SERVER_NAME", server_name);
+    match profile.auth.r#type.as_str() {
+        "oauth" => {
+            command
+                .arg("--oauth-mode")
+                .env(
+                    "CODING_TOOLS_MCP_OAUTH_PASSWORD",
+                    &profile.auth.oauth_password,
+                )
+                .env(
+                    "CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET",
+                    &profile.auth.oauth_token_secret,
+                );
+            if profile.tunnel.r#type == "cloudflare" && profile.tunnel.cloudflare_mode == "named" {
+                command.env("CODING_TOOLS_MCP_SERVER_URL", profile.public_url());
+            }
+        }
+        "bearer" => {
+            command.arg("--auth-token").arg(&profile.auth.bearer_token);
+        }
+        _ => return Err("Unknown authentication type.".into()),
+    }
+    let stdout = File::create(log_dir.join("stdout.log")).map_err(|error| error.to_string())?;
+    let stderr = File::create(log_dir.join("stderr.log")).map_err(|error| error.to_string())?;
+    command.stdout(stdout).stderr(stderr).stdin(Stdio::null());
+    configure_process_group(&mut command);
+    let child = command
+        .spawn()
+        .map_err(|error| format!("Could not start shared Coding Tools MCP Gateway: {error}"))?;
+    let group_id = child.id();
+    Ok(ManagedChild { child, group_id })
+}
+
+fn start_gateway_session(
+    profiles: &[WorkspaceProfile],
+    gateway_profile: &WorkspaceProfile,
+    registry_path: &Path,
+    log_dir: &Path,
+    resolved: (PathBuf, Vec<String>),
+    data_dir: &Path,
+    cancelled: &AtomicBool,
+) -> Result<ManagedGatewaySession, String> {
+    if cancelled.load(Ordering::Relaxed) {
+        return Err("Gateway startup was cancelled.".into());
+    }
+    if port_is_listening(gateway_profile.runtime.local_port) {
+        return Err(format!(
+            "Gateway local port {} is already in use. Stop the existing process or choose another port.",
+            gateway_profile.runtime.local_port
+        ));
+    }
+    let mut projects: HashMap<String, ManagedProjectRuntime> = HashMap::new();
+    for profile in profiles {
+        if cancelled.load(Ordering::Relaxed) {
+            for (_, mut project) in projects {
+                project.runtime.terminate();
+            }
+            return Err("Gateway startup was cancelled.".into());
+        }
+        let project_log_dir = data_dir.join("logs").join("projects").join(&profile.id);
+        match spawn_project_runtime(
+            profile,
+            &project_log_dir,
+            resolved.clone(),
+            &data_dir.join("state"),
+            gateway_profile.runtime.local_port,
+        ) {
+            Ok(project) => {
+                projects.insert(profile.id.clone(), project);
+            }
+            Err(error) => {
+                for (_, mut project) in projects {
+                    project.runtime.terminate();
+                }
+                return Err(error);
+            }
+        }
+    }
+    if let Err(error) = write_gateway_registry(registry_path, profiles, &projects) {
+        for (_, mut project) in projects {
+            project.runtime.terminate();
+        }
+        return Err(error);
+    }
+
+    let control_dir = data_dir.join("gateway-control");
+    fs::create_dir_all(&control_dir).map_err(|error| error.to_string())?;
+    fs::create_dir_all(log_dir).map_err(|error| error.to_string())?;
+    let server_name = new_server_name(&gateway_profile.runtime.server_name_prefix);
+    let mut runtime = match spawn_gateway_runtime(
+        gateway_profile,
+        &control_dir,
+        registry_path,
+        log_dir,
+        resolved.clone(),
+        &data_dir.join("state"),
+        &server_name,
+    ) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            for (_, mut project) in projects {
+                project.runtime.terminate();
+            }
+            return Err(error);
+        }
+    };
+    if let Err(error) = wait_for_port(
+        gateway_profile.runtime.local_port,
+        &mut runtime,
+        START_TIMEOUT,
+        cancelled,
+    ) {
+        runtime.terminate();
+        for (_, mut project) in projects {
+            project.runtime.terminate();
+        }
+        return Err(error);
+    }
+
+    let public_url = Arc::new(Mutex::new(gateway_profile.public_url()));
+    let mut tunnel_profile = gateway_profile.clone();
+    tunnel_profile.path = control_dir.to_string_lossy().into_owned();
+    let tunnel = match tunnel_profile.tunnel.r#type.as_str() {
+        "frp" => None,
+        "cloudflare" => match spawn_cloudflare(
+            &tunnel_profile,
+            log_dir,
+            Arc::clone(&public_url),
+            data_dir,
+            cancelled,
+        ) {
+            Ok(child) => Some(child),
+            Err(error) => {
+                runtime.terminate();
+                for (_, mut project) in projects {
+                    project.runtime.terminate();
+                }
+                return Err(error);
+            }
+        },
+        _ => {
+            runtime.terminate();
+            for (_, mut project) in projects {
+                project.runtime.terminate();
+            }
+            return Err("Only Cloudflare and externally managed FRP tunnels are supported.".into());
+        }
+    };
+    Ok(ManagedGatewaySession {
+        gateway: ManagedSession {
+            runtime,
+            tunnel,
+            public_url,
+            server_name,
+        },
+        projects,
+        registry_path: registry_path.to_path_buf(),
+        resolved_runtime: resolved,
+    })
+}
+
+fn terminate_gateway_session(session: &mut ManagedGatewaySession) {
+    if let Some(tunnel) = session.gateway.tunnel.as_mut() {
+        tunnel.terminate();
+    }
+    session.gateway.runtime.terminate();
+    for project in session.projects.values_mut() {
+        project.runtime.terminate();
+    }
+    session.projects.clear();
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 fn start_session(
     profile: &WorkspaceProfile,
     log_dir: &Path,
@@ -436,7 +1160,7 @@ fn start_session(
         profile,
         log_dir,
         resolved,
-        &data_dir.join("workflow"),
+        &data_dir.join("state"),
         &server_name,
     )?;
     if let Err(error) = wait_for_port(
@@ -497,7 +1221,12 @@ pub fn prepare_runtime(
         (
             state.resource_dir.clone(),
             state.data_dir.clone(),
-            !state.sessions.is_empty() || !state.preparing.is_empty() || !state.stopping.is_empty(),
+            state.gateway.is_some()
+                || state.gateway_preparing.is_some()
+                || state.gateway_stopping.is_some()
+                || !state.sessions.is_empty()
+                || !state.preparing.is_empty()
+                || !state.stopping.is_empty(),
         )
     };
     if repair && active {
@@ -524,6 +1253,38 @@ pub fn prepare_runtime(
     ))
 }
 
+pub fn read_gateway_project_logs(
+    manager: &Arc<Mutex<RuntimeManager>>,
+    profile_id: &str,
+) -> Result<LogBundle, String> {
+    let root = manager
+        .lock()
+        .map_err(|_| "Runtime manager is unavailable")?
+        .data_dir
+        .join("logs");
+    let gateway = read_logs(&root.join("gateway"))?;
+    let project = read_logs(&root.join("projects").join(profile_id))?;
+    Ok(LogBundle {
+        cloudflared: gateway.cloudflared,
+        stdout: format!(
+            "=== Shared Gateway ===\n{}\n\n=== Project Runtime ===\n{}",
+            gateway.stdout, project.stdout
+        ),
+        stderr: format!(
+            "=== Shared Gateway ===\n{}\n\n=== Project Runtime ===\n{}",
+            gateway.stderr, project.stderr
+        ),
+    })
+}
+
+pub fn runtime_logs_root(manager: &Arc<Mutex<RuntimeManager>>) -> Result<PathBuf, String> {
+    Ok(manager
+        .lock()
+        .map_err(|_| "Runtime manager is unavailable")?
+        .data_dir
+        .join("logs"))
+}
+
 pub fn read_logs(log_dir: &Path) -> Result<LogBundle, String> {
     Ok(LogBundle {
         cloudflared: tail(&log_dir.join("cloudflared.log"))?,
@@ -532,11 +1293,12 @@ pub fn read_logs(log_dir: &Path) -> Result<LogBundle, String> {
     })
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn spawn_runtime(
     profile: &WorkspaceProfile,
     log_dir: &Path,
     resolved: (PathBuf, Vec<String>),
-    workflow_state_root: &Path,
+    runtime_state_root: &Path,
     server_name: &str,
 ) -> Result<ManagedChild, String> {
     let (program, prefix) = resolved;
@@ -554,11 +1316,9 @@ fn spawn_runtime(
             &profile.runtime.permission_mode,
             "--shell-env-inherit",
             "all",
-            "--enable-workflow-tools",
-            "--defer-workflow-tools",
         ])
         .arg("--state-root")
-        .arg(workflow_state_root);
+        .arg(runtime_state_root);
     for root in file_access_roots(profile) {
         command.arg("--file-access-root").arg(root);
     }
@@ -1212,8 +1972,99 @@ while True:
                 shutdown(&manager).unwrap();
                 manager = Arc::new(Mutex::new(RuntimeManager::new()));
             }
-            assert!(!port_is_listening(port));
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                if !port_is_listening(port) {
+                    thread::sleep(Duration::from_millis(100));
+                    if !port_is_listening(port) {
+                        break;
+                    }
+                }
+                assert!(Instant::now() < deadline, "listener did not stay closed");
+                thread::sleep(Duration::from_millis(25));
+            }
         }
+    }
+
+    #[test]
+    fn shared_gateway_owns_one_public_port_and_isolated_project_ports() {
+        let temporary = tempfile::tempdir().unwrap();
+        let first_root = temporary.path().join("first");
+        let second_root = temporary.path().join("second");
+        fs::create_dir_all(&first_root).unwrap();
+        fs::create_dir_all(&second_root).unwrap();
+        let script = temporary.path().join("listener.py");
+        fs::write(
+            &script,
+            r#"
+import argparse, socket
+parser = argparse.ArgumentParser()
+parser.add_argument('--port', type=int, required=True)
+args, _ = parser.parse_known_args()
+listener = socket.socket()
+listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+listener.bind(('127.0.0.1', args.port))
+listener.listen(64)
+while True:
+    connection, _ = listener.accept()
+    connection.close()
+"#,
+        )
+        .unwrap();
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let gateway_port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let mut first =
+            WorkspaceProfile::new(first_root.to_string_lossy().into_owned(), gateway_port).unwrap();
+        let mut second =
+            WorkspaceProfile::new(second_root.to_string_lossy().into_owned(), gateway_port)
+                .unwrap();
+        for profile in [&mut first, &mut second] {
+            profile.tunnel.r#type = "frp".into();
+            profile.tunnel.frp_server = "example.test".into();
+            profile.tunnel.frp_subdomain = "gateway".into();
+        }
+        let profiles = vec![first.clone(), second.clone()];
+        let registry_path = temporary.path().join("project-registry.json");
+        let data = temporary.path().join("data");
+        fs::create_dir_all(&data).unwrap();
+        let mut session = start_gateway_session(
+            &profiles,
+            &first,
+            &registry_path,
+            &temporary.path().join("gateway-logs"),
+            (
+                which::which("python3").unwrap(),
+                vec![script.to_string_lossy().into_owned()],
+            ),
+            &data,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(port_is_listening(gateway_port));
+        assert_eq!(session.projects.len(), 2);
+        let first_port = session.projects[&first.id].port;
+        let second_port = session.projects[&second.id].port;
+        assert_ne!(first_port, gateway_port);
+        assert_ne!(second_port, gateway_port);
+        assert_ne!(first_port, second_port);
+        assert!(port_is_listening(first_port));
+        assert!(port_is_listening(second_port));
+        let registry: serde_json::Value =
+            serde_json::from_slice(&fs::read(&registry_path).unwrap()).unwrap();
+        assert_eq!(registry["projects"].as_array().unwrap().len(), 2);
+        assert!(registry["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["endpoint"]
+                .as_str()
+                .unwrap()
+                .starts_with("http://127.0.0.1:")));
+        terminate_gateway_session(&mut session);
+        assert!(!port_is_listening(gateway_port));
+        assert!(!port_is_listening(first_port));
+        assert!(!port_is_listening(second_port));
     }
 
     #[test]

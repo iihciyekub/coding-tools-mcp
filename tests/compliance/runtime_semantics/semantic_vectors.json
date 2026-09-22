@@ -61,7 +61,7 @@
       "name": "long_running_process_returns_command_id",
       "tool": "exec_command",
       "arguments": {
-        "cmd": "python repl.py",
+        "cmd": "python3 repl.py",
         "tty": true,
         "timeout_ms": 1000
       },

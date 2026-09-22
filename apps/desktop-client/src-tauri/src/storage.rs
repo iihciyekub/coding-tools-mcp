@@ -1,4 +1,4 @@
-use crate::models::{user_home_directory, EnvironmentVariable, WorkspaceProfile};
+use crate::models::{user_home_directory, EnvironmentVariable, GatewayConfig, WorkspaceProfile};
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -24,7 +24,40 @@ fn storage_directory_name() -> &'static str {
 struct ProfileDocument {
     #[serde(default)]
     language: String,
+    #[serde(default)]
+    gateway: Option<GatewayConfig>,
+    #[serde(default)]
     profiles: Vec<WorkspaceProfile>,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+struct GatewaySecrets {
+    #[serde(default)]
+    cloudflare_token: String,
+    #[serde(default)]
+    oauth_password: String,
+    #[serde(default)]
+    oauth_token_secret: String,
+    #[serde(default)]
+    bearer_token: String,
+}
+
+impl GatewaySecrets {
+    fn from_gateway(gateway: &GatewayConfig) -> Self {
+        Self {
+            cloudflare_token: gateway.tunnel.cloudflare_token.clone(),
+            oauth_password: gateway.auth.oauth_password.clone(),
+            oauth_token_secret: gateway.auth.oauth_token_secret.clone(),
+            bearer_token: gateway.auth.bearer_token.clone(),
+        }
+    }
+
+    fn apply(self, gateway: &mut GatewayConfig) {
+        gateway.tunnel.cloudflare_token = self.cloudflare_token;
+        gateway.auth.oauth_password = self.oauth_password;
+        gateway.auth.oauth_token_secret = self.oauth_token_secret;
+        gateway.auth.bearer_token = self.bearer_token;
+    }
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -64,7 +97,9 @@ impl ProfileSecrets {
 pub struct ProfileStore {
     home: PathBuf,
     language: String,
+    gateway: GatewayConfig,
     profiles: Vec<WorkspaceProfile>,
+    migration_warning: Option<String>,
 }
 
 impl ProfileStore {
@@ -91,6 +126,12 @@ impl ProfileStore {
         for profile in &mut document.profiles {
             if profile.auth.r#type == "noauth" {
                 profile.auth.r#type = "oauth".into();
+                normalized_legacy_profiles = true;
+            }
+            if profile.runtime.permission_mode != "host"
+                && profile.runtime.permission_mode != "trusted"
+            {
+                profile.runtime.permission_mode = "trusted".into();
                 normalized_legacy_profiles = true;
             }
         }
@@ -138,12 +179,53 @@ impl ProfileStore {
         if migrated_all {
             let _ = fs::remove_file(home.join("secrets.json"));
         }
+        let migrating_gateway = document.gateway.is_none();
+        let mut gateway = document.gateway.take().unwrap_or_else(|| {
+            document
+                .profiles
+                .first()
+                .map(GatewayConfig::from_workspace_profile)
+                .unwrap_or_default()
+        });
+        let migration_warning = if migrating_gateway
+            && document
+                .profiles
+                .iter()
+                .skip(1)
+                .any(|profile| gateway_settings_differ(&gateway, profile))
+        {
+            Some(
+                "Legacy workspaces used different MCP/Tunnel settings. The first workspace was chosen as the shared Gateway configuration; review Gateway settings before the next start."
+                    .to_string(),
+            )
+        } else {
+            None
+        };
+        match load_gateway_secrets() {
+            Ok(Some(secrets)) => secrets.apply(&mut gateway),
+            Ok(None) => {
+                save_gateway_secrets(&gateway)?;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Could not load Gateway secrets from the system keychain: {error}"
+                ));
+            }
+        }
+        if gateway.repair_oauth_token_secret() {
+            save_gateway_secrets(&gateway)?;
+        }
+        for profile in &mut document.profiles {
+            gateway.apply_to_workspace_profile(profile);
+        }
         let store = Self {
             home,
             language: normalize_language(&document.language).to_string(),
+            gateway,
             profiles: document.profiles,
+            migration_warning,
         };
-        if normalized_legacy_profiles {
+        if normalized_legacy_profiles || migrating_gateway {
             store.persist()?;
         }
         Ok(store)
@@ -159,7 +241,26 @@ impl ProfileStore {
     }
 
     pub fn profiles(&self) -> Vec<WorkspaceProfile> {
-        self.profiles.clone()
+        self.profiles
+            .iter()
+            .cloned()
+            .map(|mut profile| {
+                self.gateway.apply_to_workspace_profile(&mut profile);
+                profile
+            })
+            .collect()
+    }
+
+    pub fn gateway(&self) -> GatewayConfig {
+        self.gateway.clone()
+    }
+
+    pub fn migration_warning(&self) -> Option<String> {
+        self.migration_warning.clone()
+    }
+
+    pub fn project_registry_path(&self) -> PathBuf {
+        self.home.join("project-registry.json")
     }
 
     pub fn language(&self) -> &str {
@@ -176,16 +277,18 @@ impl ProfileStore {
             .iter()
             .find(|profile| profile.id == id)
             .cloned()
+            .map(|mut profile| {
+                self.gateway.apply_to_workspace_profile(&mut profile);
+                profile
+            })
     }
 
     pub fn prepare_for_start(&mut self, id: &str) -> Result<WorkspaceProfile, String> {
-        let candidate = self
-            .profiles
-            .iter()
-            .find(|profile| profile.id == id)
-            .cloned()
-            .ok_or("Workspace profile was not found.")?;
+        let candidate = self.get(id).ok_or("Workspace profile was not found.")?;
         validate_profile_uniqueness(&self.profiles, &candidate)?;
+        if self.gateway.repair_oauth_token_secret() {
+            save_gateway_secrets(&self.gateway)?;
+        }
         let profile = self
             .profiles
             .iter_mut()
@@ -194,21 +297,17 @@ impl ProfileStore {
         if profile.auth.repair_oauth_token_secret() {
             save_secrets(profile)?;
         }
-        Ok(profile.clone())
+        let mut prepared = profile.clone();
+        self.gateway.apply_to_workspace_profile(&mut prepared);
+        Ok(prepared)
     }
 
     pub fn next_port(&self) -> u16 {
-        (28766..=65535)
-            .find(|port| {
-                !self
-                    .profiles
-                    .iter()
-                    .any(|profile| profile.runtime.local_port == *port)
-            })
-            .unwrap_or(28766)
+        self.gateway.local_port
     }
 
-    pub fn insert(&mut self, profile: WorkspaceProfile) -> Result<WorkspaceProfile, String> {
+    pub fn insert(&mut self, mut profile: WorkspaceProfile) -> Result<WorkspaceProfile, String> {
+        self.gateway.apply_to_workspace_profile(&mut profile);
         profile.validate()?;
         if self.profiles.iter().any(|item| item.id == profile.id) {
             return Err("Workspace profile already exists.".into());
@@ -228,9 +327,13 @@ impl ProfileStore {
         Ok(profile)
     }
 
-    pub fn update(&mut self, profile: WorkspaceProfile) -> Result<WorkspaceProfile, String> {
+    pub fn update(&mut self, mut profile: WorkspaceProfile) -> Result<WorkspaceProfile, String> {
         profile.validate()?;
         validate_profile_uniqueness(&self.profiles, &profile)?;
+        let gateway = GatewayConfig::from_workspace_profile(&profile);
+        save_gateway_secrets(&gateway)?;
+        self.gateway = gateway;
+        self.gateway.apply_to_workspace_profile(&mut profile);
         let target = self
             .profiles
             .iter_mut()
@@ -268,6 +371,7 @@ impl ProfileStore {
     fn persist(&self) -> Result<(), String> {
         let mut public_profiles = self.profiles.clone();
         for profile in &mut public_profiles {
+            self.gateway.apply_to_workspace_profile(profile);
             profile.tunnel.cloudflare_token.clear();
             profile.auth.oauth_password.clear();
             profile.auth.oauth_token_secret.clear();
@@ -276,10 +380,16 @@ impl ProfileStore {
                 variable.value.clear();
             }
         }
+        let mut public_gateway = self.gateway.clone();
+        public_gateway.tunnel.cloudflare_token.clear();
+        public_gateway.auth.oauth_password.clear();
+        public_gateway.auth.oauth_token_secret.clear();
+        public_gateway.auth.bearer_token.clear();
         atomic_json(
             &self.home.join("profiles.json"),
             &ProfileDocument {
                 language: self.language.clone(),
+                gateway: Some(public_gateway),
                 profiles: public_profiles,
             },
         )
@@ -329,31 +439,51 @@ fn validate_profile_uniqueness(
         .iter()
         .filter(|existing| existing.id != candidate.id)
     {
-        if existing.runtime.local_port == candidate.runtime.local_port {
-            return Err("Another workspace already uses this local port.".into());
-        }
-        let both_named = existing.tunnel.r#type == "cloudflare"
-            && existing.tunnel.cloudflare_mode == "named"
-            && candidate.tunnel.r#type == "cloudflare"
-            && candidate.tunnel.cloudflare_mode == "named";
-        if !both_named {
-            continue;
-        }
-        let existing_url = existing.tunnel.public_url.trim_end_matches('/');
-        let candidate_url = candidate.tunnel.public_url.trim_end_matches('/');
-        if existing_url.eq_ignore_ascii_case(candidate_url) {
-            return Err("Another workspace already uses this Cloudflare public URL.".into());
-        }
-        let existing_token = existing.tunnel.cloudflare_token.trim();
-        let candidate_token = candidate.tunnel.cloudflare_token.trim();
-        if !candidate_token.is_empty() && existing_token == candidate_token {
-            return Err(
-                "Another workspace already uses this Cloudflare Tunnel Token. Create a separate named tunnel for this workspace."
-                    .into(),
-            );
+        let existing_path =
+            std::fs::canonicalize(&existing.path).unwrap_or_else(|_| PathBuf::from(&existing.path));
+        let candidate_path = std::fs::canonicalize(&candidate.path)
+            .unwrap_or_else(|_| PathBuf::from(&candidate.path));
+        if existing_path == candidate_path {
+            return Err("This workspace folder has already been added.".into());
         }
     }
     Ok(())
+}
+
+fn gateway_settings_differ(gateway: &GatewayConfig, profile: &WorkspaceProfile) -> bool {
+    gateway.server_name_prefix != profile.runtime.server_name_prefix
+        || gateway.local_port != profile.runtime.local_port
+        || gateway.tunnel.r#type != profile.tunnel.r#type
+        || gateway.tunnel.domain != profile.tunnel.domain
+        || gateway.tunnel.public_url != profile.tunnel.public_url
+        || gateway.tunnel.frp_server != profile.tunnel.frp_server
+        || gateway.tunnel.frp_subdomain != profile.tunnel.frp_subdomain
+        || gateway.tunnel.cloudflare_mode != profile.tunnel.cloudflare_mode
+        || gateway.tunnel.cloudflare_token != profile.tunnel.cloudflare_token
+        || gateway.auth.r#type != profile.auth.r#type
+        || gateway.auth.oauth_password != profile.auth.oauth_password
+        || gateway.auth.oauth_token_secret != profile.auth.oauth_token_secret
+        || gateway.auth.bearer_token != profile.auth.bearer_token
+}
+
+fn save_gateway_secrets(gateway: &GatewayConfig) -> Result<(), String> {
+    let encoded = serde_json::to_string(&GatewaySecrets::from_gateway(gateway))
+        .map_err(|error| error.to_string())?;
+    Entry::new(keyring_service(), "__gateway__")
+        .map_err(|error| format!("Could not open the system keychain: {error}"))?
+        .set_password(&encoded)
+        .map_err(|error| format!("Could not save Gateway secrets to the system keychain: {error}"))
+}
+
+fn load_gateway_secrets() -> Result<Option<GatewaySecrets>, String> {
+    let entry = Entry::new(keyring_service(), "__gateway__").map_err(|error| error.to_string())?;
+    match entry.get_password() {
+        Ok(encoded) => serde_json::from_str(&encoded)
+            .map(Some)
+            .map_err(|error| error.to_string()),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 fn save_secrets(profile: &WorkspaceProfile) -> Result<(), String> {
@@ -481,7 +611,9 @@ mod tests {
         let store = ProfileStore {
             home: temporary.path().to_path_buf(),
             language: "en".into(),
+            gateway: GatewayConfig::from_workspace_profile(&profile),
             profiles: vec![profile],
+            migration_warning: None,
         };
         store.persist().unwrap();
         let saved: serde_json::Value =
@@ -503,7 +635,9 @@ mod tests {
         let store = ProfileStore {
             home: temporary.path().to_path_buf(),
             language: "en".into(),
+            gateway: GatewayConfig::default(),
             profiles: vec![],
+            migration_warning: None,
         };
         assert!(store.log_dir("../../outside").is_err());
     }
@@ -520,7 +654,9 @@ mod tests {
         let mut store = ProfileStore {
             home: temporary.path().to_path_buf(),
             language: "en".into(),
+            gateway: GatewayConfig::default(),
             profiles: vec![],
+            migration_warning: None,
         };
         store.set_language("zh-CN").unwrap();
         let saved: serde_json::Value =
@@ -537,30 +673,24 @@ mod tests {
     }
 
     #[test]
-    fn independent_workspaces_require_unique_ports_urls_and_tunnel_tokens() {
-        let root = std::env::current_dir()
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
-        let mut first = WorkspaceProfile::new(root.clone(), 28766).unwrap();
+    fn projects_share_gateway_port_url_and_tunnel_token_but_require_unique_paths() {
+        let first_root = tempfile::tempdir().unwrap();
+        let second_root = tempfile::tempdir().unwrap();
+        let mut first =
+            WorkspaceProfile::new(first_root.path().to_string_lossy().into_owned(), 28766).unwrap();
         first.tunnel.cloudflare_mode = "named".into();
         first.tunnel.public_url = "https://tax-mcp.example.com".into();
         first.tunnel.cloudflare_token = "tax-token".into();
 
-        let mut second = WorkspaceProfile::new(root, 28766).unwrap();
-        assert!(validate_profile_uniqueness(&[first.clone()], &second).is_err());
-
-        second.runtime.local_port = 28767;
+        let mut second =
+            WorkspaceProfile::new(second_root.path().to_string_lossy().into_owned(), 28766)
+                .unwrap();
         second.tunnel.cloudflare_mode = "named".into();
         second.tunnel.public_url = "https://tax-mcp.example.com/".into();
-        second.tunnel.cloudflare_token = "wos-token".into();
-        assert!(validate_profile_uniqueness(&[first.clone()], &second).is_err());
-
-        second.tunnel.public_url = "https://wos-mcp.example.com".into();
         second.tunnel.cloudflare_token = "tax-token".into();
-        assert!(validate_profile_uniqueness(&[first.clone()], &second).is_err());
+        assert!(validate_profile_uniqueness(&[first.clone()], &second).is_ok());
 
-        second.tunnel.cloudflare_token = "wos-token".into();
-        assert!(validate_profile_uniqueness(&[first], &second).is_ok());
+        second.path = first.path.clone();
+        assert!(validate_profile_uniqueness(&[first], &second).is_err());
     }
 }

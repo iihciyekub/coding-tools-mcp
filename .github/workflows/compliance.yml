@@ -78,6 +78,10 @@ jobs:
           path: |
             reports/compliance/**
             reports/benchmark/**
+            reports/dogfood/**
+            docs/dogfood/**
+          if-no-files-found: ignore
+          retention-days: 14
 
   macos-runtime-smoke:
     name: macOS runtime smoke
@@ -119,7 +123,3 @@ jobs:
             tests.test_workflow_tools.WorkflowToolTests.test_apple_workspace_metadata_and_checks_are_cli_first \
             tests.test_check_diagnostics.CheckDiagnosticsTests.test_parses_apple_toolchain_failures \
             tests.compliance.test_runtime_helpers.RuntimeHelperTests.test_runtime_doctor_reports_python_alias_and_network_policy
-            reports/dogfood/**
-            docs/dogfood/**
-          if-no-files-found: ignore
-          retention-days: 14

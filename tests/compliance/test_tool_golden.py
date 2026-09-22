@@ -258,7 +258,7 @@ class ExecAndGitGoldenTests(ComplianceTestCase):
             self.assert_tool_success(client.call_tool("apply_patch", {"patch": patch}))
             pytest = client.call_tool(
                 "exec_command",
-                {"cmd": "python -m pytest tests", "timeout_ms": 10000, "max_output_bytes": 20000},
+                {"cmd": "python3 -m pytest tests", "timeout_ms": 10000, "max_output_bytes": 20000},
             )
             self.assertEqual(self.assert_tool_success(pytest).get("exit_code"), 0)
 
@@ -309,7 +309,7 @@ class ExecAndGitGoldenTests(ComplianceTestCase):
         with self.session_for_fixture("long-running-project") as (_workspace, client):
             started = client.call_tool(
                 "exec_command",
-                {"cmd": "python repl.py", "tty": True, "timeout_ms": 1000, "max_output_bytes": 4096},
+                {"cmd": "python3 repl.py", "tty": True, "timeout_ms": 1000, "max_output_bytes": 4096},
             )
             payload = self.assert_tool_success(started)
             command_id = payload.get("command_id")

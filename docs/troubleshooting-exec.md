@@ -81,5 +81,6 @@ ssh -T git@your-git-host.example
 On macOS, load a passphrase-protected key into Keychain-backed ssh-agent with
 `ssh-add --apple-use-keychain ~/.ssh/<private-key>`. Restart a GUI launcher if it
 was opened before the correct agent socket or toolchain environment existed.
-`check_exec_environment` reports the environment scope and boolean SSH/Git
-integration availability without returning credential paths or contents.
+`server_info` reports the environment scope and boolean SSH/Git integration
+availability without returning credential paths or contents. `runtime_doctor`
+adds non-destructive macOS toolchain diagnostics when deeper inspection is needed.

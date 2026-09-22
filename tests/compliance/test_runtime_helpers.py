@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import builtins
-import json
 import os
 import signal
 import shutil
@@ -383,8 +382,6 @@ class RuntimeHelperTests(unittest.TestCase):
                     home,
                     permission_mode="host",
                     file_access_root=home,
-                    enable_workflow_tools=True,
-                    defer_workflow_tools=True,
                     state_root=home / "state",
                 )
                 try:
@@ -821,14 +818,10 @@ class RuntimeHelperTests(unittest.TestCase):
             self.assertFalse((workspace / ".coding-tools").exists())
             self.assertFalse(runtime.runtime_dir.exists())
 
-            check = runtime.check_exec_environment({})
-            self.assertTrue(check.get("ok"))
-            self.assertEqual(check.get("runtime_dir"), str(runtime.runtime_dir))
-            self.assertEqual(check.get("cache_dir"), str(runtime.cache_dir))
             self.assertFalse((workspace / ".coding-tools").exists())
             self.assertFalse(runtime.runtime_dir.exists())
 
-    def test_server_info_and_check_exec_environment_expose_exec_state(self) -> None:
+    def test_server_info_and_runtime_doctor_expose_runtime_state(self) -> None:
         with TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             runtime = Runtime(workspace)
@@ -843,11 +836,10 @@ class RuntimeHelperTests(unittest.TestCase):
             self.assertEqual(info.get("exec_policy", {}).get("shell_expansion"), "blocked")
             self.assertEqual(info.get("exec_policy", {}).get("inline_script"), "blocked")
             self.assertEqual(info.get("exec_policy", {}).get("global_tmp_write"), "blocked")
-            check = runtime.check_exec_environment({})
-            self.assertTrue(check.get("ok"))
-            self.assertEqual(check.get("permission_mode"), "safe")
-            self.assertEqual(check.get("runtime_dir"), str(runtime.runtime_dir))
-            self.assertEqual(check.get("home"), str(runtime.command_home_dir()))
+            doctor = runtime.runtime_doctor({})
+            self.assertEqual(doctor.get("sandbox", {}).get("permission_mode"), "safe")
+            self.assertEqual(doctor.get("workspace", {}).get("path"), str(runtime.workspace.root))
+            self.assertEqual(doctor.get("network", {}).get("mode"), "deny")
 
     def test_permission_modes_apply_expected_gates(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1216,7 +1208,10 @@ Maven home: /usr/share/maven
             self.assertIn("exec_command", names)
             self.assertIn("read_file", names)
             self.assertIn("read_files", names)
-            self.assertIn("tool_search", names)
+            self.assertIn("runtime_doctor", names)
+            self.assertIn("workspace_overview", names)
+            self.assertNotIn("tool_search", names)
+            self.assertNotIn("tool_invoke", names)
             self.assertFalse(any(name.startswith("browser_") for name in names))
             self.assertFalse(any(name.startswith("chrome_") for name in names))
             self.assertFalse(any(name.startswith("app_") for name in names))
@@ -1225,91 +1220,27 @@ Maven home: /usr/share/maven
             self.assertIs(apply_patch_tool["annotations"].get("destructiveHint"), True)
             self.assertIs(apply_patch_tool["annotations"].get("readOnlyHint"), False)
 
-    def test_tool_search_only_returns_tools_exposed_by_the_runtime(self) -> None:
+    def test_tool_catalog_is_direct_and_matches_live_schemas(self) -> None:
         with TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            core = Runtime(workspace)
-            core_result = core.call_tool("tool_search", {"query": "workspace overview", "limit": 8})
-            core_names = [item["name"] for item in core_result["structuredContent"]["matches"]]
-            self.assertNotIn("workspace_overview", core_names)
-
-            workflow = Runtime(workspace, enable_workflow_tools=True)
-            workflow_result = workflow.call_tool(
-                "tool_search",
-                {"query": "workspace overview", "limit": 8, "include_schema": True},
-            )
-            matches = workflow_result["structuredContent"]["matches"]
-            self.assertEqual(matches[0]["name"], "workspace_overview")
-            self.assertIn("input_schema", matches[0])
-            core.close()
-            workflow.close()
-
-    def test_tool_search_catalog_covers_every_available_tool_with_exact_schema(self) -> None:
-        with TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            runtime = Runtime(
-                workspace,
-                enable_workflow_tools=True,
-                defer_workflow_tools=True,
-                permission_mode="host",
-            )
+            runtime = Runtime(Path(tmp), permission_mode="host")
             try:
                 schemas = server_module.input_schemas()
-                available = set(runtime._available_tool_names)
-                deferred = set(runtime._deferred_tool_names)
-                self.assertEqual(available, set(TOOL_GUIDES))
-                self.assertEqual(available, set(schemas))
+                available = set(runtime.exposed_tool_names())
+                expected = set(TOOL_GUIDES) - {"project_context"}
+                self.assertEqual(available, expected)
+                self.assertEqual(available, set(schemas) - {"project_context"})
+                guidance = runtime.tool_usage_instructions()
+                self.assertIn("there is no secondary tool-discovery workflow", guidance)
+                self.assertIn("ordinary Git writes", guidance)
                 for name in sorted(available):
                     with self.subTest(name=name):
-                        result = runtime.call_tool(
-                            "tool_search",
-                            {"query": name, "include_schema": True, "limit": 3},
-                        )
-                        self.assertFalse(result["isError"], result)
-                        matches = result["structuredContent"]["matches"]
-                        exact = next((item for item in matches if item["name"] == name), None)
-                        self.assertIsNotNone(exact, matches)
-                        assert exact is not None
-                        self.assertEqual(exact["input_schema"], schemas[name])
-                        self.assertEqual(bool(exact["deferred"]), name in deferred)
-                        self.assertTrue(str(exact["use_when"]).strip())
+                        definition = server_module.tool_definition(name)
+                        self.assertEqual(definition["inputSchema"], schemas[name])
+                        self.assertIn("Selection:", str(definition["description"]))
             finally:
                 runtime.close()
 
-    def test_deferred_workflow_tools_are_searched_and_invoked_through_gateway(self) -> None:
-        with TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            runtime = Runtime(
-                workspace,
-                enable_workflow_tools=True,
-                defer_workflow_tools=True,
-            )
-            try:
-                direct_names = set(runtime.exposed_tool_names())
-                self.assertIn("tool_invoke", direct_names)
-                self.assertNotIn("workspace_overview", direct_names)
-
-                search = runtime.call_tool("tool_search", {"query": "workspace overview"})
-                matches = search["structuredContent"]["matches"]
-                self.assertEqual(matches[0]["name"], "workspace_overview")
-                self.assertIs(matches[0]["deferred"], True)
-                self.assertEqual(matches[0]["invoke_via"], "tool_invoke")
-                self.assertIn("input_schema", matches[0])
-
-                invoked = runtime.call_tool(
-                    "tool_invoke",
-                    {"name": "workspace_overview", "arguments": {}},
-                )
-                payload = invoked["structuredContent"]
-                self.assertIs(payload["ok"], True)
-                self.assertEqual(payload["tool"], "workspace_overview")
-                self.assertIs(payload["result"]["ok"], True)
-                with self.assertRaises(server_module.JsonRpcError):
-                    runtime.call_tool("workspace_overview", {})
-            finally:
-                runtime.close()
-
-    def test_shell_snapshot_freezes_environment_until_refresh(self) -> None:
+    def test_command_environment_tracks_current_host_environment(self) -> None:
         with TemporaryDirectory() as tmp:
             runtime = Runtime(Path(tmp), shell_env_policy=ShellEnvPolicy(inherit="all"))
             try:
@@ -1318,91 +1249,22 @@ Maven home: /usr/share/maven
                     {"PATH": "/first/bin", "KEEP": "one"},
                     clear=True,
                 ):
-                    first = runtime.shell_snapshot({"tools": ["definitely-not-installed"]})
+                    first = runtime._command_env({})
                 with patch.dict(
                     server_module.os.environ,
                     {"PATH": "/second/bin", "KEEP": "two"},
                     clear=True,
                 ):
-                    frozen = runtime._command_env({})
-                    second = runtime.shell_snapshot(
-                        {"refresh": True, "tools": ["definitely-not-installed"]}
-                    )
-                    refreshed = runtime._command_env({})
+                    second = runtime._command_env({})
 
-                self.assertEqual(frozen.get("KEEP"), "one")
-                self.assertEqual(frozen.get("PATH"), "/first/bin")
-                self.assertEqual(refreshed.get("KEEP"), "two")
-                self.assertEqual(refreshed.get("PATH"), "/second/bin")
-                self.assertNotEqual(first["snapshot_id"], second["snapshot_id"])
+                self.assertEqual(first.get("KEEP"), "one")
+                self.assertEqual(first.get("PATH"), "/first/bin")
+                self.assertEqual(second.get("KEEP"), "two")
+                self.assertEqual(second.get("PATH"), "/second/bin")
             finally:
                 runtime.close()
 
-    def test_blocking_before_tool_hook_can_reject_a_tool_call(self) -> None:
-        with TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            (workspace / "sample.txt").write_text("hello\n", encoding="utf-8")
-            hooks_dir = workspace / ".agents"
-            hooks_dir.mkdir()
-            command = f'"{sys.executable}" -c "raise SystemExit(7)"'
-            (hooks_dir / "hooks.json").write_text(
-                json.dumps(
-                    {
-                        "hooks": [
-                            {
-                                "event": "before_tool",
-                                "match": "read_file",
-                                "command": command,
-                                "blocking": True,
-                            }
-                        ]
-                    }
-                ),
-                encoding="utf-8",
-            )
-            runtime = Runtime(workspace, enable_hooks=True, permission_mode="dangerous")
-            try:
-                status = runtime.call_tool("hooks_status", {})["structuredContent"]
-                self.assertTrue(status["enabled"])
-                self.assertEqual(status["rule_count"], 1)
-                result = runtime.call_tool("read_file", {"path": "sample.txt"})
-                payload = result["structuredContent"]
-                self.assertIs(result["isError"], True)
-                self.assertEqual(payload["error"]["code"], "HOOK_BLOCKED")
-            finally:
-                runtime.close()
 
-    def test_nonblocking_before_tool_hook_failure_is_returned_as_warning(self) -> None:
-        with TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            (workspace / "sample.txt").write_text("hello\n", encoding="utf-8")
-            hooks_dir = workspace / ".agents"
-            hooks_dir.mkdir()
-            command = f'"{sys.executable}" -c "raise SystemExit(7)"'
-            (hooks_dir / "hooks.json").write_text(
-                json.dumps(
-                    {
-                        "hooks": [
-                            {
-                                "event": "before_tool",
-                                "match": "read_file",
-                                "command": command,
-                                "blocking": False,
-                            }
-                        ]
-                    }
-                ),
-                encoding="utf-8",
-            )
-            runtime = Runtime(workspace, enable_hooks=True, permission_mode="dangerous")
-            try:
-                result = runtime.call_tool("read_file", {"path": "sample.txt"})
-                payload = result["structuredContent"]
-                self.assertIs(result["isError"], False)
-                self.assertEqual(payload["content"], "hello\n")
-                self.assertTrue(any("Hook 0" in warning for warning in payload.get("warnings", [])))
-            finally:
-                runtime.close()
 
     def test_read_files_batches_reads_and_returns_a_budget_continuation(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -2587,15 +2449,6 @@ class FakeReadonlyAnnotationTests(unittest.TestCase):
             result = runtime.exec_command({"cmd": "echo ran > ran.txt", "timeout_ms": 30000, "yield_time_ms": 30000})
             self.assertEqual(result.get("status"), "exited", result)
             self.assertTrue((workspace / "ran.txt").exists(), "read-only annotation must not stop execution")
-
-    def test_override_is_reported_by_check_exec_environment(self) -> None:
-        with TemporaryDirectory() as tmp:
-            runtime = Runtime(Path(tmp), permission_mode="dangerous", fake_readonly_annotations=True)
-            warnings = runtime.check_exec_environment({})["warnings"]
-            self.assertTrue(
-                any("faked as read-only" in warning for warning in warnings),
-                warnings,
-            )
 
     def test_override_requires_skip_all_permission_mode(self) -> None:
         with TemporaryDirectory() as tmp:

@@ -15,6 +15,7 @@ export const api = {
   status: (profileId: string) => invoke<RuntimeStatus>("profile_status", { profileId }),
   logs: (profileId: string) => invoke<LogBundle>("profile_logs", { profileId }),
   openLogs: (profileId: string) => invoke<void>("open_logs", { profileId }),
+  openProjectWindow: (profileId: string) => invoke<void>("open_project_window", { profileId }),
   setLanguage: (language: "en" | "zh-CN") => invoke<void>("set_language", { language }),
   pickWorkspaceFolder: () => invoke<string | null>("pick_workspace_folder"),
   pickAllowedFolder: () => invoke<string | null>("pick_allowed_folder"),

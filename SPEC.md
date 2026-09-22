@@ -1,54 +1,34 @@
 # Coding Tools MCP Spec
 
-This repository implements the `coding-tools-mcp-v0.3` runtime contract defined
-in [docs/runtime-contract-v0.4.md](docs/runtime-contract-v0.4.md).
+This repository implements the current macOS-first runtime contract defined in
+[docs/runtime-contract-v0.4.md](docs/runtime-contract-v0.4.md).
 
 ## Product boundary
 
-The server exposes coding primitives over MCP: inspect a workspace, apply
-structured patches, run and interact with commands, inspect Git, and optionally
-persist workspace-local task/checkpoint records. It is not an agent wrapper and
-does not expose accounts, personal memory, cloud tasks, web search, model
-routing, plugin installation, image generation, or subagent orchestration.
+The server exposes coding primitives over MCP: inspect a project, apply
+structured patches, run and interact with commands, inspect Git, navigate code,
+and bind a persistent gateway session to an explicit project. It is not an
+agent wrapper and does not persist plans, tasks, reviews, checkpoints, Skills,
+agent memory, or orchestration state.
 
 ## Fixed tool model
 
-There is one stable default catalog and one opt-in workflow extension selected
-at process startup. Workflow tools may also be placed behind a static deferred
-gateway selected at startup. The runtime has no dynamic `tools/list_changed`, no
-`edit_file`, and no required `open_workspace` call.
-`apply_patch` is the only direct text/source file-editing tool. Workflow Git
-operations, checkpoint restore, and workflow-state updates have separately
-specified guarded mutation semantics. `safe`, `trusted`, `dangerous`, and
-`host` are command permission policies and never alter `tools/list`.
+The implementation contains at most 32 registered MCP tools and currently has
+29. A normal project runtime exposes its enabled primitives directly in one
+stable `tools/list`; there is no secondary discovery gateway, dynamic
+`tools/list_changed`, workflow profile, `edit_file`, or required `open_workspace`
+call.
 
-The default catalog contains 28 tools when `view_image` is enabled:
+The surface is file read/search/patch, bounded command lifecycle, Git evidence,
+code navigation/diagnostics, permission requests, image inspection, project
+orientation/instructions, check discovery, and runtime diagnostics. The
+persistent HTTP Project Gateway additionally exposes `project_context`.
 
-- runtime/context: `server_info`, `check_exec_environment`, `runtime_doctor`, `hooks_status`,
-  `shell_snapshot`
-- workspace inspection: `read_file`, `read_files`, `list_dir`, `list_files`,
-  `search_text`, `tool_search`
-- mutation: `apply_patch`
-- processes: `exec_command`, `get_command`, `list_commands`, `write_stdin`,
-  `read_output`, `kill_command`
-- Git: `git_status`, `git_diff`, `git_log`, `git_show`, `git_blame`
-- policy/image: `request_permissions`, `view_image`
-- code intelligence: `code_symbols`, `code_definition`, `code_references`
-
-`view_image` can be disabled as an installation capability. All other tools are
-fixed by the selected startup configuration. `--enable-workflow-tools` adds 41
-project insight, Skills, checks, task, and checkpoint tools; see
-[tools and schemas](docs/tools-and-schemas.md) for their authoritative inventory.
-With `--defer-workflow-tools`, those 41 workflow tools are omitted from the
-direct catalog and are discovered through `tool_search` and invoked through the
-additional `tool_invoke` gateway. This yields 29 directly exposed tools while
-retaining all 70 runtime capabilities available in that startup configuration.
-
-`--enable-hooks` loads workspace-confined hook rules from `.agents/hooks.json`
-by default. Hooks run under the same command policy/sandbox as normal command
-execution and may observe `before_tool`, `after_tool`, and `tool_error` events.
-`shell_snapshot` explicitly freezes the filtered command environment and PATH
-tool resolution for subsequent commands until refreshed.
+`apply_patch` is the only direct text/source file-editing tool. Git writes,
+branches, worktrees, tests/builds, Xcode, SwiftPM, Homebrew, codesign,
+notarytool, and similar workflows use their native commands through
+`exec_command`. `safe`, `trusted`, `dangerous`, and `host` are execution
+permission policies; they do not create alternative workflow APIs.
 
 Network policy is selected at startup as `deny`, `allowlist`, or
 `unrestricted`. `allowlist` accepts exact domains and `*.example.com` patterns;
@@ -64,9 +44,9 @@ egress firewall.
   handshake era `2025-11-25` with `2025-06-18` explicitly supported. A request
   belongs to the modern era if and only if its `_meta` names that version.
 - Streamable HTTP uses `/mcp`; stdio uses newline-delimited JSON-RPC.
-- There are no sessions in either era. One `Runtime` owns the workspace and
-  serves every client of it; HTTP issues no `Mcp-Session-Id` and `DELETE /mcp`
-  returns `405`.
+- A normal single-project Runtime has no transport session. The optional
+  persistent Project Gateway uses `Mcp-Session-Id` only as an isolated
+  `session -> project` routing key; it never stores prompt or workflow state.
 - JSON-RPC batches are rejected, unimplemented logging is not advertised, and
   `notifications/cancelled` is accepted without terminating the command the
   cancelled request started — a command is stopped with `kill_command`.
@@ -103,14 +83,9 @@ resource metadata, PKCE S256, exact redirect binding, and RFC 7591 dynamic clien
 registration. Authentication admits a client to a workspace and does not
 partition it: one workspace is one trust domain, shared by every client of it.
 
-## Compatibility
+## Design rule
 
-Version 0.3 adds `2026-07-28` and removes every session. The handshake era is
-unchanged on the wire; the cwd tools, the HTTP session, and several
-`server_info` fields are not. See
-[docs/migration-0.4.md](docs/migration-0.4.md).
-
-Version 0.2 changes model-facing result text from a JSON mirror to summaries.
-Clients that parsed `content[0].text` as JSON must read `structuredContent`.
-Image base64 now appears once, in the MCP image block. Tool profiles and the
-`view_image.output` selector are removed.
+New MCP tools are added only when the model cannot reasonably obtain the same
+capability by composing existing primitives, or when a dedicated tool provides
+a material safety or structured-data advantage. Mechanical batching is useful;
+agent reasoning and workflow orchestration are not runtime responsibilities.

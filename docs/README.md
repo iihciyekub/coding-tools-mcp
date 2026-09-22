@@ -1,12 +1,12 @@
 # Documentation map
 
-The documentation keeps stable file paths for existing links, while this index provides the logical structure for humans and coding agents.
+This index is the current documentation surface. Old runtime contracts,
+migration guides, and archived workflow designs are intentionally not retained.
 
 ## Get started and connect clients
 
 - [Quickstart](quickstart.md)
 - [MCP client configuration](mcp-client-config.md)
-- [Progressive tool discovery and selection](tool-discovery.md)
 - [Remote MCP](remote-mcp.md)
 - [Docker](docker.md)
 - [Troubleshooting](troubleshooting.md)
@@ -15,8 +15,6 @@ The documentation keeps stable file paths for existing links, while this index p
 
 - [Tools and schemas](tools-and-schemas.md)
 - [Runtime contract v0.4](runtime-contract-v0.4.md)
-- [Runtime contract v0.3 (frozen)](runtime-contract-v0.3.md)
-- [Runtime contract v0.2](runtime-contract-v0.2.md)
 - [Permission modes](permission-modes.md)
 - [Telemetry](telemetry.md)
 - [Security boundary](security-boundary.md)
@@ -27,30 +25,18 @@ The documentation keeps stable file paths for existing links, while this index p
 - [Embedding](embedding.md)
 - [Exec command recipes](exec-command-recipes.md)
 - [Exec troubleshooting](troubleshooting-exec.md)
-- [Migration to 0.4](migration-0.4.md)
-- [Migration to 0.3](migration-0.3.md)
 - [Profile](profile.md)
 
 ## Engineering and evaluation
 
-- [Single-service multi-project agent specification (简体中文)](multi-project-agent-spec.md)
-- [Local Agent Capability Gateway specification (简体中文)](local-agent-capability-gateway-spec.zh-CN.md)
+- [Persistent Project Gateway specification (简体中文)](project-bound-persistent-gateway-spec.zh-CN.md)
 - [macOS Coding Agent Runtime specification (简体中文)](macos-coding-agent-runtime-spec.zh-CN.md)
-- [Optional local Web verification through existing MCP tools](browser-verification.md)
 - [CI and tests](ci-and-tests.md)
 - [Desktop release maintenance contract](desktop-release-maintenance.md)
 - [Competitive analysis](competitive-analysis.md)
 - [Dogfood](dogfood.md)
 - [SWE-bench](swe-bench.md)
 - [SWE-bench supporting material](swebench/README.md)
-
-## Historical design and investigation archives
-
-- [Coding runtime upgrade plan archive (简体中文)](archive/coding-runtime-upgrade-plan.zh-CN.md)
-- [Boundary findings archive](archive/boundary-findings.md)
-
-Compatibility entry pages remain at the former document paths so existing
-inbound links continue to resolve.
 
 ## Component-local documentation
 

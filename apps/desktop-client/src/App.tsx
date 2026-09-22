@@ -4,12 +4,12 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { api } from "./api";
 import { detectLanguage, translator, type Language } from "./i18n";
-import type { DependencyStatus, LogBundle, PermissionMode, RuntimeStatus, WorkspaceProfile } from "./types";
+import type { DependencyStatus, GatewayConfig, LogBundle, PermissionMode, RuntimeStatus, WorkspaceProfile } from "./types";
 import { publicEndpoint, workspaceHue } from "./utils";
 
 const PANEL_WIDTH = 320;
 const APP_VERSION = "0.4.2";
-type Page = "home" | "new-access" | "workspaces" | "environment" | "logs" | "settings" | "workflow" | "more";
+type Page = "home" | "new-access" | "workspaces" | "environment" | "logs" | "settings" | "approvals" | "more";
 type CopyAction = "server-name" | "server-url" | "credential" | "logs";
 type ConfirmAction = { kind: "stop"; profileId: string } | { kind: "stop-all" } | { kind: "quit" } | null;
 type WorkspaceAction = { state: "starting" | "stopping" };
@@ -20,15 +20,19 @@ const shortPath = (path: string) => path.split(/[\\/]/).filter(Boolean).slice(-2
 
 function App() {
   const panelRef = useRef<HTMLElement>(null);
+  const boundProjectId = useMemo(() => new URLSearchParams(window.location.search).get("project"), []);
+  const projectWindow = Boolean(boundProjectId);
   const [language, setLanguage] = useState<Language>(detectLanguage());
   const t = useMemo(() => translator(language), [language]);
   const [page, setPage] = useState<Page>("home");
   const [backTarget, setBackTarget] = useState<Page>("home");
   const [profiles, setProfiles] = useState<WorkspaceProfile[]>([]);
+  const [gateway, setGateway] = useState<GatewayConfig | null>(null);
+  const [migrationWarning, setMigrationWarning] = useState<string | null>(null);
   const [statuses, setStatuses] = useState<Record<string, RuntimeStatus>>({});
   const [workspaceActions, setWorkspaceActions] = useState<Record<string, WorkspaceAction>>({});
   const workspaceActionsRef = useRef<Record<string, WorkspaceAction>>({});
-  const [workflow, setWorkflow] = useState<Awaited<ReturnType<typeof api.snapshot>>["workflow"]>({});
+  const [runtimeState, setRuntimeState] = useState<Awaited<ReturnType<typeof api.snapshot>>["runtime_state"]>({});
   const [dependencies, setDependencies] = useState<DependencyStatus>({ uv: false, cloudflared: false, runtime_ready: false, runtime_version: null });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selectedIdRef = useRef<string | null>(null);
@@ -58,9 +62,9 @@ function App() {
   const stopping = status?.state === "stopping";
   const running = Boolean(status?.pid) || starting || stopping;
   const serverUrl = selected && status?.state === "running" ? publicEndpoint(selected, status.public_url) : "";
-  const credentialLabel = selected?.auth.type === "bearer" ? "Bearer Token" : t("OAuth authorization passcode");
-  const credential = selected?.auth.type === "bearer" ? selected.auth.bearer_token : selected?.auth.oauth_password ?? "";
-  const selectedWorkflow = selected ? workflow[selected.id] : undefined;
+  const credentialLabel = gateway?.auth.type === "bearer" ? "Bearer Token" : t("OAuth authorization passcode");
+  const credential = gateway?.auth.type === "bearer" ? gateway.auth.bearer_token : gateway?.auth.oauth_password ?? "";
+  const selectedRuntimeState = selected ? runtimeState[selected.id] : undefined;
   const allowedFolderCount = selected?.runtime.allowed_paths.length ?? 0;
   const environmentReady = dependencies.runtime_ready && dependencies.cloudflared;
   const activeWorkspaceCount = profiles.reduce((count, profile) => {
@@ -74,18 +78,25 @@ function App() {
       const snapshot = await api.snapshot();
       if (sequence !== refreshSequenceRef.current) return;
       setLanguage(snapshot.language);
+      setGateway(snapshot.gateway);
+      setMigrationWarning(snapshot.migration_warning);
       setProfiles(snapshot.profiles);
       setStatuses(snapshot.statuses);
-      setWorkflow(snapshot.workflow);
+      setRuntimeState(snapshot.runtime_state);
       setDependencies(snapshot.dependencies);
-      if (!snapshot.profiles.length) setPage("new-access");
-      setSelectedId((current) => keepSelection && current && snapshot.profiles.some((profile) => profile.id === current) ? current : snapshot.profiles[0]?.id ?? null);
+      if (!snapshot.profiles.length && !projectWindow) setPage("new-access");
+      setSelectedId((current) => {
+        if (boundProjectId) {
+          return snapshot.profiles.some((profile) => profile.id === boundProjectId) ? boundProjectId : null;
+        }
+        return keepSelection && current && snapshot.profiles.some((profile) => profile.id === current) ? current : snapshot.profiles[0]?.id ?? null;
+      });
     } catch (reason) { setError(String(reason)); }
-  }, []);
+  }, [boundProjectId, projectWindow]);
 
   useEffect(() => { void refresh(false); const timer = window.setInterval(() => void refresh(), 2500); return () => window.clearInterval(timer); }, [refresh]);
   useEffect(() => { selectedIdRef.current = selectedId; setRevealCredential(false); setConfirmDelete(false); setConfirmAction(null); setRuntimeLogs(null); }, [selectedId]);
-  useEffect(() => { setMcpNamePrefix(selected?.runtime.server_name_prefix ?? "www"); }, [selected?.id, selected?.runtime.server_name_prefix]);
+  useEffect(() => { setMcpNamePrefix(gateway?.server_name_prefix ?? "www"); }, [gateway?.server_name_prefix]);
   useEffect(() => { if (!confirmAction) return; const timer = window.setTimeout(() => setConfirmAction(null), 4000); return () => window.clearTimeout(timer); }, [confirmAction]);
   useEffect(() => {
     const panel = panelRef.current;
@@ -180,30 +191,30 @@ function App() {
     try { const logs = await api.logs(profileId); if (selectedIdRef.current !== profileId) return; setRuntimeLogs(logs); setPage("logs"); setError(""); } catch (reason) { setError(String(reason)); } finally { setBusy(null); }
   };
   const savePermission = async (permissionMode: PermissionMode) => {
-    if (!selected || running) return; setBusy("permission");
+    if (!selected) return; setBusy("permission");
     try { const saved = await api.saveProfile({ ...selected, runtime: { ...selected.runtime, permission_mode: permissionMode } }); setProfiles((current) => current.map((profile) => profile.id === saved.id ? saved : profile)); setError(""); }
     catch (reason) { setError(String(reason)); } finally { setBusy(null); }
   };
   const saveMcpNamePrefix = async () => {
-    if (!selected || running) return;
+    if (!selected || activeWorkspaceCount) return;
     const nextPrefix = mcpNamePrefix.trim();
-    if (!nextPrefix || nextPrefix === selected.runtime.server_name_prefix) {
-      setMcpNamePrefix(selected.runtime.server_name_prefix);
+    if (!nextPrefix || nextPrefix === gateway?.server_name_prefix) {
+      setMcpNamePrefix(gateway?.server_name_prefix ?? "www");
       return;
     }
     setBusy("mcp-prefix");
     try {
       const saved = await api.saveProfile({ ...selected, runtime: { ...selected.runtime, server_name_prefix: nextPrefix } });
-      setProfiles((current) => current.map((profile) => profile.id === saved.id ? saved : profile));
       setMcpNamePrefix(saved.runtime.server_name_prefix);
+      await refresh();
       setError("");
     } catch (reason) {
-      setMcpNamePrefix(selected.runtime.server_name_prefix);
+      setMcpNamePrefix(gateway?.server_name_prefix ?? "www");
       setError(String(reason));
     } finally { setBusy(null); }
   };
   const addAllowedFolder = async () => {
-    if (!selected || running) return;
+    if (!selected) return;
     const appWindow = getCurrentWindow(); setBusy("file-scope"); setError("");
     try {
       await appWindow.hide();
@@ -216,7 +227,7 @@ function App() {
     } catch (reason) { setError(String(reason)); } finally { setBusy(null); }
   };
   const changeWorkspace = async () => {
-    if (!selected || running) return;
+    if (!selected) return;
     const appWindow = getCurrentWindow(); setBusy("workspace-path"); setError("");
     try {
       await appWindow.hide();
@@ -230,7 +241,7 @@ function App() {
     } catch (reason) { setError(String(reason)); } finally { setBusy(null); }
   };
   const removeAllowedFolder = async (path: string) => {
-    if (!selected || running) return; setBusy("file-scope");
+    if (!selected) return; setBusy("file-scope");
     try {
       const saved = await api.saveProfile({ ...selected, runtime: { ...selected.runtime, allowed_paths: selected.runtime.allowed_paths.filter((item) => item !== path) } });
       setProfiles((current) => current.map((profile) => profile.id === saved.id ? saved : profile)); setError("");
@@ -253,7 +264,7 @@ function App() {
   };
   const quitApp = async () => { if (confirmAction?.kind !== "quit") { setConfirmAction({ kind: "quit" }); return; } setConfirmAction(null); await api.quit(); };
   const removeWorkspace = async () => {
-    if (!selected || running) return; if (!confirmDelete) { setConfirmDelete(true); return; } setBusy("delete");
+    if (!selected) return; if (!confirmDelete) { setConfirmDelete(true); return; } setBusy("delete");
     try { await api.deleteProfile(selected.id); await refresh(false); setPage("home"); } catch (reason) { setError(String(reason)); } finally { setBusy(null); setConfirmDelete(false); }
   };
   const changeLanguage = async (next: Language) => {
@@ -270,20 +281,21 @@ function App() {
   };
   const openSubpage = (next: Page, back: Page) => { setBackTarget(back); setPage(next); };
 
-  const pageTitle: Record<Page, string> = { home: "", "new-access": t("Choose access mode"), workspaces: t("Access profiles"), environment: t("Environment & setup"), logs: t("Runtime logs"), settings: t("Workspace settings"), workflow: t("Workflow activity"), more: t("More") };
-  const backPage = page === "logs" || page === "settings" || page === "workflow" ? backTarget : "home";
+  const pageTitle: Record<Page, string> = { home: "", "new-access": t("Choose access mode"), workspaces: t("Access profiles"), environment: t("Environment & setup"), logs: t("Runtime logs"), settings: t("Workspace settings"), approvals: t("Approvals"), more: t("More") };
+  const backPage = page === "logs" || page === "settings" || page === "approvals" ? backTarget : "home";
 
   return <main className="panel" ref={panelRef}>
     {page === "home" ? <Header /> : <header className="subpage-header"><button className="icon-button" type="button" aria-label={t("Back")} onClick={() => setPage(backPage)}><BackIcon /></button><strong>{pageTitle[page]}</strong></header>}
     {error && <div className="error-banner" role="alert"><span>{t(error)}</span><button type="button" onClick={() => setError("")} aria-label={t("Dismiss")}>×</button></div>}
+    {migrationWarning && <div className="migration-banner" role="status">{t(migrationWarning)}</div>}
 
     {page === "home" && <>
       <section className={`workspace-hero ${selected ? "tinted" : ""}`} style={selected ? { "--workspace-hue": workspaceHue(selectedPosition) } as React.CSSProperties : undefined}>
-        <div className="workspace-picker-row"><button className="workspace-picker" type="button" disabled={!profiles.length} onClick={() => setPage("workspaces")}>{selected?.runtime.permission_mode === "host" ? <ShieldIcon /> : <FolderIcon />}<span><strong>{selected ? t(selected.name) : t("No access profile")}</strong><small>{selectedSubtitle}</small></span>{profiles.length > 1 && <SwitchIcon />}</button><button className="icon-button" type="button" aria-label={t("Add access profile")} onClick={() => setPage("new-access")}><PlusIcon /></button></div>
+        <div className="workspace-picker-row"><button className="workspace-picker" type="button" disabled={!profiles.length || projectWindow} onClick={() => setPage("workspaces")}>{selected?.runtime.permission_mode === "host" ? <ShieldIcon /> : <FolderIcon />}<span><strong>{selected ? t(selected.name) : t(projectWindow ? "Project unavailable" : "No access profile")}</strong><small>{selectedSubtitle}</small></span>{profiles.length > 1 && !projectWindow && <SwitchIcon />}</button>{!projectWindow && <button className="icon-button" type="button" aria-label={t("Add access profile")} onClick={() => setPage("new-access")}><PlusIcon /></button>}</div>
         {selected && <div className="status-row"><span className="status-copy"><i className={`status-dot ${status?.state ?? "stopped"}`} />{profiles.length > 1 && <b className="status-index">[{selectedPosition}/{profiles.length}]</b>}{starting ? t("Preparing runtime dependencies…") : stopping ? t("Stopping…") : status?.state === "running" ? t("Running · public tunnel ready") : status?.state === "error" ? t("Connection error") : t("Workspace stopped")}</span><button className={`power-button ${running && !starting ? "danger" : ""} ${confirmAction?.kind === "stop" && confirmAction.profileId === selected.id ? "confirm" : ""}`} type="button" disabled={stopping} onClick={toggleWorkspace}>{starting || stopping ? <SpinnerIcon /> : null}{stopping ? t("Stopping…") : starting ? t("Cancel startup") : confirmAction?.kind === "stop" && confirmAction.profileId === selected.id ? t("Click again to stop") : t(running ? "Stop" : "Start")}</button></div>}
       </section>
-      {selected && <section className="connection-block"><ValueButton label={t("MCP name")} copyLabel={t("Copy")} value={status?.server_name || t("Start the workspace to create an MCP name")} disabled={!status?.server_name} copied={copied === "server-name"} onClick={() => void copy(status?.server_name ?? "", "server-name")} /><ValueButton label="Server URL" copyLabel={t("Copy")} value={serverUrl || t("Start the workspace to create a public URL")} disabled={!serverUrl} copied={copied === "server-url"} onClick={() => void copy(serverUrl, "server-url")} /><ValueButton label={credentialLabel} copyLabel={t("Copy")} value={revealCredential ? credential : "••••••••••••"} disabled={!credential} copied={copied === "credential"} onClick={() => void copy(credential, "credential")} after={<button className="reveal-button" type="button" aria-label={t(revealCredential ? "Hide authorization passcode" : "Show authorization passcode")} onClick={(event) => { event.stopPropagation(); setRevealCredential((current) => !current); }}>{revealCredential ? <EyeOffIcon /> : <EyeIcon />}</button>} /></section>}
-      <nav className="menu-list" aria-label={t("Manage")}><MenuRow icon={<PackageIcon />} label={t("Environment & setup")} detail={environmentReady ? t("Ready") : t("Setup needed")} onClick={() => setPage("environment")} /><MenuRow icon={<LogIcon />} label={t("Runtime logs")} disabled={!selected || busy === "logs"} onClick={() => { setBackTarget("home"); void loadLogs(); }} /><MenuRow icon={<MoreIcon />} label={t("More")} onClick={() => setPage("more")} /></nav>
+      {selected && <section className="connection-block"><div className="gateway-label"><strong>{t("Shared MCP Gateway")}</strong><small>{t("One connection is shared by all projects.")}</small></div><ValueButton label={t("MCP name")} copyLabel={t("Copy")} value={status?.server_name || t("Start the workspace to create an MCP name")} disabled={!status?.server_name} copied={copied === "server-name"} onClick={() => void copy(status?.server_name ?? "", "server-name")} /><ValueButton label="Server URL" copyLabel={t("Copy")} value={serverUrl || t("Start the workspace to create a public URL")} disabled={!serverUrl} copied={copied === "server-url"} onClick={() => void copy(serverUrl, "server-url")} /><ValueButton label={credentialLabel} copyLabel={t("Copy")} value={revealCredential ? credential : "••••••••••••"} disabled={!credential} copied={copied === "credential"} onClick={() => void copy(credential, "credential")} after={<button className="reveal-button" type="button" aria-label={t(revealCredential ? "Hide authorization passcode" : "Show authorization passcode")} onClick={(event) => { event.stopPropagation(); setRevealCredential((current) => !current); }}>{revealCredential ? <EyeOffIcon /> : <EyeIcon />}</button>} /></section>}
+      <nav className="menu-list" aria-label={t("Manage")}><MenuRow icon={<PackageIcon />} label={t("Environment & setup")} detail={environmentReady ? t("Ready") : t("Setup needed")} onClick={() => setPage("environment")} />{!projectWindow && <MenuRow icon={<SwitchIcon />} label={t("Open project window")} disabled={!selected} onClick={() => { if (selected) void api.openProjectWindow(selected.id); }} />}<MenuRow icon={<LogIcon />} label={t("Runtime logs")} disabled={!selected || busy === "logs"} onClick={() => { setBackTarget("home"); void loadLogs(); }} /><MenuRow icon={<MoreIcon />} label={t("More")} onClick={() => setPage("more")} /></nav>
       <footer className="panel-footer"><button type="button" disabled={!selected} onClick={() => openSubpage("settings", "home")}><ShieldIcon /><span>{selected?.runtime.permission_mode === "host" ? t("Full Access") : t("Standard access")}{selected?.runtime.permission_mode !== "host" && allowedFolderCount ? ` · ${allowedFolderCount} ${t("folders")}` : ""}</span></button><button className={`footer-quit-button ${confirmAction?.kind === "quit" ? "confirm" : ""}`} type="button" onClick={() => void quitApp()}><PowerIcon /><span>{confirmAction?.kind === "quit" ? t("Click again to quit") : t("Quit Coding Tools MCP")}</span></button></footer>
     </>}
 
@@ -306,28 +318,28 @@ function App() {
 
     {page === "settings" && selected && <section className="subpage-body settings-page">
       <div className="field-copy"><strong>{t("Access")}</strong><small>{t("Standard uses the workspace and allowed folders. Full Access enables host files, commands, SSH, and installed tools.")}</small></div>
-      <div className="segmented-control"><button type="button" className={selected.runtime.permission_mode !== "host" ? "selected" : ""} disabled={running || busy === "permission"} onClick={() => void savePermission("trusted")}>{t("Standard")}</button><button type="button" className={selected.runtime.permission_mode === "host" ? "selected danger" : ""} disabled={running || busy === "permission"} onClick={() => void savePermission("host")}>{t("Full Access")}</button></div>
+      <div className="segmented-control"><button type="button" className={selected.runtime.permission_mode !== "host" ? "selected" : ""} disabled={busy === "permission"} onClick={() => void savePermission("trusted")}>{t("Standard")}</button><button type="button" className={selected.runtime.permission_mode === "host" ? "selected danger" : ""} disabled={busy === "permission"} onClick={() => void savePermission("host")}>{t("Full Access")}</button></div>
       <div className="mcp-prefix-setting">
-        <div className="field-copy"><strong>{t("MCP name prefix")}</strong><small>{t("Customize the prefix used when a new MCP name is generated.")}</small></div>
-        <div className="mcp-prefix-row"><input aria-label={t("MCP name prefix")} value={mcpNamePrefix} maxLength={24} spellCheck={false} disabled={running || busy === "mcp-prefix"} onChange={(event) => setMcpNamePrefix(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void saveMcpNamePrefix(); }} /><button className="secondary-button" type="button" disabled={running || busy === "mcp-prefix" || !mcpNamePrefix.trim() || mcpNamePrefix.trim() === selected.runtime.server_name_prefix} onClick={() => void saveMcpNamePrefix()}>{t("Save prefix")}</button></div>
+        <div className="field-copy"><strong>{t("Shared Gateway MCP name prefix")}</strong><small>{t("This Gateway setting is shared by every project.")}</small></div>
+        <div className="mcp-prefix-row"><input aria-label={t("MCP name prefix")} value={mcpNamePrefix} maxLength={24} spellCheck={false} disabled={Boolean(activeWorkspaceCount) || busy === "mcp-prefix"} onChange={(event) => setMcpNamePrefix(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void saveMcpNamePrefix(); }} /><button className="secondary-button" type="button" disabled={Boolean(activeWorkspaceCount) || busy === "mcp-prefix" || !mcpNamePrefix.trim() || mcpNamePrefix.trim() === gateway?.server_name_prefix} onClick={() => void saveMcpNamePrefix()}>{t("Save prefix")}</button></div>
         <small className="mcp-prefix-format">{t("Format")}: <code>{`${mcpNamePrefix.trim() || "www"}XXYYYYMMDDHHmmss`}</code></small>
       </div>
-      <div className="field-copy scope-copy"><strong>{t(selected.runtime.permission_mode === "host" ? "Full Access coverage" : "Allowed folders")}</strong><small>{t(selected.runtime.permission_mode === "host" ? "File tools and host commands can access this Mac. The workspace remains the project-context anchor for Git, LSP, checks, reviews, and project instructions." : "Standard Access includes the workspace. Add only the specific extra folders it needs.")}</small></div>
+      <div className="field-copy scope-copy"><strong>{t(selected.runtime.permission_mode === "host" ? "Full Access coverage" : "Allowed folders")}</strong><small>{t(selected.runtime.permission_mode === "host" ? "File tools and host commands can access this Mac. The workspace remains the project-context anchor for Git, LSP, check discovery, and project instructions." : "Standard Access includes the workspace. Add only the specific extra folders it needs.")}</small></div>
       <div className="allowed-folder-list">
         <div className="allowed-folder-row fixed"><span><small>{t("Workspace")}</small><strong title={selected.path}>{selected.path}</strong></span><em>{t("Project context")}</em></div>
-        {selected.runtime.permission_mode === "host" ? <div className="allowed-folder-row fixed"><span><small>{t("Host filesystem")}</small><strong>{t("Entire Mac")}</strong></span><em>{t("Full Access")}</em></div> : selected.runtime.allowed_paths.map((path) => <div className="allowed-folder-row" key={path}><span><small>{t("Allowed folder")}</small><strong title={path}>{path}</strong></span><button type="button" disabled={running || busy === "file-scope"} onClick={() => void removeAllowedFolder(path)} aria-label={t("Remove allowed folder")}>×</button></div>)}
+        {selected.runtime.permission_mode === "host" ? <div className="allowed-folder-row fixed"><span><small>{t("Host filesystem")}</small><strong>{t("Entire Mac")}</strong></span><em>{t("Full Access")}</em></div> : selected.runtime.allowed_paths.map((path) => <div className="allowed-folder-row" key={path}><span><small>{t("Allowed folder")}</small><strong title={path}>{path}</strong></span><button type="button" disabled={busy === "file-scope"} onClick={() => void removeAllowedFolder(path)} aria-label={t("Remove allowed folder")}>×</button></div>)}
       </div>
-      <button className="secondary-button add-folder-button" type="button" disabled={running || busy === "workspace-path"} onClick={() => void changeWorkspace()}><FolderIcon />{t("Change workspace")}</button>
-      {selected.runtime.permission_mode !== "host" && <button className="secondary-button add-folder-button" type="button" disabled={running || busy === "file-scope"} onClick={() => void addAllowedFolder()}><PlusIcon />{t("Add allowed folder")}</button>}
-      {running && <p className="hint-copy">{t("Stop the workspace before changing settings.")}</p>}
-      <div className="workspace-facts"><span><small>{t("Name")}</small><strong>{t(selected.name)}</strong></span><span><small>{t("Path")}</small><strong>{selected.path}</strong></span><span><small>{t(selected.runtime.permission_mode === "host" ? "File access" : "Extra folders")}</small><strong>{selected.runtime.permission_mode === "host" ? t("Entire Mac") : allowedFolderCount ? String(allowedFolderCount) : t("None")}</strong></span><span><small>{t("Local port")}</small><strong>{selected.runtime.local_port}</strong></span></div>
-      <button className={`secondary-button remove-button ${confirmDelete ? "confirm" : ""}`} type="button" disabled={running || busy === "delete"} onClick={() => void removeWorkspace()}>{confirmDelete ? t("Click again to remove workspace") : t("Remove workspace")}</button><p className="hint-copy">{t("This removes the profile, not the workspace directory.")}</p>
+      <button className="secondary-button add-folder-button" type="button" disabled={busy === "workspace-path"} onClick={() => void changeWorkspace()}><FolderIcon />{t("Change project folder")}</button>
+      {selected.runtime.permission_mode !== "host" && <button className="secondary-button add-folder-button" type="button" disabled={busy === "file-scope"} onClick={() => void addAllowedFolder()}><PlusIcon />{t("Add allowed folder")}</button>}
+      {running && <p className="hint-copy">{t("Project changes restart only this Project Runtime; the shared Gateway stays online.")}</p>}
+      <div className="workspace-facts"><span><small>{t("Name")}</small><strong>{t(selected.name)}</strong></span><span><small>{t("Path")}</small><strong>{selected.path}</strong></span><span><small>{t(selected.runtime.permission_mode === "host" ? "File access" : "Extra folders")}</small><strong>{selected.runtime.permission_mode === "host" ? t("Entire Mac") : allowedFolderCount ? String(allowedFolderCount) : t("None")}</strong></span><span><small>{t("Gateway local port")}</small><strong>{selected.runtime.local_port}</strong></span></div>
+      <button className={`secondary-button remove-button ${confirmDelete ? "confirm" : ""}`} type="button" disabled={busy === "delete"} onClick={() => void removeWorkspace()}>{confirmDelete ? t("Click again to remove project") : t("Remove project")}</button><p className="hint-copy">{t("This removes the project from Coding Tools MCP, not the project directory.")}</p>
     </section>}
 
 
-    {page === "workflow" && <section className="subpage-body workflow-page">{!selectedWorkflow?.available ? <p className="empty-copy">{selectedWorkflow?.warning || t("No workflow activity yet.")}</p> : <>{selectedWorkflow.approvals.filter((item) => item.status === "pending").map((approval) => <div className="approval-item" key={approval.approval_id}><span><strong>{approval.reason}</strong><small>{approval.tool_name} · {approval.permission}</small></span><div><button type="button" disabled={busy === approval.approval_id} onClick={() => void decideApproval(approval.approval_id, false)}>{t("Deny")}</button><button className="approve" type="button" disabled={busy === approval.approval_id} onClick={() => void decideApproval(approval.approval_id, true)}>{t("Approve")}</button></div></div>)}{selectedWorkflow.tasks.slice(0, 5).map((task) => <ActivityRow key={task.task_id} label={t("Task")} title={task.title} detail={`${task.status} · r${task.revision}`} />)}{selectedWorkflow.checks.slice(0, 3).map((check) => <ActivityRow key={check.check_run_id} label={t("Check")} title={check.check_id} detail={check.status} />)}{!selectedWorkflow.approvals.length && !selectedWorkflow.tasks.length && !selectedWorkflow.checks.length && <p className="empty-copy">{t("No workflow activity yet.")}</p>}</>}</section>}
+    {page === "approvals" && <section className="subpage-body approvals-page">{!selectedRuntimeState?.available ? <p className="empty-copy">{selectedRuntimeState?.warning || t("No approvals yet.")}</p> : <>{selectedRuntimeState.approvals.filter((item) => item.status === "pending").map((approval) => <div className="approval-item" key={approval.approval_id}><span><strong>{approval.reason}</strong><small>{approval.tool_name} · {approval.permission}</small></span><div><button type="button" disabled={busy === approval.approval_id} onClick={() => void decideApproval(approval.approval_id, false)}>{t("Deny")}</button><button className="approve" type="button" disabled={busy === approval.approval_id} onClick={() => void decideApproval(approval.approval_id, true)}>{t("Approve")}</button></div></div>)}{!selectedRuntimeState.approvals.some((item) => item.status === "pending") && <p className="empty-copy">{t("No approvals yet.")}</p>}</>}</section>}
 
-    {page === "more" && <section className="subpage-body more-page"><div className="menu-list compact"><MenuRow icon={<FolderIcon />} label={t("Workspace settings")} disabled={!selected} onClick={() => openSubpage("settings", "more")} /><MenuRow icon={<ActivityIcon />} label={t("Workflow activity")} detail={selectedWorkflow ? `${selectedWorkflow.approvals.filter((item) => item.status === "pending").length} ${t("approvals")}` : ""} disabled={!selected} onClick={() => openSubpage("workflow", "more")} /><div className="language-row"><span><LanguageIcon />{t("Language")}</span><select aria-label={t("Language")} value={language} disabled={busy === "language"} onChange={(event) => void changeLanguage(event.target.value as Language)}><option value="zh-CN">简体中文</option><option value="en">English</option></select></div><MenuRow icon={<RefreshIcon />} label={t("Refresh status")} onClick={() => void refresh()} /><MenuRow icon={<GithubIcon />} label={t("GitHub source")} onClick={() => void api.openResource("github")} /></div><div className="version-block"><span>Coding Tools MCP <strong>{APP_VERSION}</strong></span><span>MCP Runtime <strong>{dependencies.runtime_version ?? "—"}</strong></span></div><button className={`quit-button ${confirmAction?.kind === "quit" ? "confirm" : ""}`} type="button" onClick={() => void quitApp()}><PowerIcon />{confirmAction?.kind === "quit" ? t("Click again to quit") : t("Quit Coding Tools MCP")}</button></section>}
+    {page === "more" && <section className="subpage-body more-page"><div className="menu-list compact"><MenuRow icon={<FolderIcon />} label={t("Workspace settings")} disabled={!selected} onClick={() => openSubpage("settings", "more")} /><MenuRow icon={<ActivityIcon />} label={t("Approvals")} detail={selectedRuntimeState ? `${selectedRuntimeState.approvals.filter((item) => item.status === "pending").length} ${t("approvals")}` : ""} disabled={!selected} onClick={() => openSubpage("approvals", "more")} /><div className="language-row"><span><LanguageIcon />{t("Language")}</span><select aria-label={t("Language")} value={language} disabled={busy === "language"} onChange={(event) => void changeLanguage(event.target.value as Language)}><option value="zh-CN">简体中文</option><option value="en">English</option></select></div><MenuRow icon={<RefreshIcon />} label={t("Refresh status")} onClick={() => void refresh()} /><MenuRow icon={<GithubIcon />} label={t("GitHub source")} onClick={() => void api.openResource("github")} /></div><div className="version-block"><span>Coding Tools MCP <strong>{APP_VERSION}</strong></span><span>MCP Runtime <strong>{dependencies.runtime_version ?? "—"}</strong></span></div><button className={`quit-button ${confirmAction?.kind === "quit" ? "confirm" : ""}`} type="button" onClick={() => void quitApp()}><PowerIcon />{confirmAction?.kind === "quit" ? t("Click again to quit") : t("Quit Coding Tools MCP")}</button></section>}
   </main>;
 }
 
@@ -343,8 +355,6 @@ function ValueButton({ label, copyLabel, value, disabled, copied, onClick, after
 function MenuRow({ icon, label, detail = "", disabled = false, onClick }: { icon: React.ReactNode; label: string; detail?: string; disabled?: boolean; onClick: () => void }) { return <button className="menu-row" type="button" disabled={disabled} onClick={onClick}><span>{icon}<strong>{label}</strong></span><span>{detail && <small>{detail}</small>}<ChevronIcon /></span></button>; }
 function DependencyRow({ name, detail, ready, busy, action, t }: { name: string; detail: string; ready: boolean; busy: boolean; action: () => void; t: (text: string) => string }) { return <div className="dependency-row"><span><strong>{name}</strong><small>{detail}</small></span><span className={ready ? "ready" : "needed"}>{ready ? t("Ready") : t("Missing")}</span><button type="button" disabled={busy} onClick={action}>{busy ? <SpinnerIcon /> : ready ? t("Repair") : t("Install")}</button></div>; }
 function LogSection({ title, text }: { title: string; text: string }) { return <section className="log-section"><strong>{title}</strong><pre>{text || "—"}</pre></section>; }
-function ActivityRow({ label, title, detail }: { label: string; title: string; detail: string }) { return <div className="activity-row"><small>{label}</small><span><strong>{title}</strong><small>{detail}</small></span></div>; }
-
 const Icon = ({ children, className = "" }: { children: React.ReactNode; className?: string }) => <svg className={`icon ${className}`} viewBox="0 0 24 24" aria-hidden="true">{children}</svg>;
 const AppMarkIcon = () => <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M12.252 12.331H7.749v1.002c0 1.014.821 1.835 1.835 1.835h.833a1.835 1.835 0 0 0 1.835-1.835zm-11.25-1.498a4.83 4.83 0 0 1 3.784-4.717A5.666 5.666 0 0 1 15.63 7.717 4 4 0 0 1 17 15.13a.665.665 0 1 1-.666-1.15A2.669 2.669 0 0 0 15 8.999a.665.665 0 0 1-.665-.666 4.335 4.335 0 0 0-8.313-1.725L5.9 6.92a.67.67 0 0 1-.448.423l-.092.02a3.502 3.502 0 0 0-1.783 6.147l.156.124.099.092a.665.665 0 0 1-.782 1.04l-.116-.068-.215-.171a4.82 4.82 0 0 1-1.717-3.695m12.58 2.5a3.164 3.164 0 0 1-2.917 3.155V17.5a.665.665 0 0 1-1.33 0v-1.012a3.164 3.164 0 0 1-2.916-3.155v-1.667c0-.367.298-.665.665-.665h.585v-1a.665.665 0 0 1 1.33 0v1h2.003v-1a.665.665 0 0 1 1.33 0v1h.585c.367 0 .665.298.665.665z" /></svg>;
 const BackIcon = () => <Icon><path d="m15 18-6-6 6-6" /></Icon>;

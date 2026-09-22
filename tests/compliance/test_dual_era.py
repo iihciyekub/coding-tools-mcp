@@ -440,8 +440,8 @@ class WorkspaceRaceTests(unittest.TestCase):
                     "exec_command",
                     {"cmd": f"printf '{tag}'", "timeout_ms": 10000, "yield_time_ms": 5000},
                 )
-                environment = runtime.call_tool("check_exec_environment", {})
-                return {"command": structured_payload(started), "environment": structured_payload(environment)}
+                environment = runtime.server_info_payload()
+                return {"command": structured_payload(started), "environment": environment}
 
             outcomes = run_in_barrier({tag: (lambda tag=tag: first_command(tag)) for tag in ("first", "second")})
 
@@ -524,7 +524,7 @@ async def sdk_smoke(transport: Any) -> dict[str, Any]:
 
     async with Client(transport, raise_exceptions=True) as client:
         listed = await client.list_tools()
-        result = await client.call_tool("check_exec_environment", {})
+        result = await client.call_tool("server_info", {})
         tools_capability = getattr(client.server_capabilities, "tools", None)
         return {
             "protocol_version": client.protocol_version,
@@ -555,7 +555,7 @@ def assert_sdk_smoke(test: unittest.TestCase, summary: dict[str, Any]) -> None:
     test.assertEqual(summary["tools_capability"], False, summary)
     test.assertIn("Relative paths stay workspace-relative", summary["instructions"], summary)
     test.assertIn("anchored to the configured workspace", summary["instructions"], summary)
-    test.assertIn("check_exec_environment", summary["tools"])
+    test.assertIn("server_info", summary["tools"])
     test.assertGreaterEqual(len(summary["tools"]), 18, summary)
     test.assertFalse(summary["is_error"], summary)
     test.assertTrue(summary["content"], summary)

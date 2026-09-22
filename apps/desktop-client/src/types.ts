@@ -30,6 +30,23 @@ export interface RuntimeConfig {
   environment_variables: EnvironmentVariable[];
 }
 
+export interface GatewayConfig {
+  server_name_prefix: string;
+  local_port: number;
+  tunnel: TunnelConfig;
+  auth: AuthConfig;
+}
+
+export interface ProjectProfile {
+  id: string;
+  name: string;
+  path: string;
+  permission_mode: PermissionMode;
+  file_access_scope: "workspace";
+  allowed_paths: string[];
+  environment_variables: EnvironmentVariable[];
+}
+
 export interface EnvironmentVariable {
   name: string;
   value: string;
@@ -56,46 +73,16 @@ export interface RuntimeStatus {
 
 export interface DesktopSnapshot {
   language: "en" | "zh-CN";
+  gateway: GatewayConfig;
+  projects: ProjectProfile[];
+  migration_warning: string | null;
   profiles: WorkspaceProfile[];
   statuses: Record<string, RuntimeStatus>;
   dependencies: DependencyStatus;
-  workflow: Record<string, WorkflowSnapshot>;
+  runtime_state: Record<string, RuntimeStateSnapshot>;
 }
 
-export interface WorkflowTask {
-  task_id: string;
-  title: string;
-  status: string;
-  revision: number;
-  updated_at: number;
-  plan_completed: number;
-  plan_total: number;
-}
-
-export interface WorkflowCheckpoint {
-  checkpoint_id: string;
-  label: string;
-  file_count: number;
-  created_at: number;
-}
-
-export interface WorkflowCheck {
-  check_run_id: string;
-  check_id: string;
-  status: string;
-  task_id: string | null;
-  created_at: number;
-}
-
-export interface WorkflowReview {
-  review_id: string;
-  status: string;
-  finding_count: number;
-  task_id: string | null;
-  updated_at: number;
-}
-
-export interface WorkflowApproval {
+export interface RuntimeApproval {
   approval_id: string;
   tool_name: string;
   permission: string;
@@ -106,20 +93,10 @@ export interface WorkflowApproval {
   created_at: number;
 }
 
-export interface WorkflowWorktree {
-  worktree_id: string;
-  path: string;
-}
-
-export interface WorkflowSnapshot {
+export interface RuntimeStateSnapshot {
   available: boolean;
   workspace_id: string;
-  tasks: WorkflowTask[];
-  checkpoints: WorkflowCheckpoint[];
-  checks: WorkflowCheck[];
-  reviews: WorkflowReview[];
-  approvals: WorkflowApproval[];
-  worktrees: WorkflowWorktree[];
+  approvals: RuntimeApproval[];
   warning: string | null;
 }
 

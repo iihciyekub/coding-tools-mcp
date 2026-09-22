@@ -1,14 +1,19 @@
 mod models;
 mod resource_installer;
 mod runtime;
+mod runtime_state;
 mod storage;
-mod workflow;
 
-use models::{LogBundle, RuntimeStatus, WorkspaceProfile};
+use models::{GatewayConfig, LogBundle, ProjectProfile, RuntimeStatus, WorkspaceProfile};
 use resource_installer::managed_version;
 use runtime::{
-    prepare_runtime as prepare_runtime_environment, read_logs, shutdown, start_workspace,
-    stop_all_workspaces, stop_workspace, DependencyStatus, RuntimeManager,
+    prepare_runtime as prepare_runtime_environment, read_gateway_project_logs,
+    reconcile_gateway_projects, runtime_logs_root, shutdown, start_gateway, stop_all_workspaces,
+    stop_gateway, DependencyStatus, RuntimeManager,
+};
+use runtime_state::{
+    decide_approval as decide_runtime_approval, read_snapshot as read_runtime_snapshot,
+    RuntimeStateSnapshot,
 };
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -27,10 +32,6 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::{
     DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
 };
-use workflow::{
-    decide_approval as decide_workflow_approval, read_snapshot as read_workflow_snapshot,
-    WorkflowSnapshot,
-};
 
 const TRAY_ID: &str = "coding-tools-mcp";
 const WORKSPACE_NAME_MAX_CHARS: usize = 22;
@@ -44,21 +45,33 @@ struct DesktopState {
 #[derive(Serialize)]
 struct DesktopSnapshot {
     language: String,
+    gateway: GatewayConfig,
+    projects: Vec<ProjectProfile>,
+    migration_warning: Option<String>,
     profiles: Vec<WorkspaceProfile>,
     statuses: HashMap<String, RuntimeStatus>,
     dependencies: DependencyStatus,
-    workflow: HashMap<String, WorkflowSnapshot>,
+    runtime_state: HashMap<String, RuntimeStateSnapshot>,
 }
 
 #[tauri::command]
 fn desktop_snapshot(state: tauri::State<'_, DesktopState>) -> Result<DesktopSnapshot, String> {
-    let (profiles, language) = {
+    let (profiles, gateway, migration_warning, language) = {
         let store = state
             .store
             .lock()
             .map_err(|_| "Profile store is unavailable.")?;
-        (store.profiles(), store.language().to_string())
+        (
+            store.profiles(),
+            store.gateway(),
+            store.migration_warning(),
+            store.language().to_string(),
+        )
     };
+    let projects = profiles
+        .iter()
+        .map(ProjectProfile::from_workspace_profile)
+        .collect();
     let mut runtime = state
         .runtime
         .lock()
@@ -68,22 +81,25 @@ fn desktop_snapshot(state: tauri::State<'_, DesktopState>) -> Result<DesktopSnap
         .map(|profile| (profile.id.clone(), runtime.status(profile)))
         .collect();
     let dependencies = runtime.dependency_status();
-    let workflow_root = runtime.workflow_state_root();
+    let runtime_state_root = runtime.runtime_state_root();
     drop(runtime);
-    let workflow = profiles
+    let runtime_state = profiles
         .iter()
         .map(|profile| {
-            let snapshot = read_workflow_snapshot(&workflow_root, Path::new(&profile.path))
-                .unwrap_or_else(WorkflowSnapshot::failure);
+            let snapshot = read_runtime_snapshot(&runtime_state_root, Path::new(&profile.path))
+                .unwrap_or_else(RuntimeStateSnapshot::failure);
             (profile.id.clone(), snapshot)
         })
         .collect();
     Ok(DesktopSnapshot {
         language,
+        gateway,
+        projects,
+        migration_warning,
         profiles,
         statuses,
         dependencies,
-        workflow,
+        runtime_state,
     })
 }
 
@@ -100,13 +116,13 @@ fn decide_approval(
         .map_err(|_| "Profile store is unavailable.")?
         .get(&profile_id)
         .ok_or("Workspace profile was not found.")?;
-    let workflow_root = state
+    let runtime_state_root = state
         .runtime
         .lock()
         .map_err(|_| "Runtime manager is unavailable.")?
-        .workflow_state_root();
-    decide_workflow_approval(
-        &workflow_root,
+        .runtime_state_root();
+    decide_runtime_approval(
+        &runtime_state_root,
         Path::new(&profile.path),
         &approval_id,
         approved,
@@ -118,21 +134,25 @@ fn create_profile(
     path: String,
     state: tauri::State<'_, DesktopState>,
 ) -> Result<WorkspaceProfile, String> {
-    let mut store = state
-        .store
-        .lock()
-        .map_err(|_| "Profile store is unavailable.")?;
-    let requested =
-        std::fs::canonicalize(&path).unwrap_or_else(|_| std::path::PathBuf::from(&path));
-    if let Some(existing) = store.profiles().into_iter().find(|profile| {
-        std::fs::canonicalize(&profile.path)
-            .unwrap_or_else(|_| std::path::PathBuf::from(&profile.path))
-            == requested
-    }) {
-        return Ok(existing);
-    }
-    let profile = WorkspaceProfile::new(path, store.next_port())?;
-    store.insert(profile)
+    let saved = {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|_| "Profile store is unavailable.")?;
+        let requested =
+            std::fs::canonicalize(&path).unwrap_or_else(|_| std::path::PathBuf::from(&path));
+        if let Some(existing) = store.profiles().into_iter().find(|profile| {
+            std::fs::canonicalize(&profile.path)
+                .unwrap_or_else(|_| std::path::PathBuf::from(&profile.path))
+                == requested
+        }) {
+            return Ok(existing);
+        }
+        let profile = WorkspaceProfile::new(path, store.next_port())?;
+        store.insert(profile)?
+    };
+    reconcile_project_runtimes(state.inner())?;
+    Ok(saved)
 }
 
 #[tauri::command]
@@ -140,11 +160,15 @@ fn create_full_access_profile(
     path: String,
     state: tauri::State<'_, DesktopState>,
 ) -> Result<WorkspaceProfile, String> {
-    let mut store = state
-        .store
-        .lock()
-        .map_err(|_| "Profile store is unavailable.")?;
-    create_full_access_profile_in_store(&mut store, path)
+    let saved = {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|_| "Profile store is unavailable.")?;
+        create_full_access_profile_in_store(&mut store, path)?
+    };
+    reconcile_project_runtimes(state.inner())?;
+    Ok(saved)
 }
 
 fn create_full_access_profile_in_store(
@@ -174,20 +198,36 @@ fn save_profile(
     state: tauri::State<'_, DesktopState>,
 ) -> Result<WorkspaceProfile, String> {
     normalize_allowed_paths(&mut profile)?;
-    if state
-        .runtime
-        .lock()
-        .map_err(|_| "Runtime manager is unavailable.")?
-        .status(&profile)
-        .is_active()
-    {
-        return Err("Stop the workspace before changing its configuration.".into());
-    }
-    state
+    let requested_gateway = GatewayConfig::from_workspace_profile(&profile);
+    let current_gateway = state
         .store
         .lock()
         .map_err(|_| "Profile store is unavailable.")?
-        .update(profile)
+        .gateway();
+    let gateway_active = state
+        .runtime
+        .lock()
+        .map_err(|_| "Runtime manager is unavailable.")?
+        .gateway_is_active();
+    if gateway_active && requested_gateway != current_gateway {
+        return Err("Stop the shared Gateway before changing Gateway configuration.".into());
+    }
+    let saved = state
+        .store
+        .lock()
+        .map_err(|_| "Profile store is unavailable.")?
+        .update(profile)?;
+    reconcile_project_runtimes(state.inner())?;
+    Ok(saved)
+}
+
+fn reconcile_project_runtimes(state: &DesktopState) -> Result<(), String> {
+    let profiles = state
+        .store
+        .lock()
+        .map_err(|_| "Profile store is unavailable.")?
+        .profiles();
+    reconcile_gateway_projects(&state.runtime, &profiles)
 }
 
 fn normalize_allowed_paths(profile: &mut WorkspaceProfile) -> Result<(), String> {
@@ -215,26 +255,12 @@ fn normalize_allowed_paths(profile: &mut WorkspaceProfile) -> Result<(), String>
 
 #[tauri::command]
 fn delete_profile(profile_id: String, state: tauri::State<'_, DesktopState>) -> Result<(), String> {
-    let profile = state
-        .store
-        .lock()
-        .map_err(|_| "Profile store is unavailable.")?
-        .get(&profile_id)
-        .ok_or("Workspace profile was not found.")?;
-    if state
-        .runtime
-        .lock()
-        .map_err(|_| "Runtime manager is unavailable.")?
-        .status(&profile)
-        .is_active()
-    {
-        return Err("Stop the workspace before deleting it.".into());
-    }
     state
         .store
         .lock()
         .map_err(|_| "Profile store is unavailable.")?
-        .remove(&profile_id)
+        .remove(&profile_id)?;
+    reconcile_project_runtimes(state.inner())
 }
 
 #[tauri::command]
@@ -247,13 +273,12 @@ async fn start_profile(
     let store = Arc::clone(&state.store);
     let runtime = Arc::clone(&state.runtime);
     tauri::async_runtime::spawn_blocking(move || {
-        let (profile, log_dir) = {
+        let (profiles, registry_path) = {
             let mut store = store.lock().map_err(|_| "Profile store is unavailable.")?;
-            let profile = store.prepare_for_start(&profile_id)?;
-            let log_dir = store.log_dir(&profile_id)?;
-            (profile, log_dir)
+            store.prepare_for_start(&profile_id)?;
+            (store.profiles(), store.project_registry_path())
         };
-        start_workspace(&runtime, &profile, &log_dir)
+        start_gateway(&runtime, &profiles, &registry_path)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -272,7 +297,7 @@ async fn stop_profile(
             .map_err(|_| "Profile store is unavailable.")?
             .get(&profile_id)
             .ok_or("Workspace profile was not found.")?;
-        stop_workspace(&runtime, &profile)
+        stop_gateway(&runtime, &profile)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -325,17 +350,53 @@ fn profile_logs(
     profile_id: String,
     state: tauri::State<'_, DesktopState>,
 ) -> Result<LogBundle, String> {
-    let directory = state
-        .store
-        .lock()
-        .map_err(|_| "Profile store is unavailable.")?
-        .log_dir(&profile_id)?;
-    read_logs(&directory)
+    read_gateway_project_logs(&state.runtime, &profile_id)
 }
 
 #[tauri::command]
 fn open_logs(app: AppHandle, profile_id: String) -> Result<(), String> {
     open_logs_folder(&app, &profile_id)
+}
+
+#[tauri::command]
+fn open_project_window(
+    app: AppHandle,
+    profile_id: String,
+    state: tauri::State<'_, DesktopState>,
+) -> Result<(), String> {
+    let profile = state
+        .store
+        .lock()
+        .map_err(|_| "Profile store is unavailable.")?
+        .get(&profile_id)
+        .ok_or("Project profile was not found.")?;
+    let safe_id = profile
+        .id
+        .chars()
+        .filter(|value| value.is_ascii_alphanumeric() || matches!(value, '-' | '_'))
+        .collect::<String>();
+    if safe_id.is_empty() {
+        return Err("Project id cannot be represented as a window label.".into());
+    }
+    let label = format!("project-{safe_id}");
+    if let Some(window) = app.get_webview_window(&label) {
+        window.show().map_err(menu_error)?;
+        window.set_focus().map_err(menu_error)?;
+        return Ok(());
+    }
+    let url = format!("index.html?project={}", profile.id);
+    WebviewWindowBuilder::new(&app, label, WebviewUrl::App(url.into()))
+        .title(format!("Coding Tools MCP — {}", profile.name))
+        .inner_size(360.0, 520.0)
+        .min_inner_size(320.0, 300.0)
+        .resizable(true)
+        .decorations(true)
+        .always_on_top(false)
+        .skip_taskbar(false)
+        .visible_on_all_workspaces(false)
+        .build()
+        .map_err(menu_error)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -691,25 +752,11 @@ fn status_text(status: &RuntimeStatus, language: &str) -> &'static str {
     }
 }
 
-fn permission_mode_label(mode: &str, language: &str) -> &'static str {
-    match mode {
-        "safe" => menu_text(language, "Safe", "安全"),
-        "trusted" => menu_text(language, "Trusted", "受信任"),
-        "dangerous" => menu_text(language, "Dangerous", "危险"),
-        "host" => menu_text(language, "Host · full access", "主机 · 完全访问"),
-        _ => menu_text(language, "Unknown", "未知"),
-    }
-}
-
 fn desktop_access_label(mode: &str, language: &str) -> String {
-    match mode {
-        "trusted" => menu_text(language, "Standard", "标准").to_string(),
-        "host" => menu_text(language, "Full Access", "完全访问").to_string(),
-        legacy => format!(
-            "{} · {}",
-            menu_text(language, "Legacy", "旧模式"),
-            permission_mode_label(legacy, language)
-        ),
+    if mode == "host" {
+        menu_text(language, "Full Access", "完全访问").to_string()
+    } else {
+        menu_text(language, "Standard", "标准").to_string()
     }
 }
 
@@ -741,7 +788,7 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
             .map_err(|_| "Profile store is unavailable.".to_string())?;
         (store.profiles(), store.language().to_string())
     };
-    let (statuses, dependencies, workflow_root) = {
+    let (statuses, dependencies, runtime_state_root) = {
         let mut runtime = state
             .runtime
             .lock()
@@ -751,8 +798,8 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
             .map(|profile| (profile.id.clone(), runtime.status(profile)))
             .collect::<HashMap<_, _>>();
         let dependencies = runtime.dependency_status();
-        let workflow_root = runtime.workflow_state_root();
-        (statuses, dependencies, workflow_root)
+        let runtime_state_root = runtime.runtime_state_root();
+        (statuses, dependencies, runtime_state_root)
     };
 
     let menu = Menu::new(app).map_err(menu_error)?;
@@ -852,19 +899,6 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
             true,
         )
         .map_err(menu_error)?;
-        if !matches!(profile.runtime.permission_mode.as_str(), "trusted" | "host") {
-            let legacy = MenuItem::with_id(
-                app,
-                format!("access-legacy:{}", profile.id),
-                desktop_access_label(&profile.runtime.permission_mode, &language),
-                false,
-                None::<&str>,
-            )
-            .map_err(menu_error)?;
-            access_menu.append(&legacy).map_err(menu_error)?;
-            let separator = PredefinedMenuItem::separator(app).map_err(menu_error)?;
-            access_menu.append(&separator).map_err(menu_error)?;
-        }
         let standard = CheckMenuItem::with_id(
             app,
             format!("access:standard:{}", profile.id),
@@ -887,9 +921,9 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
         access_menu.append(&full_access).map_err(menu_error)?;
         workspace.append(&access_menu).map_err(menu_error)?;
 
-        let workflow_snapshot = read_workflow_snapshot(&workflow_root, Path::new(&profile.path))
-            .unwrap_or_else(WorkflowSnapshot::failure);
-        let pending_approvals = workflow_snapshot
+        let runtime_snapshot = read_runtime_snapshot(&runtime_state_root, Path::new(&profile.path))
+            .unwrap_or_else(RuntimeStateSnapshot::failure);
+        let pending_approvals = runtime_snapshot
             .approvals
             .iter()
             .filter(|approval| approval.status == "pending")
@@ -1313,6 +1347,7 @@ fn pick_workspace_from_menu(app: &AppHandle, language: &str, full_access: bool) 
                     store.insert(profile)?;
                 }
                 drop(store);
+                reconcile_project_runtimes(state.inner())?;
                 Ok::<(), String>(())
             })();
             if let Err(error) = result {
@@ -1328,7 +1363,7 @@ fn start_workspace_from_menu(app: AppHandle, profile_id: String) {
     tauri::async_runtime::spawn_blocking(move || {
         let result = (|| {
             let state = app.state::<DesktopState>();
-            let (profile, log_dir) = {
+            let (profiles, registry_path) = {
                 let mut store = state
                     .store
                     .lock()
@@ -1337,11 +1372,10 @@ fn start_workspace_from_menu(app: AppHandle, profile_id: String) {
                     .get(&profile_id)
                     .ok_or_else(|| "Workspace profile was not found.".to_string())?;
                 let profile = store.update(quick_tunnel_profile(profile))?;
-                let profile = store.prepare_for_start(&profile.id)?;
-                let log_dir = store.log_dir(&profile.id)?;
-                (profile, log_dir)
+                store.prepare_for_start(&profile.id)?;
+                (store.profiles(), store.project_registry_path())
             };
-            start_workspace(&state.runtime, &profile, &log_dir)?;
+            start_gateway(&state.runtime, &profiles, &registry_path)?;
             Ok::<(), String>(())
         })();
         if let Err(error) = result {
@@ -1365,7 +1399,7 @@ fn stop_workspace_from_menu(app: AppHandle, profile_id: String) {
                 .map_err(|_| "Profile store is unavailable.".to_string())?
                 .get(&profile_id)
                 .ok_or_else(|| "Workspace profile was not found.".to_string())?;
-            stop_workspace(&state.runtime, &profile)?;
+            stop_gateway(&state.runtime, &profile)?;
             Ok::<(), String>(())
         })();
         if let Err(error) = result {
@@ -1380,7 +1414,7 @@ fn set_permission_mode_from_menu(
     profile_id: &str,
     permission_mode: &str,
 ) -> Result<(), String> {
-    if !matches!(permission_mode, "safe" | "trusted" | "dangerous" | "host") {
+    if !matches!(permission_mode, "trusted" | "host") {
         return Err("Unknown permission mode.".into());
     }
     let state = app.state::<DesktopState>();
@@ -1390,21 +1424,13 @@ fn set_permission_mode_from_menu(
         .map_err(|_| "Profile store is unavailable.".to_string())?
         .get(profile_id)
         .ok_or_else(|| "Workspace profile was not found.".to_string())?;
-    if state
-        .runtime
-        .lock()
-        .map_err(|_| "Runtime manager is unavailable.".to_string())?
-        .status(&profile)
-        .is_active()
-    {
-        return Err("Stop the workspace before changing its permission mode.".into());
-    }
     profile.runtime.permission_mode = permission_mode.into();
     state
         .store
         .lock()
         .map_err(|_| "Profile store is unavailable.".to_string())?
         .update(profile)?;
+    reconcile_project_runtimes(state.inner())?;
     Ok(())
 }
 
@@ -1449,24 +1475,15 @@ fn copy_passcode(app: &AppHandle, profile_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn open_logs_folder(app: &AppHandle, profile_id: &str) -> Result<(), String> {
-    let directory = app
-        .state::<DesktopState>()
-        .store
-        .lock()
-        .map_err(|_| "Profile store is unavailable.".to_string())?
-        .log_dir(profile_id)?;
+fn open_logs_folder(app: &AppHandle, _profile_id: &str) -> Result<(), String> {
+    let state = app.state::<DesktopState>();
+    let directory = runtime_logs_root(&state.runtime)?;
     open_path(&directory)
 }
 
 fn copy_recent_logs(app: &AppHandle, profile_id: &str) -> Result<(), String> {
-    let directory = app
-        .state::<DesktopState>()
-        .store
-        .lock()
-        .map_err(|_| "Profile store is unavailable.".to_string())?
-        .log_dir(profile_id)?;
-    let logs = read_logs(&directory)?;
+    let state = app.state::<DesktopState>();
+    let logs = read_gateway_project_logs(&state.runtime, profile_id)?;
     let text = format!(
         "=== stdout ===\n{}\n\n=== stderr ===\n{}\n\n=== cloudflared ===\n{}",
         logs.stdout, logs.stderr, logs.cloudflared
@@ -1487,56 +1504,17 @@ fn decide_approval_from_menu(
         .map_err(|_| "Profile store is unavailable.".to_string())?
         .get(profile_id)
         .ok_or_else(|| "Workspace profile was not found.".to_string())?;
-    let workflow_root = state
+    let runtime_state_root = state
         .runtime
         .lock()
         .map_err(|_| "Runtime manager is unavailable.".to_string())?
-        .workflow_state_root();
-    decide_workflow_approval(
-        &workflow_root,
+        .runtime_state_root();
+    decide_runtime_approval(
+        &runtime_state_root,
         Path::new(&profile.path),
         approval_id,
         approved,
     )
-}
-
-fn add_managed_worktree_from_menu(
-    app: &AppHandle,
-    profile_id: &str,
-    worktree_id: &str,
-) -> Result<(), String> {
-    let state = app.state::<DesktopState>();
-    let profile = state
-        .store
-        .lock()
-        .map_err(|_| "Profile store is unavailable.".to_string())?
-        .get(profile_id)
-        .ok_or_else(|| "Workspace profile was not found.".to_string())?;
-    let workflow_root = state
-        .runtime
-        .lock()
-        .map_err(|_| "Runtime manager is unavailable.".to_string())?
-        .workflow_state_root();
-    let snapshot = read_workflow_snapshot(&workflow_root, Path::new(&profile.path))?;
-    let worktree = snapshot
-        .worktrees
-        .into_iter()
-        .find(|worktree| worktree.worktree_id == worktree_id)
-        .ok_or_else(|| "Managed worktree was not found.".to_string())?;
-    let mut store = state
-        .store
-        .lock()
-        .map_err(|_| "Profile store is unavailable.".to_string())?;
-    if store
-        .profiles()
-        .iter()
-        .any(|existing| existing.path == worktree.path)
-    {
-        return Ok(());
-    }
-    let profile = WorkspaceProfile::new(worktree.path, store.next_port())?;
-    store.insert(profile)?;
-    Ok(())
 }
 
 fn set_menu_language(app: &AppHandle, language: &str) -> Result<(), String> {
@@ -1688,13 +1666,6 @@ fn handle_tray_menu_event(app: &AppHandle, id: &str) {
     } else if let Some(selection) = id.strip_prefix("approval-deny:") {
         if let Some((profile_id, approval_id)) = selection.split_once(':') {
             if let Err(error) = decide_approval_from_menu(app, profile_id, approval_id, false) {
-                show_error(app, error);
-            }
-            let _ = refresh_tray_menu(app);
-        }
-    } else if let Some(selection) = id.strip_prefix("worktree-add:") {
-        if let Some((profile_id, worktree_id)) = selection.split_once(':') {
-            if let Err(error) = add_managed_worktree_from_menu(app, profile_id, worktree_id) {
                 show_error(app, error);
             }
             let _ = refresh_tray_menu(app);
@@ -1864,6 +1835,7 @@ pub fn run() {
             profile_status,
             profile_logs,
             open_logs,
+            open_project_window,
             set_language,
             pick_workspace_folder,
             pick_allowed_folder,
@@ -1902,20 +1874,11 @@ mod tests {
     }
 
     #[test]
-    fn permission_mode_labels_cover_every_supported_mode() {
-        assert_eq!(permission_mode_label("safe", "en"), "Safe");
-        assert_eq!(permission_mode_label("trusted", "en"), "Trusted");
-        assert_eq!(permission_mode_label("dangerous", "en"), "Dangerous");
-        assert_eq!(permission_mode_label("host", "en"), "Host · full access");
-        assert_eq!(permission_mode_label("host", "zh-CN"), "主机 · 完全访问");
-    }
-
-    #[test]
-    fn desktop_access_collapses_new_choices_without_hiding_legacy_modes() {
+    fn desktop_access_has_two_modes() {
         assert_eq!(desktop_access_label("trusted", "en"), "Standard");
         assert_eq!(desktop_access_label("host", "en"), "Full Access");
-        assert_eq!(desktop_access_label("safe", "en"), "Legacy · Safe");
-        assert_eq!(desktop_access_label("dangerous", "zh-CN"), "旧模式 · 危险");
+        assert_eq!(desktop_access_label("trusted", "zh-CN"), "标准");
+        assert_eq!(desktop_access_label("host", "zh-CN"), "完全访问");
     }
 
     #[test]

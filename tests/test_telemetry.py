@@ -131,7 +131,7 @@ class OffMeansOffTests(unittest.TestCase):
                     with tempfile.TemporaryDirectory() as tmp:
                         runtime = Runtime(Path(tmp))
                         _initialize(runtime)
-                        runtime.call_tool("check_exec_environment", {})
+                        runtime.call_tool("server_info", {})
                         runtime.call_tool("read_file", {"path": "missing.txt"})
                         runtime.close()
                 get_sender.assert_not_called()
@@ -186,7 +186,7 @@ def _run_probe_session() -> _CapturingSender:
             (workspace / f"{marker}.txt").write_text("leakprobe-content\n", encoding="utf-8")
             runtime = Runtime(workspace)
             _initialize(runtime, client_name="clientinfo-probe")
-            runtime.call_tool("check_exec_environment", {})
+            runtime.call_tool("server_info", {})
             runtime.call_tool("read_file", {"path": f"{marker}-missing.txt"})
             runtime.call_tool("read_file", {"path": f"{marker}-missing.txt"})
             runtime.close()
@@ -243,8 +243,8 @@ class SessionEventTests(unittest.TestCase):
         self.assertEqual(summaries["read_file"]["calls"], 2)
         self.assertEqual(summaries["read_file"]["ok"], 0)
         self.assertEqual(summaries["read_file"]["err_NOT_FOUND"], 2)
-        self.assertEqual(summaries["check_exec_environment"]["calls"], 1)
-        self.assertEqual(summaries["check_exec_environment"]["ok"], 1)
+        self.assertEqual(summaries["server_info"]["calls"], 1)
+        self.assertEqual(summaries["server_info"]["ok"], 1)
         self.assertNotIn("client_name", summaries["read_file"])
 
         end = _properties(by_name["session_end"][0])
@@ -262,7 +262,7 @@ class SessionEventTests(unittest.TestCase):
         with scrubbed_env(), patch.object(telemetry, "_get_sender", lambda: sender):
             with tempfile.TemporaryDirectory() as tmp:
                 runtime = Runtime(Path(tmp))
-                runtime.call_tool("check_exec_environment", {})
+                runtime.call_tool("server_info", {})
                 runtime.call_tool("read_file", {"path": "missing.txt"})
                 runtime.close()
         self.assertEqual(sender.events, [])

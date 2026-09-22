@@ -32,15 +32,20 @@ from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
 from . import __version__
-from . import agent_environment as agent_environment_tools
 from . import apple_toolchain
-from . import check_diagnostics
 from . import code_intel
 from . import lsp as lsp_tools
-from . import skills as skill_tools
 from . import workspace_insight
 from .envutils import ENV_PREFIX, truthy_env
 from .errors import JsonRpcError, ToolFailure
+from .gateway import (
+    DEFAULT_SESSION_TTL_SECONDS as DEFAULT_GATEWAY_SESSION_TTL_SECONDS,
+    GatewayRuntime,
+    HTTPProjectRuntime,
+    ProjectDefinition,
+    ProjectRegistry,
+    SessionRegistry,
+)
 from .landlock_exec import libc_syscall
 from .oauth import (
     OAUTH_CODE_TTL_SECONDS,
@@ -82,8 +87,6 @@ from .protocol import (
     LATEST_LEGACY_PROTOCOL_VERSION,
     MODERN_ERA,
     MODERN_PROTOCOL_VERSIONS,
-    TASKS_MISSING_REQUIRED_CLIENT_CAPABILITY,
-    TASKS_EXTENSION,
     UNSUPPORTED_PROTOCOL_VERSION,
     RequestContext,
     dispatch_rpc,
@@ -97,13 +100,13 @@ from .protocol import (
     validate_rpc_envelope,
 )
 from .project_context import ProjectContext, instructions_for_path, load_project_context
-from .repositories import RepositoryContext, discover_repository, git_environment, repository_write_lock
+from .repositories import RepositoryContext, discover_repository, git_environment
 from .telemetry import SessionTelemetry
 from .textutils import DEFAULT_MAX_LINES, TextTruncation, truncate_text_head
-from .tool_catalog import CATEGORIES, TOOL_GUIDES, TOOL_USAGE_INSTRUCTIONS, discovery_score, normalize_query
+from .tool_catalog import TOOL_GUIDES, TOOL_USAGE_INSTRUCTIONS
 from .tool_results import make_tool_result
 from .transport_stdio import serve_stdio
-from .workflow_store import MAX_CHECKPOINT_BYTES, TASK_STATES, WorkflowStore, restore_token
+from .runtime_state import RuntimeStateStore
 
 
 SERVER_NAME = os.environ.get("CODING_TOOLS_MCP_SERVER_NAME", "").strip() or "coding-tools-mcp"
@@ -150,10 +153,7 @@ SERVER_INTERNAL_SECRET_ENV_NAMES = {
     f"{ENV_PREFIX}_OAUTH_TOKEN_SECRET",
 }
 SHELL_ENV_INHERIT_CHOICES = ("core", "all", "none")
-HOOK_EVENTS = ("before_tool", "after_tool", "tool_error")
-DEFAULT_HOOK_CONFIG_PATH = ".agents/hooks.json"
-HOOK_OUTPUT_BYTES = 16 * 1024
-DEFAULT_SHELL_SNAPSHOT_TOOLS = (
+RUNTIME_DOCTOR_TOOLS = (
     "git",
     "rg",
     "python3",
@@ -682,13 +682,6 @@ class ToolSpec:
     """Name of a Runtime attribute that must be truthy for the tool to be exposed."""
 
 
-@dataclass(frozen=True)
-class HookRule:
-    event: str
-    match: str
-    command: str
-    timeout_ms: int = 5000
-    blocking: bool = True
 
 
 def _image_content(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -705,15 +698,19 @@ def _image_content(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 TOOL_REGISTRY: dict[str, ToolSpec] = {
+    "project_context": ToolSpec(
+        title="Project context",
+        description=(
+            "List projects registered with a persistent gateway, inspect the project bound to this MCP session, "
+            "or explicitly bind this session to another project without restarting the gateway."
+        ),
+        read_only=False,
+        idempotent=False,
+        gated_by="enable_project_gateway",
+    ),
     "server_info": ToolSpec(
         title="Server info",
         description="Return server, workspace, project-context, auth, policy, and fixed-tool metadata.",
-        read_only=True,
-        idempotent=True,
-    ),
-    "check_exec_environment": ToolSpec(
-        title="Check exec environment",
-        description="Return lightweight exec_command sandbox and environment status known to the server.",
         read_only=True,
         idempotent=True,
     ),
@@ -721,23 +718,8 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         title="Runtime doctor",
         description=(
             "Run a non-destructive runtime health check covering common toolchain commands, workspace access, "
-            "shell snapshot, hooks, LSP availability, sandbox status, network policy, and macOS Apple toolchain "
+            "shell snapshot, LSP availability, sandbox status, network policy, and macOS Apple toolchain "
             "metadata including Xcode, Swift, SourceKit-LSP, codesign, notarytool, xcresulttool, and Homebrew."
-        ),
-        read_only=True,
-        idempotent=True,
-    ),
-    "hooks_status": ToolSpec(
-        title="Hooks status",
-        description="Report whether workspace hooks are enabled and summarize the loaded hook rules.",
-        read_only=True,
-        idempotent=True,
-    ),
-    "shell_snapshot": ToolSpec(
-        title="Shell snapshot",
-        description=(
-            "Capture or reuse a stable execution-environment snapshot, including PATH tool resolution, "
-            "for subsequent exec_command calls."
         ),
         read_only=True,
         idempotent=True,
@@ -771,31 +753,6 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         description="Search UTF-8 files in the configured file scope for text or regex matches.",
         read_only=True,
         idempotent=True,
-    ),
-    "tool_search": ToolSpec(
-        title="Search tools",
-        description=(
-            "Discover enabled tools progressively. Call {} for a category directory, "
-            "{\"category\":\"code\"} for tool summaries, or "
-            "{\"query\":\"code_definition\",\"include_schema\":true} for one tool's parameters. "
-            "English/Chinese intent queries also work; use limit=3 for a focused search. "
-            "Deferred search matches include input schemas and tool_invoke routing. "
-            "Reuse known schemas; directly listed tools need no discovery call."
-        ),
-        read_only=True,
-        idempotent=True,
-    ),
-    "tool_invoke": ToolSpec(
-        title="Invoke deferred tool",
-        description=(
-            "Call a deferred tool using its discovered input_schema: pass its exact name and an arguments object "
-            "matching that schema. For example, after discovering workspace_overview: "
-            "{\"name\":\"workspace_overview\",\"arguments\":{}}. "
-            "Call directly listed tools by their own names. Normal validation and permissions still apply."
-        ),
-        destructive=True,
-        open_world=True,
-        gated_by="enable_deferred_tools",
     ),
     "apply_patch": ToolSpec(
         title="Apply patch",
@@ -892,140 +849,11 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         read_only=True,
         idempotent=True,
     ),
-    "git_branch_list": ToolSpec(
-        title="List Git branches",
-        description="List bounded local branches with current branch, upstream, and commit metadata.",
-        read_only=True,
-        idempotent=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "git_branch_create": ToolSpec(
-        title="Create Git branch",
-        description="Create a validated local branch when the workspace HEAD still matches the reviewed value.",
-        destructive=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "git_conflicts": ToolSpec(
-        title="List Git conflicts",
-        description="List unmerged paths and their index stages without modifying the repository.",
-        read_only=True,
-        idempotent=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "git_stage": ToolSpec(
-        title="Stage Git paths",
-        description="Stage only explicit workspace paths when HEAD and index still match reviewed fingerprints.",
-        destructive=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "git_unstage": ToolSpec(
-        title="Unstage Git paths",
-        description="Unstage only explicit paths when HEAD and index still match reviewed fingerprints.",
-        destructive=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "git_commit": ToolSpec(
-        title="Commit staged Git paths",
-        description="Commit exactly the declared staged path set after HEAD and index concurrency checks.",
-        destructive=True,
-        open_world=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "git_worktree_list": ToolSpec(
-        title="List Git worktrees",
-        description="List repository worktrees and identify those managed by this workspace runtime.",
-        read_only=True,
-        idempotent=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "git_worktree_create": ToolSpec(
-        title="Create Git worktree",
-        description="Create a managed isolated worktree after reviewed HEAD/index checks.",
-        destructive=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "git_worktree_remove": ToolSpec(
-        title="Remove Git worktree",
-        description="Remove one clean runtime-managed worktree while preserving its branch.",
-        destructive=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "lsp_status": ToolSpec(
-        title="Language server status",
-        description=(
-            "Report optional Python, TypeScript/JavaScript, Rust, and Swift/SourceKit-LSP backend availability, "
-            "resolved commands, project roots, and process state."
-        ),
-        read_only=True,
-        idempotent=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "lsp_definition": ToolSpec(
-        title="LSP definition",
-        description=(
-            "Resolve definitions through the configured language server. Public line/column inputs are one-based; "
-            "the runtime converts the source column to the LSP UTF-16 position internally."
-        ),
-        read_only=True,
-        idempotent=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "lsp_references": ToolSpec(
-        title="LSP references",
-        description=(
-            "Resolve semantic references through the configured language server. Public line/column inputs are "
-            "one-based and converted internally to the LSP UTF-16 position."
-        ),
-        read_only=True,
-        idempotent=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "lsp_diagnostics": ToolSpec(
-        title="LSP diagnostics",
+    "code_diagnostics": ToolSpec(
+        title="Code diagnostics",
         description="Open or refresh a source file and return bounded published language-server diagnostics.",
         read_only=True,
         idempotent=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "lsp_rename_preview": ToolSpec(
-        title="LSP rename preview",
-        description="Return a bounded workspace-confined rename edit preview with source hashes; does not modify files.",
-        read_only=True,
-        idempotent=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "review_prepare": ToolSpec(
-        title="Prepare code review",
-        description="Persist a bounded Git diff, project instructions, task evidence, and exact code fingerprint for review.",
-        destructive=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "review_record": ToolSpec(
-        title="Record code review",
-        description="Record structured review findings with optimistic revision checking.",
-        destructive=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "review_get": ToolSpec(
-        title="Get code review",
-        description="Read a review snapshot and report whether its code state is now stale.",
-        read_only=True,
-        idempotent=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "approval_get": ToolSpec(
-        title="Get approval request",
-        description="Read one persistent operator approval request and its expiry/consumption state.",
-        read_only=True,
-        idempotent=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "approval_list": ToolSpec(
-        title="List approval requests",
-        description="List bounded persistent approval requests; decisions remain restricted to the local desktop.",
-        read_only=True,
-        idempotent=True,
-        gated_by="enable_workflow_tools",
     ),
     "request_permissions": ToolSpec(
         title="Request permissions",
@@ -1040,50 +868,12 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ),
         read_only=True,
         idempotent=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "repo_map": ToolSpec(
-        title="Repository map",
-        description=(
-            "Return a bounded, task-filtered map of files and code symbols with backend coverage metadata. "
-            "Optional impact mode uses explicit or current Git-changed paths to estimate direct reference and likely-test impact."
-        ),
-        read_only=True,
-        idempotent=True,
-        gated_by="enable_workflow_tools",
     ),
     "project_instructions": ToolSpec(
         title="Project instructions",
         description="Resolve root and nested project instruction files that apply to one workspace path.",
         read_only=True,
         idempotent=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "skills_list": ToolSpec(
-        title="List workspace skills",
-        description="List bounded metadata for local .agents/skills entries without executing their scripts.",
-        read_only=True,
-        idempotent=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "skills_read": ToolSpec(
-        title="Read workspace skill",
-        description="Read one UTF-8 workspace SKILL.md selected from .agents/skills.",
-        read_only=True,
-        idempotent=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "agent_environment": ToolSpec(
-        title="Discover local agent environment",
-        description=(
-            "Discover metadata for installed local agent runtimes such as Codex, Claude Code, Gemini CLI, "
-            "Cursor, and OpenCode. Returns CLI/home paths, skill/plugin/worktree/rule names, supports filtered "
-            "capability search, and reports sensitive resource presence without reading credentials, cookies, "
-            "tokens, or browser-session contents."
-        ),
-        read_only=True,
-        idempotent=True,
-        gated_by="enable_agent_environment",
     ),
     "checks_discover": ToolSpec(
         title="Discover checks",
@@ -1093,122 +883,6 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ),
         read_only=True,
         idempotent=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "checks_run": ToolSpec(
-        title="Run discovered check",
-        description=(
-            "Run one currently discovered check through the existing bounded command and permission engine, "
-            "and extract bounded structured failure diagnostics while preserving raw output."
-        ),
-        destructive=True,
-        open_world=True,
-        error_status="failed",
-        gated_by="enable_workflow_tools",
-    ),
-    "checks_result": ToolSpec(
-        title="Get check evidence",
-        description=(
-            "Read persisted check evidence, structured failure diagnostics, and whether its code fingerprint is stale."
-        ),
-        read_only=True,
-        idempotent=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "task_create": ToolSpec(
-        title="Create task record",
-        description="Create a persistent workspace task record with an objective and revision.",
-        destructive=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "task_get": ToolSpec(
-        title="Get task record",
-        description="Read one persistent workspace task record.",
-        read_only=True,
-        idempotent=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "task_list": ToolSpec(
-        title="List task records",
-        description="List persistent workspace task records, optionally filtered by status.",
-        read_only=True,
-        idempotent=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "task_update": ToolSpec(
-        title="Update task record",
-        description="Update a task using optimistic revision checking and validated status transitions.",
-        destructive=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "task_event_add": ToolSpec(
-        title="Add task event",
-        description="Append a bounded progress, decision, evidence, or note event to a persistent task.",
-        destructive=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "task_events": ToolSpec(
-        title="List task events",
-        description="List the recent event history for a persistent task.",
-        read_only=True,
-        idempotent=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "task_context": ToolSpec(
-        title="Get task context",
-        description="Return a restart-safe task summary with recent events, checks, and checkpoints.",
-        read_only=True,
-        idempotent=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "task_plan_get": ToolSpec(
-        title="Get task plan",
-        description="Read the current ordered plan steps and task revision.",
-        read_only=True,
-        idempotent=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "task_plan_update": ToolSpec(
-        title="Update task plan",
-        description="Atomically replace ordered plan steps using the task revision as a concurrency token.",
-        destructive=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "checkpoint_create": ToolSpec(
-        title="Create checkpoint",
-        description="Snapshot an explicit bounded set of UTF-8 workspace files without changing Git state.",
-        destructive=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "checkpoint_list": ToolSpec(
-        title="List checkpoints",
-        description="List persistent checkpoints for this workspace.",
-        read_only=True,
-        idempotent=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "checkpoint_diff": ToolSpec(
-        title="Diff checkpoint",
-        description="Compare checkpointed files with the current workspace and return a restore token bound to current state.",
-        read_only=True,
-        idempotent=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "checkpoint_restore": ToolSpec(
-        title="Restore checkpoint",
-        description="Restore a checkpoint only when its preview token still matches every current file.",
-        destructive=True,
-        gated_by="enable_workflow_tools",
-    ),
-    "context_checkpoint": ToolSpec(
-        title="Context checkpoint",
-        description=(
-            "Create, read, or list a model-free cross-session context checkpoint. The server records current "
-            "Git/command/capability fingerprints; semantic summary fields are supplied by the calling model."
-        ),
-        read_only=False,
-        idempotent=False,
-        gated_by="enable_workflow_tools",
     ),
     "view_image": ToolSpec(
         title="View image",
@@ -2045,14 +1719,6 @@ class WorkspaceCommandManager:
             shutil.rmtree(self.fallback_runtime_dir, ignore_errors=True)
 
 
-def guarded_git_write(method: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
-    @functools.wraps(method)
-    def guarded(runtime: Any, args: dict[str, Any]) -> dict[str, Any]:
-        repo = runtime._git_repository(args, required=True)
-        assert repo is not None
-        with repository_write_lock(repo):
-            return method(runtime, args, repo)
-    return guarded
 
 
 class Runtime:
@@ -2063,10 +1729,6 @@ class Runtime:
         file_access_root: Path | None = None,
         file_access_roots: Sequence[Path] = (),
         enable_view_image: bool = True,
-        enable_workflow_tools: bool = False,
-        defer_workflow_tools: bool = False,
-        enable_hooks: bool = False,
-        hooks_file: str | None = None,
         state_root: Path | None = None,
         permission_mode: str = "safe",
         shell_env_policy: ShellEnvPolicy | None = None,
@@ -2088,30 +1750,17 @@ class Runtime:
             host_filesystem=permission_mode == "host",
         )
         self.enable_view_image = enable_view_image
-        self.enable_workflow_tools = enable_workflow_tools
-        self.enable_agent_environment = permission_mode == "host"
-        self.defer_workflow_tools = bool(defer_workflow_tools and enable_workflow_tools)
-        self.enable_deferred_tools = self.defer_workflow_tools
-        self.enable_hooks = enable_hooks
-        self.hooks_file = hooks_file or DEFAULT_HOOK_CONFIG_PATH
-        self.workflow_store = (
-            WorkflowStore(self.workspace.root, state_root=state_root) if enable_workflow_tools else None
-        )
+        # A normal workspace Runtime never exposes gateway-only project routing.
+        # GatewayRuntime adds this capability at the transport boundary instead
+        # of making Runtime.workspace mutable.
+        self.enable_project_gateway = False
+        self.runtime_state = RuntimeStateStore(self.workspace.root, state_root=state_root)
         self._available_tool_names = [
             name
             for name, spec in TOOL_REGISTRY.items()
             if spec.gated_by is None or getattr(self, spec.gated_by)
         ]
-        self._deferred_tool_names = [
-            name
-            for name in self._available_tool_names
-            if self.defer_workflow_tools and TOOL_REGISTRY[name].gated_by == "enable_workflow_tools"
-        ]
-        deferred_set = frozenset(self._deferred_tool_names)
-        self._exposed_tool_names = [name for name in self._available_tool_names if name not in deferred_set]
         self._available_tool_name_set = frozenset(self._available_tool_names)
-        self._exposed_tool_name_set = frozenset(self._exposed_tool_names)
-        self._deferred_tool_name_set = deferred_set
         if permission_mode not in PERMISSION_MODE_CHOICES:
             raise ToolFailure(
                 "INVALID_ARGUMENT",
@@ -2186,11 +1835,12 @@ class Runtime:
         self._runtime_dir_lock = threading.Lock()
         self._runtime_dir_resolved = False
         self._closed = False
-        self._shell_snapshot_lock = threading.Lock()
-        self._shell_snapshot_env: dict[str, str] | None = None
-        self._shell_snapshot_payload: dict[str, Any] | None = None
-        self.lsp_manager = (
-            lsp_tools.LSPManager(self.workspace.root, self._command_env({})) if enable_workflow_tools else None
+        # LSP discovery should not eagerly create the command HOME/TMP/cache
+        # tree.  The paths are stable from construction time; create them only
+        # when a language server is actually started.
+        self.lsp_manager = lsp_tools.LSPManager(
+            self.workspace.root,
+            self._fresh_command_env(create_runtime_dirs=False),
         )
         self.patch_baselines: dict[str, str | None] = {}
         self.patch_lock = threading.Lock()
@@ -2198,10 +1848,9 @@ class Runtime:
         # ProjectContext is frozen and derived only from the workspace tree, so
         # an embedder that builds several runtimes over one workspace can reuse
         # the discovery (git ls-files / directory walk) result.
-        self.project_context: ProjectContext = (
+        self.project_context_data: ProjectContext = (
             project_context if project_context is not None else load_project_context(self.workspace.root)
         )
-        self._hook_rules, self._hook_warnings = self._load_hook_rules()
         self.telemetry = SessionTelemetry(permission_mode=self.permission_mode, transport=transport)
         self._tool_handlers = {name: getattr(self, name) for name in TOOL_REGISTRY}
 
@@ -2366,18 +2015,13 @@ class Runtime:
 
     def tool_usage_instructions(self) -> str:
         guidance = TOOL_USAGE_INSTRUCTIONS
-        if self.defer_workflow_tools:
-            guidance += (
-                " Deferred tools stay outside tools/list: discover their input_schema, then call "
-                "tool_invoke with the exact name and matching arguments. No tools/list refresh is needed."
-            )
         if self.capabilities.host_environment:
             scope_guidance = (
                 " Full Access is enabled: ordinary file tools and apply_patch may access the host filesystem, "
                 "while relative paths remain workspace-relative so project context stays stable. exec_command may "
                 "use the host environment, SSH, SCP, rsync, Git over SSH, installed developer tools, and paths "
                 "outside the workspace. Do not claim a host tool is unavailable without checking the execution "
-                "environment or attempting the requested non-interactive command. Git, LSP, checks, reviews, and "
+                "environment or attempting the requested non-interactive command. Git, LSP, check discovery, and "
                 "project instructions remain anchored to the configured workspace unless their tool contract says otherwise."
             )
         else:
@@ -2387,7 +2031,7 @@ class Runtime:
                 f"folders: {file_scope}. Relative paths stay workspace-relative; absolute paths are allowed only "
                 "inside those folders."
             )
-        return f"{guidance}{scope_guidance}\n\n{self.project_context.server_instructions()}"
+        return f"{guidance}{scope_guidance}\n\n{self.project_context_data.server_instructions()}"
 
     def discover_payload(self) -> dict[str, Any]:
         """Tell a client that never handshakes what this server can do.
@@ -2400,19 +2044,11 @@ class Runtime:
         result envelope, so the fields returned are the answer itself.
         """
 
-        capabilities: dict[str, Any] = {"tools": {"listChanged": False}}
-        if self.protocol_tasks_enabled():
-            capabilities["extensions"] = {TASKS_EXTENSION: {}}
         return {
             "supportedVersions": list(MODERN_PROTOCOL_VERSIONS),
-            "capabilities": capabilities,
+            "capabilities": {"tools": {"listChanged": False}},
             "instructions": self.tool_usage_instructions(),
         }
-
-    def protocol_tasks_enabled(self) -> bool:
-        """Return whether this Runtime can durably back 2026 protocol Tasks."""
-
-        return self.enable_workflow_tools and self.workflow_store is not None
 
     def server_identity(self) -> dict[str, Any]:
         """Name this server for the handshake and for modern result metadata.
@@ -2436,7 +2072,7 @@ class Runtime:
         }
 
     def exposed_tool_names(self) -> list[str]:
-        return list(self._exposed_tool_names)
+        return list(self._available_tool_names)
 
     def auth_enabled(self) -> bool:
         return self.auth_token is not None or self.oauth_config is not None
@@ -2444,265 +2080,17 @@ class Runtime:
     def oauth_enabled(self) -> bool:
         return self.oauth_config is not None
 
-    def _workflow_store(self) -> WorkflowStore:
-        if self.workflow_store is None:
-            raise ToolFailure("INTERNAL_ERROR", "Workflow toolset is not enabled.", category="internal")
-        return self.workflow_store
+    def _runtime_state(self) -> RuntimeStateStore:
+        return self.runtime_state
 
     def _lsp_manager(self) -> lsp_tools.LSPManager:
         if self.lsp_manager is None:
             raise ToolFailure("INTERNAL_ERROR", "Workflow toolset is not enabled.", category="internal")
         return self.lsp_manager
 
-    def _load_hook_rules(self) -> tuple[list[HookRule], list[str]]:
-        if not self.enable_hooks:
-            return [], []
-        try:
-            resolved = self.resolve_existing(self.hooks_file)
-        except ToolFailure as exc:
-            if exc.code == "NOT_FOUND":
-                return [], [f"Hook config not found: {self.hooks_file}"]
-            raise
-        if resolved.path.is_dir():
-            raise ToolFailure(
-                "INVALID_HOOK_CONFIG",
-                "Hook config path must be a JSON file.",
-                category="validation",
-                details={"path": resolved.display},
-            )
-        try:
-            raw = resolved.path.read_text(encoding="utf-8")
-            parsed = json.loads(raw)
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ToolFailure(
-                "INVALID_HOOK_CONFIG",
-                f"Could not read hook config: {exc}",
-                category="validation",
-                details={"path": resolved.display},
-            ) from exc
-        if not isinstance(parsed, dict) or not isinstance(parsed.get("hooks", []), list):
-            raise ToolFailure(
-                "INVALID_HOOK_CONFIG",
-                "Hook config must be an object with a hooks array.",
-                category="validation",
-                details={"path": resolved.display},
-            )
-        raw_rules = parsed.get("hooks", [])
-        if len(raw_rules) > 64:
-            raise ToolFailure(
-                "INVALID_HOOK_CONFIG",
-                "Hook config may contain at most 64 rules.",
-                category="validation",
-                details={"path": resolved.display},
-            )
-        rules: list[HookRule] = []
-        for index, item in enumerate(raw_rules):
-            if not isinstance(item, dict):
-                raise ToolFailure(
-                    "INVALID_HOOK_CONFIG",
-                    f"Hook rule {index} must be an object.",
-                    category="validation",
-                    details={"path": resolved.display, "index": index},
-                )
-            raw_event = item.get("event", "")
-            raw_match = item.get("match", "*")
-            raw_command = item.get("command", "")
-            raw_timeout_ms = item.get("timeout_ms", 5000)
-            raw_blocking = item.get("blocking", True)
-            if not isinstance(raw_event, str) or not isinstance(raw_match, str) or not isinstance(raw_command, str):
-                raise ToolFailure(
-                    "INVALID_HOOK_CONFIG",
-                    f"Hook rule {index} event, match, and command must be strings.",
-                    category="validation",
-                    details={"index": index},
-                )
-            if isinstance(raw_timeout_ms, bool) or not isinstance(raw_timeout_ms, int):
-                raise ToolFailure(
-                    "INVALID_HOOK_CONFIG",
-                    f"Hook rule {index} timeout_ms must be an integer.",
-                    category="validation",
-                    details={"index": index},
-                )
-            if not isinstance(raw_blocking, bool):
-                raise ToolFailure(
-                    "INVALID_HOOK_CONFIG",
-                    f"Hook rule {index} blocking must be a boolean.",
-                    category="validation",
-                    details={"index": index},
-                )
-            event = raw_event.strip()
-            match = raw_match.strip() or "*"
-            command = raw_command.strip()
-            timeout_ms = raw_timeout_ms
-            blocking = raw_blocking
-            if event not in HOOK_EVENTS:
-                raise ToolFailure(
-                    "INVALID_HOOK_CONFIG",
-                    f"Hook rule {index} has unsupported event: {event}",
-                    category="validation",
-                    details={"supported_events": list(HOOK_EVENTS), "index": index},
-                )
-            if not command:
-                raise ToolFailure(
-                    "INVALID_HOOK_CONFIG",
-                    f"Hook rule {index} requires a command.",
-                    category="validation",
-                    details={"index": index},
-                )
-            if timeout_ms < 100 or timeout_ms > 30000:
-                raise ToolFailure(
-                    "INVALID_HOOK_CONFIG",
-                    f"Hook rule {index} timeout_ms must be between 100 and 30000.",
-                    category="validation",
-                    details={"index": index},
-                )
-            rules.append(
-                HookRule(
-                    event=event,
-                    match=match,
-                    command=command,
-                    timeout_ms=timeout_ms,
-                    blocking=blocking,
-                )
-            )
-        return rules, []
 
-    def _run_hook_command(self, rule: HookRule, event_payload: dict[str, Any]) -> dict[str, Any]:
-        self._check_command_policy(rule.command, {})
-        env = self._command_env(
-            {
-                "CODING_TOOLS_HOOK_EVENT": rule.event,
-                "CODING_TOOLS_HOOK_TOOL": str(event_payload.get("tool", "")),
-            }
-        )
-        input_bytes = json_response_payload(event_payload)
-        landlock_fd: int | None = None
-        landlock_warning: str | None = None
-        popen_cmd: Any = rule.command
-        popen_shell = True
-        popen_kwargs = process_group_popen_kwargs()
-        if self.landlock_enabled():
-            try:
-                landlock_fd = open_landlock_ruleset(
-                    self.workspace.root,
-                    guard_allow_roots(),
-                    write_roots=self.landlock_write_roots(),
-                )
-                popen_cmd = landlock_exec_argv(landlock_fd, rule.command)
-                popen_shell = False
-                popen_kwargs["pass_fds"] = (landlock_fd,)
-            except ToolFailure as exc:
-                if exc.code != "SANDBOX_UNAVAILABLE":
-                    raise
-                landlock_warning = landlock_unavailable_warning(exc)
-        process: subprocess.Popen[bytes] | None = None
-        try:
-            process = subprocess.Popen(
-                popen_cmd,
-                cwd=str(self.workspace.root),
-                shell=popen_shell,
-                env=env,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                **popen_kwargs,
-            )
-            try:
-                stdout_raw, stderr_raw = process.communicate(
-                    input=input_bytes,
-                    timeout=rule.timeout_ms / 1000.0,
-                )
-                timed_out = False
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                terminate_process_group(process, signal.SIGTERM)
-                try:
-                    stdout_raw, stderr_raw = process.communicate(timeout=0.5)
-                except subprocess.TimeoutExpired:
-                    terminate_process_group(process, HARD_KILL_SIGNAL)
-                    stdout_raw, stderr_raw = process.communicate()
-            stdout, stdout_truncated = truncate_bytes(stdout_raw, HOOK_OUTPUT_BYTES)
-            stderr, stderr_truncated = truncate_bytes(stderr_raw, HOOK_OUTPUT_BYTES)
-            return {
-                "returncode": process.returncode,
-                "timed_out": timed_out,
-                "stdout": stdout,
-                "stderr": stderr,
-                "truncated": stdout_truncated or stderr_truncated,
-                "warning": landlock_warning,
-            }
-        finally:
-            if process is not None and process.poll() is None:
-                terminate_process_group(process, signal.SIGTERM)
-            if landlock_fd is not None:
-                try:
-                    os.close(landlock_fd)
-                except OSError:
-                    pass
 
-    def _run_hook_event(
-        self,
-        event: str,
-        tool_name: str,
-        arguments: dict[str, Any],
-        payload: dict[str, Any] | None = None,
-    ) -> list[str]:
-        if not self.enable_hooks or not self._hook_rules:
-            return []
-        if tool_name in {"runtime_doctor", "hooks_status", "shell_snapshot", "tool_search", "tool_invoke"}:
-            return []
-        warnings: list[str] = []
-        event_payload: dict[str, Any] = {
-            "event": event,
-            "tool": tool_name,
-            "workspace": str(self.workspace.root),
-            "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-            "arguments": redact_for_trace(arguments),
-        }
-        if payload is not None:
-            raw_error = payload.get("error")
-            event_payload["result"] = {
-                "ok": bool(payload.get("ok")),
-                "status": payload.get("status"),
-                "error": redact_for_trace(raw_error) if isinstance(raw_error, dict) else None,
-            }
-        for index, rule in enumerate(self._hook_rules):
-            if rule.event != event or not fnmatch.fnmatchcase(tool_name, rule.match):
-                continue
-            try:
-                result = self._run_hook_command(rule, event_payload)
-                failed = bool(result.get("timed_out")) or result.get("returncode") != 0
-                if not failed:
-                    continue
-                reason = "timed out" if result.get("timed_out") else f"exited {result.get('returncode')}"
-                message = f"Hook {index} ({event}, {rule.match}) {reason}."
-                stderr = str(result.get("stderr") or "").strip()
-                if stderr:
-                    message += f" stderr: {stderr[:1000]}"
-            except ToolFailure as exc:
-                message = f"Hook {index} ({event}, {rule.match}) was blocked: {exc.message}"
-                failed = True
-            if event == "before_tool" and rule.blocking and failed:
-                raise ToolFailure(
-                    "HOOK_BLOCKED",
-                    message,
-                    category="permission",
-                    details={"event": event, "tool": tool_name, "hook_index": index},
-                )
-            warnings.append(message)
-        return warnings
 
-    @staticmethod
-    def _merge_hook_warnings(payload: dict[str, Any], warnings: list[str]) -> None:
-        if not warnings:
-            return
-        existing = payload.get("warnings")
-        if isinstance(existing, list):
-            existing.extend(warnings)
-        elif existing is None:
-            payload["warnings"] = list(warnings)
-        else:
-            payload["warnings"] = [str(existing), *warnings]
 
     def resolve_existing(self, raw_path: str = ".") -> ResolvedPath:
         return self.workspace.resolve_existing(raw_path)
@@ -2802,36 +2190,14 @@ class Runtime:
             },
             "endpoint_path": MCP_ENDPOINT_PATH,
             "project_context": {
-                "root_instruction_files": [item.path for item in self.project_context.root_files],
-                "nested_instruction_files": list(self.project_context.nested_files),
-                "warnings": list(self.project_context.warnings),
+                "root_instruction_files": [item.path for item in self.project_context_data.root_files],
+                "nested_instruction_files": list(self.project_context_data.nested_files),
+                "warnings": list(self.project_context_data.warnings),
             },
-            "toolsets": ["core", *(["workflow"] if self.enable_workflow_tools else [])],
-            "workflow_state": (
-                {"workspace_id": self._workflow_store().workspace_id, "persistent": True}
-                if self.enable_workflow_tools
-                else {"enabled": False}
-            ),
-            "hooks": {
-                "enabled": self.enable_hooks,
-                "config_path": self.hooks_file,
-                "rule_count": len(self._hook_rules),
-                "warnings": list(self._hook_warnings),
-            },
-            "deferred_tools": {
-                "enabled": self.defer_workflow_tools,
-                "direct_count": len(self._exposed_tool_names),
-                "deferred_count": len(self._deferred_tool_names),
-                "available_count": len(self._available_tool_names),
-                "directory": {"tool": "tool_search", "arguments": {}},
-            },
-            "shell_snapshot": {
-                "active": self._shell_snapshot_env is not None,
-                "snapshot_id": (
-                    self._shell_snapshot_payload.get("snapshot_id")
-                    if self._shell_snapshot_payload is not None
-                    else None
-                ),
+            "toolsets": ["core"],
+            "runtime_state": {
+                "workspace_id": self._runtime_state().workspace_id,
+                "persistent": True,
             },
             "tools": tools,
             "tool_count": len(tools),
@@ -2845,7 +2211,7 @@ class Runtime:
         context: RequestContext | None = None,
     ) -> dict[str, Any]:
         args = arguments or {}
-        payload = self._execute_tool_payload(name, args, context=context, allow_deferred=False)
+        payload = self._execute_tool_payload(name, args, context=context)
         spec = TOOL_REGISTRY[name]
         content = spec.content_builder(payload) if spec.content_builder else None
         return make_tool_result(name, payload, is_error=payload.get("ok") is False, content=content)
@@ -2856,25 +2222,16 @@ class Runtime:
         args: dict[str, Any],
         *,
         context: RequestContext | None = None,
-        allow_deferred: bool,
     ) -> dict[str, Any]:
         started_at = time.time()
-        allowed_names = self._available_tool_name_set if allow_deferred else self._exposed_tool_name_set
-        handler = self._tool_handlers.get(name) if name in allowed_names else None
+        handler = self._tool_handlers.get(name) if name in self._available_tool_name_set else None
         if handler is None:
             raise JsonRpcError(-32602, f"Unknown tool: {name}", {"reason": "unknown_tool"})
         spec = TOOL_REGISTRY[name]
         validate_arguments(name, args)
-        before_hook_warnings: list[str] = []
         try:
-            before_hook_warnings = self._run_hook_event("before_tool", name, args)
             payload = handler(args)
             payload.setdefault("ok", True)
-            hook_warnings = [
-                *before_hook_warnings,
-                *self._run_hook_event("after_tool", name, args, payload),
-            ]
-            self._merge_hook_warnings(payload, hook_warnings)
             self.emit_tool_trace(name, args, payload, started_at, context=context)
             return payload
         except ToolFailure as exc:
@@ -2903,11 +2260,6 @@ class Runtime:
                 }
             if exc.code == "ELICITATION_UNSUPPORTED":
                 payload["status"] = "unsupported"
-            hook_warnings = [
-                *before_hook_warnings,
-                *self._run_hook_event("tool_error", name, args, payload),
-            ]
-            self._merge_hook_warnings(payload, hook_warnings)
             self.emit_tool_trace(name, args, payload, started_at, context=context)
             return payload
         except Exception as exc:  # noqa: BLE001 - tool failures must stay structured
@@ -2923,52 +2275,24 @@ class Runtime:
             }
             if spec.error_status:
                 payload["status"] = spec.error_status
-            hook_warnings = [
-                *before_hook_warnings,
-                *self._run_hook_event("tool_error", name, args, payload),
-            ]
-            self._merge_hook_warnings(payload, hook_warnings)
             self.emit_tool_trace(name, args, payload, started_at, context=context)
             return payload
+
+    def project_context(self, args: dict[str, Any]) -> dict[str, Any]:
+        raise ToolFailure(
+            "GATEWAY_REQUIRED",
+            "project_context is only available when the HTTP project gateway is enabled.",
+            category="validation",
+        )
 
     def server_info(self, args: dict[str, Any]) -> dict[str, Any]:
         return self.server_info_payload()
 
-    def check_exec_environment(self, args: dict[str, Any]) -> dict[str, Any]:
-        landlock = landlock_status_payload()
-        warnings: list[str] = []
-        if not landlock.get("available"):
-            warnings.append("Linux Landlock filesystem confinement is unavailable")
-        if self.capabilities.host_environment:
-            warnings.append(
-                "permission_mode=host exposes the host environment, credentials, filesystem, and network"
-            )
-            if not self._host_integration_summary()["ssh_auth_sock_reachable"]:
-                warnings.append("SSH agent socket is not available to host-mode commands")
-        elif self.capabilities.skip_all_permissions:
-            warnings.append("permission_mode=dangerous disables ordinary MCP command safety gates")
-            if self.network_policy != "unrestricted":
-                warnings.append(f"explicit network_policy={self.network_policy} remains active")
-        if self.fake_readonly_annotations:
-            warnings.append(
-                "tools/list annotations are faked as read-only; apply_patch and exec_command still mutate and execute"
-            )
-        return {
-            "ok": True,
-            **self._exec_environment_summary(),
-            "landlock_enabled": self._landlock_enforced(landlock),
-            "landlock_abi": landlock.get("abi_version"),
-            "global_tmp_write": self.global_tmp_write_policy(),
-            "warnings": warnings,
-        }
 
     def runtime_doctor(self, args: dict[str, Any]) -> dict[str, Any]:
-        with self._shell_snapshot_lock:
-            snapshot_env = dict(self._shell_snapshot_env) if self._shell_snapshot_env is not None else None
-            snapshot_meta = dict(self._shell_snapshot_payload or {})
-        base_env = snapshot_env if snapshot_env is not None else self._base_command_env()
+        base_env = self._base_command_env()
         path_value = base_env.get("PATH") or base_env.get("Path") or ""
-        tool_names = tuple(dict.fromkeys((*DEFAULT_SHELL_SNAPSHOT_TOOLS, "uv", "pytest", "make")))
+        tool_names = tuple(dict.fromkeys((*RUNTIME_DOCTOR_TOOLS, "uv", "pytest", "make")))
         tools = {name: shutil.which(name, path=path_value) for name in tool_names}
         issues: list[dict[str, str]] = []
 
@@ -3001,9 +2325,6 @@ class Runtime:
                 "Network policy is allowlist but no domains are configured, so network-intent commands require approval.",
                 "Add --network-allow-domain entries or CODING_TOOLS_MCP_NETWORK_ALLOW_DOMAINS.",
             )
-        for warning in self._hook_warnings:
-            issue("HOOK_CONFIG_WARNING", warning, "Fix the hook configuration or disable hooks for this runtime.")
-
         landlock = landlock_status_payload()
         workspace_readable = os.access(self.workspace.root, os.R_OK)
         workspace_writable = os.access(self.workspace.root, os.W_OK)
@@ -3044,12 +2365,7 @@ class Runtime:
                 "python": tools["python"],
                 "python3": tools["python3"],
             },
-            "tools": tools,
-            "shell_snapshot": {
-                "active": snapshot_env is not None,
-                "snapshot_id": snapshot_meta.get("snapshot_id"),
-                "created_at": snapshot_meta.get("created_at"),
-            },
+            "commands": tools,
             "network": {
                 "mode": self.network_policy,
                 "allow_domains": list(self.network_allow_domains),
@@ -3061,93 +2377,16 @@ class Runtime:
                 "landlock_enabled": self._landlock_enforced(landlock),
                 "permission_mode": self.permission_mode,
             },
-            "hooks": {
-                "enabled": self.enable_hooks,
-                "rule_count": len(self._hook_rules),
-                "warnings": list(self._hook_warnings),
-            },
-            "workflow": {
-                "enabled": self.enable_workflow_tools,
-                "deferred": self.defer_workflow_tools,
-                "direct_tool_count": len(self._exposed_tool_names),
-                "deferred_tool_count": len(self._deferred_tool_names),
+            "tool_surface": {
+                "direct": True,
+                "tool_count": len(self._available_tool_names),
             },
             "apple": apple_status,
             "lsp": lsp_status if lsp_status is not None else {"enabled": False},
             "issues": issues,
         }
 
-    def hooks_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "enabled": self.enable_hooks,
-            "config_path": self.hooks_file,
-            "supported_events": list(HOOK_EVENTS),
-            "rule_count": len(self._hook_rules),
-            "rules": [
-                {
-                    "event": rule.event,
-                    "match": rule.match,
-                    "timeout_ms": rule.timeout_ms,
-                    "blocking": rule.blocking,
-                }
-                for rule in self._hook_rules
-            ],
-            "warnings": list(self._hook_warnings),
-        }
 
-    def shell_snapshot(self, args: dict[str, Any]) -> dict[str, Any]:
-        refresh = bool(args.get("refresh", False))
-        raw_tools = args.get("tools")
-        tool_names = (
-            [str(item) for item in raw_tools]
-            if isinstance(raw_tools, list) and raw_tools
-            else list(DEFAULT_SHELL_SNAPSHOT_TOOLS)
-        )
-        with self._shell_snapshot_lock:
-            cached = self._shell_snapshot_env is not None and not refresh
-            if cached:
-                env = dict(self._shell_snapshot_env or {})
-                metadata = dict(self._shell_snapshot_payload or {})
-            else:
-                env = self._fresh_command_env()
-                fingerprint = hashlib.sha256(json_response_payload(sorted(env.items()))).hexdigest()
-                metadata = {
-                    "snapshot_id": fingerprint[:24],
-                    "env_fingerprint": fingerprint,
-                    "created_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
-                        "+00:00", "Z"
-                    ),
-                }
-                self._shell_snapshot_env = dict(env)
-                self._shell_snapshot_payload = dict(metadata)
-        path_value = env.get("PATH") or env.get("Path") or ""
-        resolved_tools = {
-            name: shutil.which(name, path=path_value)
-            for name in dict.fromkeys(tool_names)
-        }
-        shell = (
-            env.get("SHELL")
-            or env.get("COMSPEC")
-            or env.get("ComSpec")
-            or os.environ.get("SHELL")
-            or os.environ.get("COMSPEC")
-            or ("cmd.exe" if os.name == "nt" else "/bin/sh")
-        )
-        return {
-            "snapshot_id": metadata.get("snapshot_id"),
-            "created_at": metadata.get("created_at"),
-            "cached": cached,
-            "refreshed": refresh,
-            "shell": shell,
-            "cwd": str(self.workspace.root),
-            "path_entries": [item for item in path_value.split(os.pathsep) if item][:128],
-            "tools": resolved_tools,
-            "env_count": len(env),
-            "env_fingerprint": metadata.get("env_fingerprint"),
-            "inherit": self.shell_env_policy.inherit,
-            "environment_scope": "host" if self.capabilities.host_environment else "isolated",
-            "note": "Subsequent exec_command calls reuse this environment until shell_snapshot(refresh=true).",
-        }
 
     def emit_tool_trace(
         self,
@@ -3320,148 +2559,6 @@ class Runtime:
                 },
             }
         return payload
-
-    def tool_search(self, args: dict[str, Any]) -> dict[str, Any]:
-        query = str(args.get("query", "")).strip()
-        limit = int(args.get("limit", 8))
-        offset = int(args.get("offset", 0))
-        category_id = str(args.get("category", ""))
-        include_schema = bool(args.get("include_schema", False))
-        counts = {
-            "searched_tool_count": len(self._available_tool_names),
-            "direct_tool_count": len(self._exposed_tool_names),
-            "deferred_tool_count": len(self._deferred_tool_names),
-        }
-        if not query and not category_id:
-            categories = []
-            for key, category in CATEGORIES.items():
-                members = [name for name in self._available_tool_names if TOOL_GUIDES[name].category == key]
-                if not members:
-                    continue
-                deferred = sum(name in self._deferred_tool_name_set for name in members)
-                categories.append({
-                    "id": key,
-                    "title": category.title,
-                    "use_when": category.use_when,
-                    "tool_count": len(members),
-                    "direct_count": len(members) - deferred,
-                    "deferred_count": deferred,
-                    "next_action": {"tool": "tool_search", "arguments": {"category": key}},
-                })
-            return {
-                "mode": "directory",
-                "query": query,
-                "categories": categories,
-                "matches": [],
-                "count": len(categories),
-                "truncated": False,
-                "strategy": TOOL_USAGE_INSTRUCTIONS,
-                **counts,
-            }
-
-        query_normalized = normalize_query(query)
-        if query and not query_normalized:
-            raise ToolFailure("INVALID_ARGUMENT", "query must contain a tool name or search words.", category="validation")
-        candidates = [
-            name for name in self._available_tool_names
-            if not category_id or TOOL_GUIDES[name].category == category_id
-        ]
-        exact = [name for name in candidates if normalize_query(name) == query_normalized]
-        ranked: list[tuple[float, str]] = []
-        for name in exact or candidates:
-            spec = TOOL_REGISTRY[name]
-            score = (
-                discovery_score(query_normalized, name, spec.title, spec.description)
-                if query_normalized else 0.0
-            )
-            if not query_normalized or score > 0:
-                ranked.append((score, name))
-        if query_normalized:
-            ranked.sort(key=lambda item: (-item[0], item[1]))
-            # A recognized intent should not load unrelated schemas merely to
-            # fill the result limit. Keep broad matches for exploratory queries.
-            if ranked and ranked[0][0] >= 300:
-                ranked = [item for item in ranked if item[0] >= 300]
-        selected = ranked[offset:offset + limit]
-        matches: list[dict[str, Any]] = []
-        for score, name in selected:
-            definition = tool_definition(name, fake_readonly=self.fake_readonly_annotations)
-            guide = TOOL_GUIDES[name]
-            deferred = name in self._deferred_tool_name_set
-            item = {
-                "name": name,
-                "title": definition["title"],
-                "description": definition["description"] if query or include_schema else guide.use_when,
-                "category": guide.category,
-                "use_when": guide.use_when,
-                "annotations": definition["annotations"],
-                "score": round(score, 3),
-                "deferred": deferred,
-                "invoke_via": "tool_invoke" if deferred else name,
-            }
-            # Category browsing is deliberately schema-free by default. Keep
-            # deferred intent-search schemas for existing discovery clients.
-            if include_schema or (query_normalized and deferred):
-                item["input_schema"] = definition["inputSchema"]
-            else:
-                item["schema_action"] = {
-                    "tool": "tool_search",
-                    "arguments": {"query": name, "include_schema": True},
-                }
-            matches.append(item)
-        truncated = offset + len(selected) < len(ranked)
-        result: dict[str, Any] = {
-            "mode": "search" if query else "category",
-            "query": query,
-            "category": category_id or None,
-            "matches": matches,
-            "count": len(matches),
-            "total_matches": len(ranked),
-            **counts,
-            "limit": limit,
-            "offset": offset,
-            "truncated": truncated,
-        }
-        if category_id:
-            result["strategy"] = CATEGORIES[category_id].use_when
-        if truncated:
-            result["next_action"] = {
-                "tool": "tool_search",
-                "arguments": {**args, "offset": offset + len(selected)},
-            }
-        elif not matches:
-            result["next_action"] = {"tool": "tool_search", "arguments": {}}
-        return result
-
-    def tool_invoke(self, args: dict[str, Any]) -> dict[str, Any]:
-        name = str(args.get("name", "")).strip()
-        if name not in self._deferred_tool_name_set:
-            raise ToolFailure(
-                "INVALID_ARGUMENT",
-                "tool_invoke only accepts a deferred workflow tool returned by tool_search.",
-                category="validation",
-                details={"tool": name, "deferred_tool_count": len(self._deferred_tool_names)},
-            )
-        raw_arguments = args.get("arguments", {})
-        if not isinstance(raw_arguments, dict):
-            raise ToolFailure("INVALID_ARGUMENT", "arguments must be an object.", category="validation")
-        payload = self._execute_tool_payload(
-            name,
-            cast(dict[str, Any], raw_arguments),
-            allow_deferred=True,
-        )
-        result = {
-            "ok": payload.get("ok") is not False,
-            "tool": name,
-            "deferred": True,
-            "result": payload,
-        }
-        # Text-only clients must receive the nested error and recovery guidance,
-        # not a generic gateway failure. Preserve the nested result as well.
-        for key in ("error", "status", "diagnostics", "permission_request"):
-            if key in payload:
-                result[key] = payload[key]
-        return result
 
     def list_dir(self, args: dict[str, Any]) -> dict[str, Any]:
         resolved = self.resolve_file_existing(str(args.get("path", ".")))
@@ -4409,8 +3506,8 @@ class Runtime:
         if not failures:
             return
         approval_ids = args.get("approval_ids")
-        if self.enable_workflow_tools and isinstance(approval_ids, list) and approval_ids:
-            self._workflow_store().consume_approvals(
+        if isinstance(approval_ids, list) and approval_ids:
+            self._runtime_state().consume_approvals(
                 [str(item) for item in approval_ids],
                 tool_name="exec_command",
                 arguments_hash=approval_arguments_hash("exec_command", args),
@@ -4503,7 +3600,7 @@ class Runtime:
                 details={"permission": "privileged_executable", "path": str(executable_path)},
             )
 
-    def _fresh_command_env(self) -> dict[str, str]:
+    def _fresh_command_env(self, *, create_runtime_dirs: bool = True) -> dict[str, str]:
         env = self._base_command_env()
         if not self.dangerously_skip_all_permissions:
             env = {key: value for key, value in env.items() if not is_filtered_env_var(key, value)}
@@ -4522,7 +3619,8 @@ class Runtime:
             }
         env.update({str(key): str(value) for key, value in self.shell_env_policy.set.items()})
         if not self.capabilities.host_environment:
-            self._ensure_runtime_dirs()
+            if create_runtime_dirs:
+                self._ensure_runtime_dirs()
             tmp_dir = self.command_tmp_dir()
             env["HOME"] = str(self.command_home_dir())
             env["TMPDIR"] = str(tmp_dir)
@@ -4534,9 +3632,7 @@ class Runtime:
         return env
 
     def _command_env(self, extra: Any) -> dict[str, str]:
-        with self._shell_snapshot_lock:
-            snapshot = dict(self._shell_snapshot_env) if self._shell_snapshot_env is not None else None
-        env = snapshot if snapshot is not None else self._fresh_command_env()
+        env = self._fresh_command_env()
         if isinstance(extra, dict):
             for key, value in extra.items():
                 key_text = str(key)
@@ -5564,361 +4660,36 @@ class Runtime:
             }
         return result
 
-    def _git_explicit_paths(self, args: dict[str, Any], repo: RepositoryContext | None = None) -> list[str]:
-        paths = self._git_path_filters(args, repo)
-        if not paths or any(path == "." for path in paths):
-            raise ToolFailure(
-                "GIT_PATH_SCOPE_REQUIRED",
-                "Git write operations require explicit paths and do not accept the workspace root.",
-                category="validation",
-            )
-        if len(paths) != len(set(paths)):
-            raise ToolFailure("INVALID_ARGUMENT", "Git paths must be unique.", category="validation")
-        return paths
 
-    def git_branch_list(self, args: dict[str, Any]) -> dict[str, Any]:
-        repo = self._git_repository(args, required=True)
-        assert repo is not None
-        git = require_git()
-        git_env = self._git_env()
-        state = self._git_write_state(repo, env=git_env)
-        max_results = int(args.get("max_results", 200))
-        completed = self._run_git_text(
-            [
-                git,
-                "-C",
-                str(repo.root),
-                "for-each-ref",
-                f"--count={max_results + 1}",
-                "--sort=-committerdate",
-                "--format=%(refname:short)%1f%(objectname)%1f%(upstream:short)%1f%(HEAD)%1f%(subject)",
-                "refs/heads",
-            ],
-            timeout=10,
-            env=git_env,
-        )
-        if completed.returncode != 0:
-            raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git for-each-ref failed", category="runtime")
-        branches: list[dict[str, Any]] = []
-        for line in completed.stdout.splitlines():
-            fields = line.split("\x1f")
-            if len(fields) != 5:
-                continue
-            branches.append(
-                {
-                    "name": fields[0],
-                    "head": fields[1],
-                    "upstream": fields[2] or None,
-                    "current": fields[3].strip() == "*",
-                    "subject": fields[4],
-                }
-            )
-        truncated = len(branches) > max_results
-        return {
-            "ok": True,
-            **state,
-            "branches": branches[:max_results],
-            "count": min(len(branches), max_results),
-            "truncated": truncated,
-            "summary": f"Found {min(len(branches), max_results)} local branches.",
-        }
 
-    @guarded_git_write
-    def git_branch_create(self, args: dict[str, Any], repo: RepositoryContext) -> dict[str, Any]:
-        git = require_git()
-        git_env = self._git_env()
-        expected_head = str(args["expected_head"])
-        expected_index = str(args["expected_index_fingerprint"])
-        self._require_git_write_state(expected_head, expected_index, repo=repo, env=git_env)
-        name = str(args["name"])
-        valid = self._run_git_text([git, "check-ref-format", "--branch", name], timeout=5, env=git_env)
-        if valid.returncode != 0:
-            raise ToolFailure("INVALID_GIT_BRANCH", "Invalid Git branch name.", category="validation")
-        start_point = validate_git_ref(str(args.get("start_point", "HEAD")))
-        checkout = bool(args.get("checkout", False))
-        command = [git, "-C", str(repo.root)]
-        command.extend(["switch", "-c", name, start_point] if checkout else ["branch", name, start_point])
-        completed = self._run_git_text(command, timeout=30, env=git_env)
-        if completed.returncode != 0:
-            raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git branch creation failed", category="runtime")
-        state = self._git_write_state(repo, env=git_env)
-        return {
-            "ok": True,
-            "name": name,
-            "checkout": checkout,
-            **state,
-            "summary": f"Created branch {name}{' and checked it out' if checkout else ''}.",
-        }
 
-    def _managed_worktree_root(self, repo: RepositoryContext | None = None, *, create: bool = False) -> Path:
-        root = self._workflow_store().root / "worktrees"
-        if repo is not None and repo.common_dir != (self.workspace.root / ".git").resolve():
-            root = root / hashlib.sha256(str(repo.common_dir).encode()).hexdigest()[:20]
-        if create:
-            root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        return root.resolve()
 
-    def git_worktree_list(self, args: dict[str, Any]) -> dict[str, Any]:
-        repo = self._git_repository(args, required=True)
-        assert repo is not None
-        git = require_git()
-        git_env = self._git_env()
-        self._git_write_state(repo, env=git_env)
-        completed = self._run_git_text(
-            [git, "-C", str(repo.root), "worktree", "list", "--porcelain", "-z"],
-            timeout=10,
-            env=git_env,
-        )
-        if completed.returncode != 0:
-            raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git worktree list failed", category="runtime")
-        managed_root = self._managed_worktree_root(repo)
-        worktrees: list[dict[str, Any]] = []
-        current: dict[str, Any] = {}
-        for line in [*completed.stdout.split("\0"), ""]:
-            if not line:
-                if current:
-                    path = Path(str(current["path"])).resolve()
-                    current["managed"] = path.is_relative_to(managed_root)
-                    current["worktree_id"] = path.name if current["managed"] else None
-                    worktrees.append(current)
-                    current = {}
-                continue
-            key, _, value = line.partition(" ")
-            if key == "worktree":
-                current["path"] = value
-            elif key == "HEAD":
-                current["head"] = value
-            elif key == "branch":
-                current["branch"] = value.removeprefix("refs/heads/")
-            elif key in {"detached", "bare"}:
-                current[key] = True
-            elif key == "prunable":
-                current["prunable"] = value or True
-        return {
-            "ok": True,
-            **repo.metadata(),
-            "path_base": "absolute",
-            "worktrees": worktrees,
-            "count": len(worktrees),
-            "summary": f"Found {len(worktrees)} Git worktrees.",
-        }
 
-    @guarded_git_write
-    def git_worktree_create(self, args: dict[str, Any], repo: RepositoryContext) -> dict[str, Any]:
-        git = require_git()
-        git_env = self._git_env()
-        self._require_git_write_state(
-            str(args["expected_head"]), str(args["expected_index_fingerprint"]), repo=repo, env=git_env
-        )
-        worktree_id = str(args["worktree_id"])
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", worktree_id):
-            raise ToolFailure(
-                "INVALID_ARGUMENT",
-                "worktree_id must use 1-80 letters, digits, dots, underscores, or hyphens.",
-                category="validation",
-            )
-        branch = str(args["branch"])
-        valid = self._run_git_text([git, "check-ref-format", "--branch", branch], timeout=5, env=git_env)
-        if valid.returncode != 0:
-            raise ToolFailure("INVALID_GIT_BRANCH", "Invalid Git branch name.", category="validation")
-        destination = self._managed_worktree_root(repo, create=True) / worktree_id
-        if destination.exists():
-            raise ToolFailure("GIT_WORKTREE_EXISTS", f"Managed worktree already exists: {worktree_id}", category="conflict")
-        create_branch = bool(args.get("create_branch", True))
-        start_point = validate_git_ref(str(args.get("start_point", "HEAD")))
-        command = [git, "-C", str(repo.root), "worktree", "add"]
-        if create_branch:
-            command.extend(["-b", branch, str(destination), start_point])
-        else:
-            command.extend([str(destination), branch])
-        completed = self._run_git_text(command, timeout=60, env=git_env)
-        if completed.returncode != 0:
-            raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git worktree creation failed", category="runtime")
-        return {
-            "ok": True,
-            **repo.metadata(),
-            "path_base": "absolute",
-            "worktree_id": worktree_id,
-            "path": str(destination),
-            "branch": branch,
-            "created_branch": create_branch,
-            "summary": f"Created managed worktree {worktree_id} on branch {branch}.",
-        }
 
-    @guarded_git_write
-    def git_worktree_remove(self, args: dict[str, Any], repo: RepositoryContext) -> dict[str, Any]:
-        git = require_git()
-        git_env = self._git_env()
-        worktree_id = str(args["worktree_id"])
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", worktree_id):
-            raise ToolFailure("INVALID_ARGUMENT", "Invalid managed worktree id.", category="validation")
-        managed_root = self._managed_worktree_root(repo)
-        requested = managed_root / worktree_id
-        destination = requested.resolve()
-        if requested.is_symlink() or not destination.is_relative_to(managed_root) or not destination.is_dir():
-            raise ToolFailure("GIT_WORKTREE_NOT_FOUND", f"Managed worktree not found: {worktree_id}", category="not_found")
-        ownership = self._run_git_text(
-            [git, "-C", str(destination), "rev-parse", "--git-common-dir"], timeout=10, env=git_env
-        )
-        if ownership.returncode != 0 or (destination / ownership.stdout.removesuffix("\n")).resolve() != repo.common_dir:
-            raise ToolFailure("GIT_REPOSITORY_MISMATCH", "Managed worktree belongs to a different repository.", category="validation")
-        status = self._run_git_text(
-            [git, "-C", str(destination), "status", "--porcelain", "--untracked-files=all"],
-            timeout=10,
-            env=git_env,
-        )
-        if status.returncode != 0:
-            raise ToolFailure("GIT_ERROR", status.stderr.strip() or "git worktree status failed", category="runtime")
-        if status.stdout.strip():
-            raise ToolFailure(
-                "GIT_WORKTREE_DIRTY",
-                "Managed worktree has uncommitted or untracked changes.",
-                category="conflict",
-                details={"worktree_id": worktree_id},
-            )
-        completed = self._run_git_text(
-            [git, "-C", str(repo.root), "worktree", "remove", "--", str(destination)],
-            timeout=60,
-            env=git_env,
-        )
-        if completed.returncode != 0:
-            raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git worktree removal failed", category="runtime")
-        return {
-            "ok": True,
-            **repo.metadata(),
-            "path_base": "absolute",
-            "worktree_id": worktree_id,
-            "path": str(destination),
-            "summary": f"Removed managed worktree {worktree_id}; its Git branch was preserved.",
-        }
 
-    def git_conflicts(self, args: dict[str, Any]) -> dict[str, Any]:
-        repo = self._git_repository(args, required=True)
-        assert repo is not None
-        git = require_git()
-        git_env = self._git_env()
-        state = self._git_write_state(repo, env=git_env)
-        completed = self._run_git_bytes(
-            [git, "-C", str(repo.root), "ls-files", "--unmerged", "-z"],
-            timeout=10,
-            env=git_env,
-        )
-        if completed.returncode != 0:
-            raise ToolFailure(
-                "GIT_ERROR",
-                completed.stderr.decode("utf-8", errors="replace").strip() or "git conflict query failed",
-                category="runtime",
-            )
-        grouped: dict[str, list[dict[str, Any]]] = {}
-        for record in completed.stdout.decode("utf-8", errors="surrogateescape").split("\0"):
-            if not record or "\t" not in record:
-                continue
-            metadata, path = record.split("\t", 1)
-            fields = metadata.split()
-            if len(fields) != 3:
-                continue
-            grouped.setdefault(path, []).append({"mode": fields[0], "object": fields[1], "stage": int(fields[2])})
-        conflicts = [{"path": path, "stages": stages} for path, stages in sorted(grouped.items())]
-        return {
-            "ok": True,
-            **state,
-            "conflicts": conflicts,
-            "count": len(conflicts),
-            "summary": f"Found {len(conflicts)} unmerged paths.",
-        }
 
-    @guarded_git_write
-    def git_stage(self, args: dict[str, Any], repo: RepositoryContext) -> dict[str, Any]:
-        git = require_git()
-        git_env = self._git_env()
-        paths = self._git_explicit_paths(args, repo)
-        self._require_git_write_state(
-            str(args["expected_head"]), str(args["expected_index_fingerprint"]), repo=repo, env=git_env
-        )
-        completed = self._run_git_text(
-            [git, "-C", str(repo.root), "add", "--", *paths], timeout=30, env=git_env
-        )
-        if completed.returncode != 0:
-            raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git add failed", category="runtime")
-        state = self._git_write_state(repo, env=git_env)
-        return {"ok": True, "paths": paths, **state, "summary": f"Staged {len(paths)} explicit paths."}
 
-    @guarded_git_write
-    def git_unstage(self, args: dict[str, Any], repo: RepositoryContext) -> dict[str, Any]:
-        git = require_git()
-        git_env = self._git_env()
-        paths = self._git_explicit_paths(args, repo)
-        self._require_git_write_state(
-            str(args["expected_head"]), str(args["expected_index_fingerprint"]), repo=repo, env=git_env
-        )
-        completed = self._run_git_text(
-            [git, "-C", str(repo.root), "restore", "--staged", "--", *paths],
-            timeout=30,
-            env=git_env,
-        )
-        if completed.returncode != 0:
-            raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git restore --staged failed", category="runtime")
-        state = self._git_write_state(repo, env=git_env)
-        return {"ok": True, "paths": paths, **state, "summary": f"Unstaged {len(paths)} explicit paths."}
 
-    @guarded_git_write
-    def git_commit(self, args: dict[str, Any], repo: RepositoryContext) -> dict[str, Any]:
-        git = require_git()
-        git_env = self._git_env()
-        paths = self._git_explicit_paths(args, repo)
-        self._require_git_write_state(
-            str(args["expected_head"]), str(args["expected_index_fingerprint"]), repo=repo, env=git_env
-        )
-        staged = self._run_git_bytes(
-            [git, "-C", str(repo.root), "diff", "--cached", "--name-only", "-z"],
-            timeout=10,
-            env=git_env,
-        )
-        if staged.returncode != 0:
-            raise ToolFailure("GIT_ERROR", "Could not inspect staged paths.", category="runtime")
-        staged_paths = sorted(
-            item for item in staged.stdout.decode("utf-8", errors="surrogateescape").split("\0") if item
-        )
-        if staged_paths != sorted(paths):
-            raise ToolFailure(
-                "GIT_COMMIT_SCOPE_MISMATCH",
-                "The staged path set does not exactly match the declared commit paths.",
-                category="conflict",
-                retryable=True,
-                details={"declared_paths": sorted(paths), "staged_paths": staged_paths},
-            )
-        message = str(args["message"])
-        completed = self._run_git_text(
-            [git, "-C", str(repo.root), "commit", "-m", message], timeout=120, env=git_env
-        )
-        if completed.returncode != 0:
-            raise ToolFailure("GIT_ERROR", completed.stderr.strip() or completed.stdout.strip() or "git commit failed", category="runtime")
-        state = self._git_write_state(repo, env=git_env)
-        return {
-            "ok": True,
-            "commit": state["head"],
-            "paths": paths,
-            "stdout": completed.stdout.strip(),
-            **state,
-            "summary": f"Committed {len(paths)} explicit paths as {state['head'][:12]}.",
-        }
 
-    def lsp_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self._lsp_manager().status()
 
     def _lsp_document(self, args: dict[str, Any]) -> tuple[lsp_tools.LanguageServer, ResolvedPath, str, str]:
         resolved = self.resolve_existing(str(args["path"]))
         if not resolved.path.is_file():
             raise ToolFailure("IS_DIRECTORY", "LSP path must be a source file.", category="validation")
-        server = self._lsp_manager().server_for(resolved.path)
+        manager = self._lsp_manager()
+        # Starting a server is the first point where its isolated HOME/TMP
+        # must exist.  Refresh the manager environment after creating them.
+        manager.env = self._command_env({})
+        server = manager.server_for(resolved.path)
         uri, digest = server.open_document(resolved.path)
         return server, resolved, uri, digest
 
-    def lsp_definition(self, args: dict[str, Any]) -> dict[str, Any]:
+    def _lsp_definition_payload(self, args: dict[str, Any]) -> dict[str, Any]:
         server, resolved, uri, digest = self._lsp_document(args)
         position = lsp_tools.lsp_position(resolved.path, int(args["line"]), int(args["column"]))
         result = server.request(
-            "textDocument/definition", {"textDocument": {"uri": uri}, "position": position}
+            "textDocument/definition",
+            {"textDocument": {"uri": uri}, "position": position},
         )
         locations = lsp_tools.normalize_locations(self.workspace.root, result)
         return {
@@ -5932,7 +4703,7 @@ class Runtime:
             "summary": f"Found {len(locations)} semantic definitions.",
         }
 
-    def lsp_references(self, args: dict[str, Any]) -> dict[str, Any]:
+    def _lsp_references_payload(self, args: dict[str, Any]) -> dict[str, Any]:
         server, resolved, uri, digest = self._lsp_document(args)
         position = lsp_tools.lsp_position(resolved.path, int(args["line"]), int(args["column"]))
         result = server.request(
@@ -5957,7 +4728,9 @@ class Runtime:
             "summary": f"Found {min(len(locations), max_results)} semantic references.",
         }
 
-    def lsp_diagnostics(self, args: dict[str, Any]) -> dict[str, Any]:
+
+
+    def code_diagnostics(self, args: dict[str, Any]) -> dict[str, Any]:
         server, resolved, uri, digest = self._lsp_document(args)
         snapshot = server.diagnostics_snapshot(uri, int(args.get("wait_ms", 500)), expected_digest=digest)
         diagnostics = lsp_tools.normalize_diagnostics(
@@ -5986,139 +4759,9 @@ class Runtime:
                        + ("" if snapshot["freshness"] == "fresh" else "Not confirmed for the current document version; absence of diagnostics is not proof of no errors."),
         }
 
-    def lsp_rename_preview(self, args: dict[str, Any]) -> dict[str, Any]:
-        server, resolved, uri, digest = self._lsp_document(args)
-        position = lsp_tools.lsp_position(resolved.path, int(args["line"]), int(args["column"]))
-        result = server.request(
-            "textDocument/rename",
-            {"textDocument": {"uri": uri}, "position": position, "newName": str(args["new_name"])},
-        )
-        changes = lsp_tools.normalize_workspace_edit(self.workspace.root, result)
-        edit_count = sum(len(item["edits"]) for item in changes)
-        if len(changes) > int(args.get("max_files", 100)) or edit_count > int(args.get("max_edits", 2000)):
-            raise ToolFailure(
-                "LSP_EDIT_TOO_LARGE",
-                "Rename preview exceeds configured file or edit limits.",
-                category="validation",
-                details={"files": len(changes), "edits": edit_count},
-            )
-        affected_paths = [str(item["path"]) for item in changes]
-        patch_plan = [
-            {
-                "path": item["path"],
-                "expected_sha256": item["sha256"],
-                "edit_count": len(item["edits"]),
-                "edits": item["edits"],
-            }
-            for item in changes
-        ]
-        return {
-            "ok": True,
-            "path": resolved.display,
-            "file_sha256": digest,
-            "backend": server.command,
-            "position_encoding": "utf-16",
-            "new_name": str(args["new_name"]),
-            "changes": changes,
-            "affected_paths": affected_paths,
-            "patch_plan": patch_plan,
-            "file_count": len(changes),
-            "edit_count": edit_count,
-            "applied": False,
-            "guarded_apply_required": True,
-            "summary": f"Prepared {edit_count} rename edits across {len(changes)} files; no files were changed.",
-        }
 
-    def review_prepare(self, args: dict[str, Any]) -> dict[str, Any]:
-        target = self.resolve_existing(str(args.get("path", args.get("repo_path", ".")))).path
-        if not target.is_dir():
-            raise ToolFailure("NOT_A_DIRECTORY", "Review path must be a directory.", category="validation")
-        target_rel = target.relative_to(self.workspace.root).as_posix()
-        scope_args = {**args, "path": target_rel}
-        repo = self._git_repository(scope_args)
-        for raw_path in args.get("paths", []):
-            if not self.resolve_for_write(str(raw_path)).path.is_relative_to(target):
-                raise ToolFailure("GIT_PATH_SCOPE_REQUIRED", "Review paths must stay inside the selected review directory.", category="validation")
-        fingerprint = workspace_insight.workspace_fingerprint(self.workspace.root, target)
-        diff_args: dict[str, Any] = {
-            "staged": bool(args.get("staged", True)),
-            "unstaged": bool(args.get("unstaged", True)),
-            "max_bytes": int(args.get("max_bytes", 524288)),
-            "paths": list(args["paths"]) if args.get("paths") else [target_rel],
-        }
-        if repo is not None:
-            diff_args["repo_path"] = repo.root.relative_to(self.workspace.root).as_posix()
-        git_status = self.git_status({"path": target_rel, **({"repo_path": args["repo_path"]} if "repo_path" in args else {})})
-        diff = self.git_diff(diff_args)
-        instructions = self.project_instructions(
-            {"path": target.relative_to(self.workspace.root).as_posix() or "."}
-        )
-        task_id = str(args["task_id"]) if args.get("task_id") else None
-        task = self._workflow_store().task_context(task_id) if task_id else None
-        snapshot = {
-            "path": target.relative_to(self.workspace.root).as_posix() or ".",
-            "git": {
-                "repo_root": git_status.get("repo_root"),
-                "path_base": git_status.get("path_base"),
-                "branch": git_status.get("branch"),
-                "head": git_status.get("head"),
-                "index_fingerprint": git_status.get("index_fingerprint"),
-                "status_entries": [entry for entry in git_status.get("entries", [])
-                                   if repo is None or (repo.root / entry["path"]).is_relative_to(target)],
-            },
-            "diff": diff,
-            "instructions": instructions,
-            "task_context": task,
-        }
-        review = self._workflow_store().create_review(
-            snapshot,
-            code_fingerprint=str(fingerprint["fingerprint"]),
-            fingerprint_complete=bool(fingerprint["scan_complete"]),
-            task_id=task_id,
-        )
-        review["stale"] = False
-        return review
 
-    def review_record(self, args: dict[str, Any]) -> dict[str, Any]:
-        findings = cast(list[dict[str, Any]], args.get("findings", []))
-        normalized: list[dict[str, Any]] = []
-        for finding in findings:
-            resolved = self.resolve_for_write(str(finding["path"]))
-            line = int(finding["line"])
-            end_line = int(finding.get("end_line", line))
-            if end_line < line:
-                raise ToolFailure("INVALID_ARGUMENT", "Review end_line must be >= line.", category="validation")
-            normalized.append(
-                {
-                    "path": resolved.display,
-                    "line": line,
-                    "end_line": end_line,
-                    "priority": int(finding.get("priority", 2)),
-                    "title": str(finding["title"]),
-                    "body": str(finding["body"]),
-                    "status": str(finding.get("status", "open")),
-                }
-            )
-        return self._workflow_store().record_review(
-            str(args["review_id"]),
-            expected_revision=int(args["expected_revision"]),
-            status=str(args["status"]),
-            findings=normalized,
-        )
 
-    def review_get(self, args: dict[str, Any]) -> dict[str, Any]:
-        review = self._workflow_store().get_review(str(args["review_id"]))
-        snapshot = review.get("snapshot")
-        scope = snapshot.get("path", ".") if isinstance(snapshot, dict) else "."
-        target = self.resolve_existing(str(scope)).path
-        fingerprint = workspace_insight.workspace_fingerprint(self.workspace.root, target)
-        review["current_code_fingerprint"] = fingerprint["fingerprint"]
-        review["stale"] = fingerprint["fingerprint"] != review["code_fingerprint"]
-        review["summary"] = (
-            f"Review {review['review_id']} is {review['status']} with {review['finding_count']} findings"
-            f"{' and is stale' if review['stale'] else ''}."
-        )
-        return review
 
     def request_permissions(self, args: dict[str, Any]) -> dict[str, Any]:
         if self.dangerously_skip_all_permissions:
@@ -6140,50 +4783,29 @@ class Runtime:
                 },
                 "warnings": [warning],
             }
-        if self.enable_workflow_tools:
-            if args.get("scope", "once") != "once":
-                raise ToolFailure(
-                    "INVALID_ARGUMENT",
-                    "Persistent session approvals are not supported; request a one-shot approval.",
-                    category="validation",
-                )
-            tool_name = str(args["tool_name"])
-            arguments = cast(dict[str, Any], args["arguments"])
-            approval = self._workflow_store().create_approval(
-                tool_name=tool_name,
-                permission=str(args["permission"]),
-                reason=str(args["reason"]),
-                arguments_hash=approval_arguments_hash(tool_name, arguments),
-                displayed_arguments=cast(dict[str, Any], redact_for_trace(arguments)),
-                ttl_seconds=int(args.get("ttl_seconds", 300)),
+        if args.get("scope", "once") != "once":
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "Persistent session approvals are not supported; request a one-shot approval.",
+                category="validation",
             )
-            approval["next_action"] = {
-                "type": "operator_approval",
-                "message": "Approve or deny this exact request in Coding Tools MCP Desktop.",
-            }
-            return approval
-        return {
-            "ok": False,
-            "status": "unsupported",
-            "grant_id": None,
-            "expires_at": None,
-            "error": {
-                "code": "ELICITATION_UNSUPPORTED",
-                "message": "Permission elicitation is not available for this client.",
-                "category": "permission",
-                "retryable": False,
-                "details": {"requested": args},
-            },
-        }
-
-    def approval_get(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self._workflow_store().get_approval(str(args["approval_id"]))
-
-    def approval_list(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self._workflow_store().list_approvals(
-            status=str(args["status"]) if args.get("status") else None,
-            limit=int(args.get("max_results", 100)),
+        tool_name = str(args["tool_name"])
+        arguments = cast(dict[str, Any], args["arguments"])
+        approval = self._runtime_state().create_approval(
+            tool_name=tool_name,
+            permission=str(args["permission"]),
+            reason=str(args["reason"]),
+            arguments_hash=approval_arguments_hash(tool_name, arguments),
+            displayed_arguments=cast(dict[str, Any], redact_for_trace(arguments)),
+            ttl_seconds=int(args.get("ttl_seconds", 300)),
         )
+        approval["next_action"] = {
+            "type": "operator_approval",
+            "message": "Approve or deny this exact request in Coding Tools MCP Desktop.",
+        }
+        return approval
+
+
 
     def workspace_overview(self, args: dict[str, Any]) -> dict[str, Any]:
         target = self.resolve_existing(str(args.get("path", "."))).path
@@ -6191,7 +4813,7 @@ class Runtime:
             raise ToolFailure("NOT_A_DIRECTORY", "workspace_overview path must be a directory.", category="validation")
         result = workspace_insight.workspace_overview(
             self.workspace.root,
-            self.project_context,
+            self.project_context_data,
             args,
             target=target,
             env=self._command_env(None),
@@ -6251,44 +4873,13 @@ class Runtime:
             bool(status.get("truncated")),
         )
 
-    def repo_map(self, args: dict[str, Any]) -> dict[str, Any]:
-        target = self.resolve_existing(str(args.get("path", "."))).path
-        if not target.is_dir():
-            raise ToolFailure("NOT_A_DIRECTORY", "repo_map path must be a directory.", category="validation")
-        map_args = dict(args)
-        if bool(args.get("impact", False)):
-            changed_paths, source, truncated = self._changed_paths_for_target(
-                target=target,
-                path_arg=str(args.get("path", ".")),
-                explicit=args.get("changed_paths"),
-                max_entries=100,
-            )
-            map_args["impact_source"] = source
-            map_args["impact_git_status_truncated"] = truncated
-            map_args["changed_paths"] = changed_paths
-        return workspace_insight.repo_map(self.workspace.root, target, map_args)
 
     def project_instructions(self, args: dict[str, Any]) -> dict[str, Any]:
         target = self.resolve_existing(str(args.get("path", "."))).path
         return instructions_for_path(self.workspace.root, target)
 
-    def skills_list(self, args: dict[str, Any]) -> dict[str, Any]:
-        return skill_tools.list_skills(self.workspace.root, max_results=int(args.get("max_results", 200)))
 
-    def skills_read(self, args: dict[str, Any]) -> dict[str, Any]:
-        resolved = self.resolve_existing(str(args.get("path", "")))
-        return skill_tools.read_skill(self.workspace.root, resolved.path)
 
-    def agent_environment(self, args: dict[str, Any]) -> dict[str, Any]:
-        try:
-            return agent_environment_tools.discover_agent_environment(
-                provider=str(args.get("provider", "all")),
-                max_items=int(args.get("max_items", 200)),
-                query=str(args.get("query", "")),
-                kind=str(args.get("kind", "all")),
-            )
-        except ValueError as exc:
-            raise ToolFailure("INVALID_ARGUMENT", str(exc), category="validation") from exc
 
     def checks_discover(self, args: dict[str, Any]) -> dict[str, Any]:
         target = self.resolve_existing(str(args.get("path", "."))).path
@@ -6330,759 +4921,34 @@ class Runtime:
             ),
         }
 
-    @staticmethod
-    def _diagnostic_stream_text(command: CommandRun, stream: str, *, max_chars: int = 262_144) -> str:
-        head, tail, tail_start, total_bytes, _dropped = command.retained_stream_segments(stream)
-        if total_bytes == 0:
-            return ""
-        if tail_start <= len(head):
-            overlap = max(0, len(head) - tail_start)
-            data = head + tail[overlap:]
-        else:
-            data = head + b"\n... retained output gap ...\n" + tail
-        text = data.decode("utf-8", errors="replace")
-        if len(text) <= max_chars:
-            return text
-        half = max_chars // 2
-        return text[:half] + "\n... diagnostic output clipped ...\n" + text[-half:]
 
-    def _attach_check_diagnostics(
-        self,
-        check: dict[str, Any],
-        result: dict[str, Any],
-        *,
-        max_diagnostics: int,
-    ) -> dict[str, Any]:
-        stdout = str(result.get("stdout") or "")
-        stderr = str(result.get("stderr") or "")
-        output_source = "result_snapshot"
-        command_id = result.get("command_id")
-        if isinstance(command_id, str) and command_id:
-            try:
-                command = self._get_output_command(command_id)
-            except ToolFailure as exc:
-                if exc.code != "COMMAND_NOT_FOUND":
-                    raise
-            else:
-                stdout = self._diagnostic_stream_text(command, "stdout")
-                stderr = self._diagnostic_stream_text(command, "stderr")
-                output_source = "retained_command"
-        analysis = check_diagnostics.analyze_check_output(
-            check_id=str(check.get("id") or check.get("check_id") or "check"),
-            command=str(check.get("command") or ""),
-            kind=str(check.get("kind") or "unknown"),
-            stdout=stdout,
-            stderr=stderr,
-            max_diagnostics=max_diagnostics,
-        )
-        existing_diagnostics = result.get("diagnostics")
-        if isinstance(existing_diagnostics, list) and existing_diagnostics:
-            parsed = analysis.get("diagnostics")
-            parsed_items = parsed if isinstance(parsed, list) else []
-            combined = [*existing_diagnostics, *parsed_items][:max_diagnostics]
-            analysis["diagnostics"] = combined
-            analysis["diagnostic_count"] = len(combined)
-            if len(existing_diagnostics) + len(parsed_items) > max_diagnostics:
-                analysis["diagnostics_truncated"] = True
-        context = analysis.get("diagnostic_context")
-        if isinstance(context, dict):
-            context["output_source"] = output_source
-        result.update(analysis)
-        return result
 
-    def checks_run(self, args: dict[str, Any]) -> dict[str, Any]:
-        target = self.resolve_existing(str(args.get("path", "."))).path
-        if not target.is_dir():
-            raise ToolFailure("NOT_A_DIRECTORY", "checks_run path must be a directory.", category="validation")
-        check_id = str(args.get("check_id", ""))
-        selected = next(
-            (
-                item
-                for item in workspace_insight.discover_checks(
-                    self.workspace.root,
-                    target,
-                    env=self._command_env(None),
-                )
-                if item["id"] == check_id
-            ),
-            None,
-        )
-        if selected is None:
-            raise ToolFailure("CHECK_NOT_FOUND", f"Discovered check not found: {check_id}", category="not_found", details={"retry_hint": "Call checks_discover again for the same path."})
-        command_args = {
-            "cmd": selected["command"],
-            "workdir": selected["workdir"],
-            "timeout_ms": int(args.get("timeout_ms", 30000)),
-            "yield_time_ms": int(args.get("yield_time_ms", 10000)),
-            "max_output_bytes": int(args.get("max_output_bytes", 65536)),
-        }
-        if args.get("approval_ids"):
-            command_args["approval_ids"] = list(args["approval_ids"])
-        if args.get("operation_id"):
-            command_args["operation_id"] = str(args["operation_id"])
-        before = workspace_insight.workspace_fingerprint(self.workspace.root, target)
-        result = self.exec_command(command_args)
-        self._attach_check_diagnostics(
-            selected,
-            result,
-            max_diagnostics=int(args.get("max_diagnostics", 100)),
-        )
-        after = workspace_insight.workspace_fingerprint(self.workspace.root, target)
-        evidence = self._workflow_store().record_check_run(
-            selected,
-            result,
-            before_fingerprint=str(before["fingerprint"]),
-            after_fingerprint=str(after["fingerprint"]),
-            fingerprint_complete=bool(before["scan_complete"] and after["scan_complete"]),
-            task_id=str(args["task_id"]) if args.get("task_id") else None,
-        )
-        result["check"] = selected
-        result["check_run_id"] = evidence["check_run_id"]
-        result["evidence_status"] = evidence["status"]
-        return result
 
-    def checks_result(self, args: dict[str, Any]) -> dict[str, Any]:
-        check_run_id = str(args["check_run_id"])
-        max_diagnostics = int(args.get("max_diagnostics", 100))
-        evidence = self._workflow_store().get_check_run(check_run_id)
-        target = self.resolve_existing(str(evidence["workdir"])).path
-        if evidence["status"] == "running" and evidence.get("command_id"):
-            try:
-                command_result = self.get_command({"command_id": evidence["command_id"]})
-            except ToolFailure as exc:
-                if exc.code != "COMMAND_NOT_FOUND":
-                    raise
-                prior_result_value = evidence.get("result")
-                prior_result: dict[str, Any] = (
-                    prior_result_value if isinstance(prior_result_value, dict) else {}
-                )
-                command_result = {
-                    **prior_result,
-                    "status": "unknown",
-                    "command_id": evidence["command_id"],
-                    "operation_id": evidence.get("operation_id"),
-                    "diagnostics": [
-                        {
-                            "code": "CHECK_COMMAND_INTERRUPTED",
-                            "severity": "warning",
-                            "evidence": "The runtime no longer retains this command.",
-                        }
-                    ],
-                }
-            self._attach_check_diagnostics(
-                evidence,
-                command_result,
-                max_diagnostics=max_diagnostics,
-            )
-            after = workspace_insight.workspace_fingerprint(self.workspace.root, target)
-            evidence = self._workflow_store().update_check_run_result(
-                check_run_id,
-                command_result,
-                after_fingerprint=str(after["fingerprint"]),
-                fingerprint_complete=bool(after["scan_complete"]),
-            )
-        current = workspace_insight.workspace_fingerprint(self.workspace.root, target)
-        evidence["current_fingerprint"] = current["fingerprint"]
-        evidence["stale"] = evidence["after_fingerprint"] != current["fingerprint"]
-        evidence["current_fingerprint_complete"] = current["scan_complete"]
-        evidence["summary"] = (
-            f"Check {evidence['check_id']} is {evidence['status']}"
-            f"{' and stale' if evidence['stale'] else ''}."
-        )
-        retained_result_value = evidence.get("result")
-        retained_result: dict[str, Any] = (
-            retained_result_value if isinstance(retained_result_value, dict) else {}
-        )
-        for key in (
-            "diagnostics",
-            "diagnostic_count",
-            "failing_tests",
-            "failing_test_count",
-            "diagnostics_truncated",
-            "diagnostic_parsers",
-            "diagnostic_parser_version",
-            "diagnostic_summary",
-            "diagnostic_context",
-        ):
-            if key in retained_result:
-                evidence[key] = retained_result[key]
-        return evidence
 
-    def _get_protocol_task(self, task_id: str) -> dict[str, Any]:
-        try:
-            return self._workflow_store().get_protocol_task(task_id)
-        except ToolFailure as exc:
-            if exc.code == "PROTOCOL_TASK_NOT_FOUND":
-                raise JsonRpcError(-32602, f"Failed to retrieve task: Task not found: {task_id}") from exc
-            raise
 
-    @staticmethod
-    def _protocol_task_payload(record: dict[str, Any]) -> dict[str, Any]:
-        def iso8601(value: float) -> str:
-            return datetime.fromtimestamp(value, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
-        payload: dict[str, Any] = {
-            "taskId": record["task_id"],
-            "status": record["status"],
-            "createdAt": iso8601(float(record["created_at"])),
-            "lastUpdatedAt": iso8601(float(record["updated_at"])),
-            "ttlMs": None,
-            "pollIntervalMs": int(record["poll_interval_ms"]),
-        }
-        if record.get("status_message"):
-            payload["statusMessage"] = record["status_message"]
-        if record["status"] == "completed" and isinstance(record.get("result"), dict):
-            payload["result"] = record["result"]
-        if record["status"] == "failed" and isinstance(record.get("error"), dict):
-            payload["error"] = record["error"]
-        return payload
 
-    def maybe_create_protocol_task(
-        self,
-        tool_name: str,
-        arguments: dict[str, Any],
-        result: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        """Promote selected already-running tool calls into durable protocol Tasks."""
 
-        if not self.protocol_tasks_enabled() or tool_name != "checks_run":
-            return None
-        structured = result.get("structuredContent")
-        if not isinstance(structured, dict) or structured.get("status") != "running":
-            return None
-        check_run_id = structured.get("check_run_id")
-        if not isinstance(check_run_id, str) or not check_run_id:
-            return None
-        retained_arguments = {
-            key: arguments[key]
-            for key in ("check_id", "path", "task_id", "operation_id")
-            if key in arguments
-        }
-        record = self._workflow_store().create_protocol_task(
-            request_method="tools/call",
-            tool_name=tool_name,
-            arguments=retained_arguments,
-            backing_type="check_run",
-            backing_id=check_run_id,
-            status_message=f"Check {structured.get('check', {}).get('id', retained_arguments.get('check_id', 'unknown'))} is running.",
-            poll_interval_ms=1000,
-        )
-        return {"resultType": "task", **self._protocol_task_payload(record)}
 
-    def protocol_task_get(self, task_id: str) -> dict[str, Any]:
-        record = self._get_protocol_task(task_id)
-        if record["status"] == "working" and record["backing_type"] == "check_run":
-            try:
-                evidence = self.checks_result({"check_run_id": record["backing_id"]})
-            except ToolFailure as exc:
-                raise JsonRpcError(-32603, f"Failed to refresh task backing check: {exc.message}") from exc
-            if evidence["status"] != "running":
-                final_result = make_tool_result("checks_result", evidence, is_error=False)
-                record = self._workflow_store().finish_protocol_task(
-                    task_id,
-                    status="completed",
-                    status_message=f"Check {evidence['check_id']} is {evidence['status']}.",
-                    result=final_result,
-                )
-        return self._protocol_task_payload(record)
 
-    def protocol_task_update(self, task_id: str, input_responses: dict[str, Any]) -> dict[str, Any]:
-        # The first supported task-augmented operation (checks_run) never emits
-        # inputRequests. Per the extension, unknown/already-satisfied response
-        # keys are ignored, but the task id itself must still resolve.
-        _ = input_responses
-        self._get_protocol_task(task_id)
-        return {}
 
-    def protocol_task_cancel(self, task_id: str) -> dict[str, Any]:
-        record = self._get_protocol_task(task_id)
-        if record["status"] != "working":
-            return {}
-        if record["backing_type"] == "check_run":
-            try:
-                evidence = self._workflow_store().get_check_run(str(record["backing_id"]))
-            except ToolFailure as exc:
-                raise JsonRpcError(-32603, f"Failed to retrieve task backing check: {exc.message}") from exc
-            command_id = evidence.get("command_id")
-            if evidence["status"] == "running" and isinstance(command_id, str) and command_id:
-                try:
-                    stopped = self.kill_command({"command_id": command_id})
-                except ToolFailure as exc:
-                    if exc.code != "COMMAND_NOT_FOUND":
-                        raise JsonRpcError(-32603, f"Failed to cancel task command: {exc.message}") from exc
-                else:
-                    if stopped.get("status") in {"terminated", "killed"}:
-                        after = workspace_insight.workspace_fingerprint(
-                            self.workspace.root,
-                            self.resolve_existing(str(evidence["workdir"])).path,
-                        )
-                        self._workflow_store().update_check_run_result(
-                            str(record["backing_id"]),
-                            stopped,
-                            after_fingerprint=str(after["fingerprint"]),
-                            fingerprint_complete=bool(after["scan_complete"]),
-                        )
-                        self._workflow_store().finish_protocol_task(
-                            task_id,
-                            status="cancelled",
-                            status_message="Cancellation completed for the backing check command.",
-                        )
-                        return {}
-            # The process may already have completed or disappeared between the
-            # stored check read and cancellation. Refresh rather than falsely
-            # claiming that completed work was cancelled.
-            self.protocol_task_get(task_id)
-        return {}
 
-    def task_create(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self._workflow_store().create_task(str(args["title"]), str(args["objective"]), cast(dict[str, Any] | None, args.get("details")))
 
-    def task_get(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self._workflow_store().get_task(str(args["task_id"]))
 
-    def task_list(self, args: dict[str, Any]) -> dict[str, Any]:
-        status = str(args["status"]) if args.get("status") else None
-        return self._workflow_store().list_tasks(status=status, limit=int(args.get("max_results", 100)))
 
-    def task_update(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self._workflow_store().update_task(
-            str(args["task_id"]),
-            expected_revision=int(args["expected_revision"]),
-            status=str(args["status"]) if args.get("status") else None,
-            title=str(args["title"]) if args.get("title") is not None else None,
-            objective=str(args["objective"]) if args.get("objective") is not None else None,
-            details=cast(dict[str, Any] | None, args.get("details")),
-        )
 
-    def task_event_add(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self._workflow_store().add_task_event(
-            str(args["task_id"]),
-            str(args["event_type"]),
-            str(args["message"]),
-            details=cast(dict[str, Any] | None, args.get("details")),
-        )
 
-    def task_events(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self._workflow_store().task_events(
-            str(args["task_id"]), limit=int(args.get("max_results", 100))
-        )
 
-    def task_context(self, args: dict[str, Any]) -> dict[str, Any]:
-        result = self._workflow_store().task_context(
-            str(args["task_id"]), event_limit=int(args.get("event_limit", 50))
-        )
-        checkpoints = result.get("context_checkpoints")
-        if isinstance(checkpoints, list) and checkpoints:
-            latest = checkpoints[0]
-            checkpoint_id = latest.get("context_checkpoint_id") if isinstance(latest, dict) else None
-            if isinstance(checkpoint_id, str) and checkpoint_id:
-                checkpoint = self.context_checkpoint(
-                    {"action": "get", "context_checkpoint_id": checkpoint_id}
-                )
-                result["resume"] = {
-                    "context_checkpoint_id": checkpoint_id,
-                    **checkpoint["resume"],
-                }
-        return result
 
-    def task_plan_get(self, args: dict[str, Any]) -> dict[str, Any]:
-        task = self._workflow_store().get_task(str(args["task_id"]))
-        steps = task["details"].get("plan", [])
-        return {
-            "ok": True,
-            "task_id": task["task_id"],
-            "revision": task["revision"],
-            "steps": steps,
-            "summary": f"Task {task['task_id']} has {len(steps)} plan steps.",
-        }
 
-    def task_plan_update(self, args: dict[str, Any]) -> dict[str, Any]:
-        steps = cast(list[dict[str, Any]], args["steps"])
-        step_ids = [str(step["step_id"]) for step in steps]
-        if len(step_ids) != len(set(step_ids)):
-            raise ToolFailure("INVALID_ARGUMENT", "Plan step_id values must be unique.", category="validation")
-        if sum(step["status"] == "in_progress" for step in steps) > 1:
-            raise ToolFailure(
-                "INVALID_ARGUMENT",
-                "At most one plan step may be in progress.",
-                category="validation",
-            )
-        return self._workflow_store().update_plan(
-            str(args["task_id"]),
-            expected_revision=int(args["expected_revision"]),
-            steps=steps,
-        )
 
-    def checkpoint_create(self, args: dict[str, Any]) -> dict[str, Any]:
-        paths = [str(item) for item in args["paths"]]
-        if len(paths) != len(set(paths)):
-            raise ToolFailure("CHECKPOINT_SCOPE_INVALID", "Checkpoint paths must be unique.", category="validation")
-        captured: list[dict[str, Any]] = []
-        resolved_paths: set[Path] = set()
-        total_bytes = 0
-        for raw_path in paths:
-            self.workspace.reject_write_symlink(raw_path)
-            resolved = self.resolve_for_write(raw_path)
-            if resolved.path.exists() and not resolved.path.is_file():
-                raise ToolFailure("CHECKPOINT_SCOPE_INVALID", f"Checkpoint path is not a regular file: {raw_path}", category="validation")
-            if resolved.path in resolved_paths:
-                raise ToolFailure("CHECKPOINT_SCOPE_INVALID", "Checkpoint paths must resolve to unique files.", category="validation")
-            resolved_paths.add(resolved.path)
-            if resolved.path.exists():
-                total_bytes += resolved.path.stat().st_size
-                if total_bytes > MAX_CHECKPOINT_BYTES:
-                    raise ToolFailure(
-                        "CHECKPOINT_TOO_LARGE",
-                        "Checkpoint content exceeds the supported size.",
-                        category="validation",
-                        details={"bytes": total_bytes, "max_bytes": MAX_CHECKPOINT_BYTES},
-                    )
-            content = resolved.path.read_bytes() if resolved.path.exists() else None
-            if content is not None:
-                try:
-                    content.decode("utf-8")
-                except UnicodeDecodeError as exc:
-                    raise ToolFailure("UNSUPPORTED_ENCODING", f"Checkpoint only supports UTF-8 text: {raw_path}", category="validation") from exc
-            mode = stat.S_IMODE(resolved.path.stat().st_mode) if resolved.path.exists() else None
-            captured.append(
-                {
-                    "path": resolved.display,
-                    "existed": resolved.path.exists(),
-                    "content": content,
-                    "mode": mode,
-                    "digest": hashlib.sha256(content).hexdigest() if content is not None else None,
-                }
-            )
-        head = self._git_rev_parse(self.workspace.root, "HEAD") if self._is_git_repo(self.workspace.root) else None
-        return self._workflow_store().create_checkpoint(
-            str(args.get("label", "checkpoint")),
-            head or None,
-            captured,
-            task_id=str(args["task_id"]) if args.get("task_id") else None,
-        )
 
-    def _checkpoint_current_snapshot(
-        self, files: list[dict[str, Any]]
-    ) -> tuple[list[dict[str, Any]], dict[str, FileBaseline]]:
-        states: list[dict[str, Any]] = []
-        baselines: dict[str, FileBaseline] = {}
-        for item in files:
-            raw_path = str(item["path"])
-            self.workspace.reject_write_symlink(raw_path)
-            resolved = self.resolve_for_write(raw_path)
-            baseline = FileBaseline.capture(resolved.path)
-            baselines[resolved.display] = baseline
-            states.append(
-                {
-                    "path": resolved.display,
-                    "existed": baseline.data is not None,
-                    "digest": baseline.digest,
-                    "mode": baseline.mode,
-                }
-            )
-        return states, baselines
 
-    def checkpoint_list(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self._workflow_store().list_checkpoints(limit=int(args.get("max_results", 100)))
 
-    def checkpoint_diff(self, args: dict[str, Any]) -> dict[str, Any]:
-        checkpoint_id = str(args["checkpoint_id"])
-        checkpoint, files = self._workflow_store().checkpoint(checkpoint_id)
-        current, _baselines = self._checkpoint_current_snapshot(files)
-        changes: list[dict[str, Any]] = []
-        for saved, now in zip(files, current, strict=True):
-            if saved["existed"] == now["existed"] and saved.get("digest") == now.get("digest") and saved.get("mode") == now.get("mode"):
-                status = "unchanged"
-            elif not saved["existed"]:
-                status = "delete_on_restore"
-            elif not now["existed"]:
-                status = "create_on_restore"
-            else:
-                status = "restore_content"
-            changes.append({"path": saved["path"], "status": status, "checkpoint_digest": saved.get("digest"), "current_digest": now.get("digest")})
-        token = restore_token(checkpoint_id, current)
-        changed = sum(1 for item in changes if item["status"] != "unchanged")
-        return {
-            "ok": True,
-            "checkpoint_id": checkpoint_id,
-            "label": checkpoint["label"],
-            "head": checkpoint["head"],
-            "changes": changes,
-            "changed_count": changed,
-            "restore_token": token,
-            "summary": f"Checkpoint differs from {changed} current files; use this restore_token only after reviewing the changes.",
-        }
 
-    def checkpoint_restore(self, args: dict[str, Any]) -> dict[str, Any]:
-        checkpoint_id = str(args["checkpoint_id"])
-        supplied_token = str(args["restore_token"])
-        checkpoint, files = self._workflow_store().checkpoint(checkpoint_id)
-        current, baselines = self._checkpoint_current_snapshot(files)
-        expected_token = restore_token(checkpoint_id, current)
-        if not secrets.compare_digest(supplied_token, expected_token):
-            raise ToolFailure(
-                "CHECKPOINT_CONFLICT",
-                "Workspace files changed after the restore preview.",
-                category="conflict",
-                retryable=True,
-                details={"checkpoint_id": checkpoint_id, "retry_hint": "Call checkpoint_diff again and review the new restore token."},
-            )
-        staged: list[StagedFile] = []
-        for item in files:
-            resolved = self.resolve_for_write(str(item["path"]))
-            raw_content = item.get("content")
-            content = bytes(raw_content).decode("utf-8") if raw_content is not None else None
-            staged.append(
-                StagedFile(resolved.display, resolved.path, content, baselines[resolved.display], item.get("mode"))
-            )
-        with self.patch_lock:
-            self.patch_committer.commit(staged)
-        return {
-            "ok": True,
-            "checkpoint_id": checkpoint_id,
-            "label": checkpoint["label"],
-            "restored_files": [item["path"] for item in files],
-            "file_count": len(files),
-            "summary": f"Restored {len(files)} files from checkpoint {checkpoint_id}.",
-        }
 
-    def _context_checkpoint_state(self) -> dict[str, Any]:
-        git_state: dict[str, Any]
-        try:
-            status = self.git_status({"path": ".", "include_untracked": True, "max_entries": 2000})
-        except ToolFailure as exc:
-            git_state = {"available": False, "reason": exc.code}
-        else:
-            if status.get("is_repo"):
-                entries = [
-                    {
-                        "path": item.get("path"),
-                        "original_path": item.get("original_path"),
-                        "index_status": item.get("index_status"),
-                        "worktree_status": item.get("worktree_status"),
-                    }
-                    for item in status.get("entries", [])
-                    if isinstance(item, dict)
-                ]
-                git_state = {
-                    "available": True,
-                    "repo_root": status.get("repo_root"),
-                    "branch": status.get("branch"),
-                    "head": status.get("head"),
-                    "index_fingerprint": status.get("index_fingerprint"),
-                    "clean": status.get("clean"),
-                    "entries": entries,
-                    "truncated": bool(status.get("truncated")),
-                }
-            else:
-                git_state = {"available": False, "reason": "not_repo"}
 
-        commands_payload = self.list_commands({"max_results": 100})
-        commands = [
-            {
-                "command_id": item.get("command_id"),
-                "operation_id": item.get("operation_id"),
-                "workdir": item.get("workdir"),
-                "status": item.get("status"),
-                "started_at": item.get("started_at"),
-            }
-            for item in commands_payload.get("commands", [])
-            if isinstance(item, dict) and item.get("status") in {"accepting", "running"}
-        ]
-        capabilities = {
-            "server_version": __version__,
-            "permission_mode": self.permission_mode,
-            "workflow": self.enable_workflow_tools,
-            "agent_environment": getattr(self, "enable_agent_environment", False),
-        }
 
-        def fingerprint(value: Any) -> str:
-            return hashlib.sha256(
-                json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-            ).hexdigest()
-
-        return {
-            "workspace": str(self.workspace.root),
-            "git": git_state,
-            "running_commands": commands,
-            "capabilities": capabilities,
-            "fingerprints": {
-                "git": fingerprint(git_state),
-                "commands": fingerprint(commands),
-                "capabilities": fingerprint(capabilities),
-            },
-        }
-
-    @staticmethod
-    def _context_checkpoint_staleness(saved: dict[str, Any], current: dict[str, Any]) -> list[str]:
-        saved_fingerprints = saved.get("fingerprints") if isinstance(saved, dict) else None
-        current_fingerprints = current.get("fingerprints") if isinstance(current, dict) else None
-        if not isinstance(saved_fingerprints, dict) or not isinstance(current_fingerprints, dict):
-            return ["checkpoint_fingerprint_missing"]
-        reasons: list[str] = []
-        for key, reason in (
-            ("git", "git_state_changed"),
-            ("commands", "running_commands_changed"),
-            ("capabilities", "capabilities_changed"),
-        ):
-            if saved_fingerprints.get(key) != current_fingerprints.get(key):
-                reasons.append(reason)
-        return reasons
-
-    @staticmethod
-    def _context_checkpoint_drift(saved: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
-        saved_git_value = saved.get("git")
-        current_git_value = current.get("git")
-        saved_git: dict[str, Any] = saved_git_value if isinstance(saved_git_value, dict) else {}
-        current_git: dict[str, Any] = current_git_value if isinstance(current_git_value, dict) else {}
-
-        def changed_paths(git_state: dict[str, Any]) -> set[str]:
-            paths: set[str] = set()
-            for item in git_state.get("entries", []):
-                if not isinstance(item, dict):
-                    continue
-                for key in ("path", "original_path"):
-                    value = item.get(key)
-                    if isinstance(value, str) and value:
-                        paths.add(value)
-            return paths
-
-        saved_paths = changed_paths(saved_git)
-        current_paths = changed_paths(current_git)
-
-        def command_ids(state: dict[str, Any]) -> set[str]:
-            result: set[str] = set()
-            for item in state.get("running_commands", []):
-                if not isinstance(item, dict):
-                    continue
-                identity = item.get("operation_id") or item.get("command_id")
-                if isinstance(identity, str) and identity:
-                    result.add(identity)
-            return result
-
-        saved_commands = command_ids(saved)
-        current_commands = command_ids(current)
-        saved_capabilities_value = saved.get("capabilities")
-        current_capabilities_value = current.get("capabilities")
-        saved_capabilities: dict[str, Any] = (
-            saved_capabilities_value if isinstance(saved_capabilities_value, dict) else {}
-        )
-        current_capabilities: dict[str, Any] = (
-            current_capabilities_value if isinstance(current_capabilities_value, dict) else {}
-        )
-        capability_changes = {
-            key: {"before": saved_capabilities.get(key), "now": current_capabilities.get(key)}
-            for key in sorted(set(saved_capabilities) | set(current_capabilities))
-            if saved_capabilities.get(key) != current_capabilities.get(key)
-        }
-        current_paths_sorted = sorted(current_paths)
-        return {
-            "git": {
-                "head_before": saved_git.get("head"),
-                "head_now": current_git.get("head"),
-                "head_changed": saved_git.get("head") != current_git.get("head"),
-                "branch_before": saved_git.get("branch"),
-                "branch_now": current_git.get("branch"),
-                "branch_changed": saved_git.get("branch") != current_git.get("branch"),
-                "new_changed_paths": sorted(current_paths - saved_paths)[:100],
-                "resolved_changed_paths": sorted(saved_paths - current_paths)[:100],
-                "changed_paths_now": current_paths_sorted[:100],
-                "paths_truncated": len(current_paths_sorted) > 100,
-            },
-            "commands": {
-                "started_since_checkpoint": sorted(current_commands - saved_commands)[:100],
-                "finished_since_checkpoint": sorted(saved_commands - current_commands)[:100],
-                "running_now": sorted(current_commands)[:100],
-            },
-            "capabilities": {
-                "changed": capability_changes,
-            },
-        }
-
-    @staticmethod
-    def _context_checkpoint_resume(
-        semantic: dict[str, Any],
-        reasons: list[str],
-        drift: dict[str, Any],
-    ) -> dict[str, Any]:
-        recommended_actions: list[str] = []
-        if "git_state_changed" in reasons:
-            recommended_actions.append("Review current Git diff and changed paths before continuing edits.")
-        if "running_commands_changed" in reasons:
-            recommended_actions.append("Review current command statuses before assuming earlier checks are still running.")
-        if "capabilities_changed" in reasons:
-            recommended_actions.append("Refresh runtime/tool assumptions before resuming the saved plan.")
-        changed_paths = drift.get("git", {}).get("changed_paths_now", [])
-        return {
-            "freshness": "review_drift" if reasons else "fresh",
-            "summary": semantic.get("summary", ""),
-            "decisions": semantic.get("decisions", []),
-            "unresolved": semantic.get("unresolved", []),
-            "next_steps": semantic.get("next_steps", []),
-            "recommended_reads": list(changed_paths[:20]) if isinstance(changed_paths, list) else [],
-            "recommended_actions": recommended_actions,
-            "drift": drift,
-        }
-
-    def context_checkpoint(self, args: dict[str, Any]) -> dict[str, Any]:
-        action = str(args.get("action", ""))
-        store = self._workflow_store()
-        if action == "create":
-            summary = str(args.get("summary", "")).strip()
-            if not summary:
-                raise ToolFailure(
-                    "CONTEXT_CHECKPOINT_INVALID",
-                    "create requires a non-empty semantic summary supplied by the current model.",
-                    category="validation",
-                )
-            semantic = {
-                "summary": summary,
-                "decisions": list(args.get("decisions", [])),
-                "unresolved": list(args.get("unresolved", [])),
-                "next_steps": list(args.get("next_steps", [])),
-            }
-            deterministic = self._context_checkpoint_state()
-            return store.create_context_checkpoint(
-                label=str(args.get("label", "context checkpoint")),
-                deterministic=deterministic,
-                semantic=semantic,
-                task_id=str(args["task_id"]) if args.get("task_id") else None,
-            )
-        if action == "get":
-            checkpoint_id = str(args.get("context_checkpoint_id", ""))
-            if not checkpoint_id:
-                raise ToolFailure(
-                    "CONTEXT_CHECKPOINT_INVALID",
-                    "get requires context_checkpoint_id.",
-                    category="validation",
-                )
-            saved = store.get_context_checkpoint(checkpoint_id)
-            current = self._context_checkpoint_state()
-            reasons = self._context_checkpoint_staleness(saved["deterministic"], current)
-            drift = self._context_checkpoint_drift(saved["deterministic"], current)
-            saved.update(
-                current=current,
-                stale=bool(reasons),
-                stale_reasons=reasons,
-                drift=drift,
-                resume=self._context_checkpoint_resume(saved["semantic"], reasons, drift),
-                summary=(
-                    f"Context checkpoint {checkpoint_id} is stale: {', '.join(reasons)}."
-                    if reasons
-                    else f"Context checkpoint {checkpoint_id} still matches current runtime state."
-                ),
-            )
-            return saved
-        if action == "list":
-            return store.list_context_checkpoints(
-                limit=int(args.get("max_results", 100)),
-                task_id=str(args["task_id"]) if args.get("task_id") else None,
-            )
-        raise ToolFailure(
-            "INVALID_ARGUMENT",
-            "context_checkpoint action must be create, get, or list.",
-            category="validation",
-        )
 
     def view_image(self, args: dict[str, Any]) -> dict[str, Any]:
         resolved = self.resolve_file_existing(str(args.get("path", "")))
@@ -7168,7 +5034,7 @@ class Runtime:
         column = args.get("column")
         if prefer_lsp and resolved.path.is_file() and isinstance(line, int) and isinstance(column, int):
             try:
-                semantic = self.lsp_definition(
+                semantic = self._lsp_definition_payload(
                     {"path": resolved.display, "line": line, "column": column}
                 )
             except ToolFailure as exc:
@@ -7211,7 +5077,7 @@ class Runtime:
         column = args.get("column")
         if prefer_lsp and resolved.path.is_file() and isinstance(line, int) and isinstance(column, int):
             try:
-                semantic = self.lsp_references(
+                semantic = self._lsp_references_payload(
                     {
                         "path": resolved.display,
                         "line": line,
@@ -8498,20 +6364,18 @@ def input_schemas() -> dict[str, dict[str, Any]]:
     boolean = {"type": "boolean"}
     string_array = {"type": "array", "items": {"type": "string"}}
     schemas = {
-        "server_info": object_schema(),
-        "check_exec_environment": object_schema(),
-        "runtime_doctor": object_schema(),
-        "hooks_status": object_schema(),
-        "shell_snapshot": object_schema(
+        "project_context": object_schema(
             {
-                "refresh": {**boolean, "default": False},
-                "tools": {
-                    "type": "array",
-                    "items": {**string, "minLength": 1},
-                    "maxItems": 32,
+                "action": {
+                    **string,
+                    "enum": ["list", "current", "select"],
+                    "default": "current",
                 },
+                "project_id": {**string, "minLength": 1, "maxLength": 200},
             }
         ),
+        "server_info": object_schema(),
+        "runtime_doctor": object_schema(),
         "read_file": object_schema(
             {
                 "path": {**string, "minLength": 1},
@@ -8584,22 +6448,6 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "max_preview_bytes": {**integer, "minimum": 80, "maximum": 4096, "default": 512},
             },
             ["query"],
-        ),
-        "tool_search": object_schema(
-            {
-                "query": {**string, "default": "", "description": "English/Chinese intent or exact tool name. Omit for directory/category browsing."},
-                "category": {**string, "enum": list(CATEGORIES), "description": "Optional category ID from the directory; also filters intent searches."},
-                "limit": {**integer, "minimum": 1, "maximum": 20, "default": 8},
-                "offset": {**integer, "minimum": 0, "default": 0},
-                "include_schema": {**boolean, "default": False},
-            },
-        ),
-        "tool_invoke": object_schema(
-            {
-                "name": {**string, "minLength": 1},
-                "arguments": {"type": "object", "default": {}},
-            },
-            ["name"],
         ),
         "apply_patch": object_schema({"patch": {**string, "minLength": 1}, "dry_run": {**boolean, "default": False}}, ["patch"]),
         "exec_command": object_schema(
@@ -8709,145 +6557,13 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             },
             ["path"],
         ),
-        "git_branch_list": object_schema(
-            {"max_results": {**integer, "minimum": 1, "maximum": 1000, "default": 200}}
-        ),
-        "git_branch_create": object_schema(
-            {
-                "name": {**string, "minLength": 1, "maxLength": 200},
-                "start_point": {**string, "default": "HEAD"},
-                "checkout": {**boolean, "default": False},
-                "expected_head": {**string, "minLength": 1, "maxLength": 64},
-                "expected_index_fingerprint": {**string, "minLength": 64, "maxLength": 64},
-            },
-            ["name", "expected_head", "expected_index_fingerprint"],
-        ),
-        "git_conflicts": object_schema({}),
-        "git_stage": object_schema(
-            {
-                "paths": {"type": "array", "items": {**string, "minLength": 1}, "minItems": 1, "maxItems": 200},
-                "expected_head": {**string, "minLength": 1, "maxLength": 64},
-                "expected_index_fingerprint": {**string, "minLength": 64, "maxLength": 64},
-            },
-            ["paths", "expected_head", "expected_index_fingerprint"],
-        ),
-        "git_unstage": object_schema(
-            {
-                "paths": {"type": "array", "items": {**string, "minLength": 1}, "minItems": 1, "maxItems": 200},
-                "expected_head": {**string, "minLength": 1, "maxLength": 64},
-                "expected_index_fingerprint": {**string, "minLength": 64, "maxLength": 64},
-            },
-            ["paths", "expected_head", "expected_index_fingerprint"],
-        ),
-        "git_commit": object_schema(
-            {
-                "paths": {"type": "array", "items": {**string, "minLength": 1}, "minItems": 1, "maxItems": 200},
-                "message": {**string, "minLength": 1, "maxLength": 10000},
-                "expected_head": {**string, "minLength": 1, "maxLength": 64},
-                "expected_index_fingerprint": {**string, "minLength": 64, "maxLength": 64},
-            },
-            ["paths", "message", "expected_head", "expected_index_fingerprint"],
-        ),
-        "git_worktree_list": object_schema({}),
-        "git_worktree_create": object_schema(
-            {
-                "worktree_id": {**string, "minLength": 1, "maxLength": 80},
-                "branch": {**string, "minLength": 1, "maxLength": 200},
-                "create_branch": {**boolean, "default": True},
-                "start_point": {**string, "default": "HEAD"},
-                "expected_head": {**string, "minLength": 1, "maxLength": 64},
-                "expected_index_fingerprint": {**string, "minLength": 64, "maxLength": 64},
-            },
-            ["worktree_id", "branch", "expected_head", "expected_index_fingerprint"],
-        ),
-        "git_worktree_remove": object_schema(
-            {"worktree_id": {**string, "minLength": 1, "maxLength": 80}}, ["worktree_id"]
-        ),
-        "lsp_status": object_schema({}),
-        "lsp_definition": object_schema(
-            {
-                "path": {**string, "minLength": 1},
-                "line": {**integer, "minimum": 1},
-                "column": {**integer, "minimum": 1},
-            },
-            ["path", "line", "column"],
-        ),
-        "lsp_references": object_schema(
-            {
-                "path": {**string, "minLength": 1},
-                "line": {**integer, "minimum": 1},
-                "column": {**integer, "minimum": 1},
-                "include_declaration": {**boolean, "default": True},
-                "max_results": {**integer, "minimum": 1, "maximum": 5000, "default": 1000},
-            },
-            ["path", "line", "column"],
-        ),
-        "lsp_diagnostics": object_schema(
+        "code_diagnostics": object_schema(
             {
                 "path": {**string, "minLength": 1},
                 "wait_ms": {**integer, "minimum": 0, "maximum": 5000, "default": 500},
                 "max_results": {**integer, "minimum": 1, "maximum": 5000, "default": 500},
             },
             ["path"],
-        ),
-        "lsp_rename_preview": object_schema(
-            {
-                "path": {**string, "minLength": 1},
-                "line": {**integer, "minimum": 1},
-                "column": {**integer, "minimum": 1},
-                "new_name": {**string, "minLength": 1, "maxLength": 500},
-                "max_files": {**integer, "minimum": 1, "maximum": 500, "default": 100},
-                "max_edits": {**integer, "minimum": 1, "maximum": 10000, "default": 2000},
-            },
-            ["path", "line", "column", "new_name"],
-        ),
-        "review_prepare": object_schema(
-            {
-                "path": {**string, "default": "."},
-                "paths": string_array,
-                "task_id": {**string, "minLength": 1},
-                "staged": {**boolean, "default": True},
-                "unstaged": {**boolean, "default": True},
-                "max_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 524288},
-            }
-        ),
-        "review_record": object_schema(
-            {
-                "review_id": {**string, "minLength": 1},
-                "expected_revision": {**integer, "minimum": 1},
-                "status": {**string, "enum": ["completed", "changes_requested", "approved"]},
-                "findings": {
-                    "type": "array",
-                    "maxItems": 500,
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "path": {**string, "minLength": 1},
-                            "line": {**integer, "minimum": 1},
-                            "end_line": {**integer, "minimum": 1},
-                            "priority": {**integer, "minimum": 0, "maximum": 3},
-                            "title": {**string, "minLength": 1, "maxLength": 500},
-                            "body": {**string, "minLength": 1, "maxLength": 10000},
-                            "status": {**string, "enum": ["open", "resolved", "dismissed"]},
-                        },
-                        "required": ["path", "line", "title", "body"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
-            ["review_id", "expected_revision", "status", "findings"],
-        ),
-        "review_get": object_schema(
-            {"review_id": {**string, "minLength": 1}}, ["review_id"]
-        ),
-        "approval_get": object_schema(
-            {"approval_id": {**string, "minLength": 1}}, ["approval_id"]
-        ),
-        "approval_list": object_schema(
-            {
-                "status": {**string, "enum": ["pending", "approved", "denied", "expired", "consumed"]},
-                "max_results": {**integer, "minimum": 1, "maximum": 1000, "default": 100},
-            }
         ),
         "request_permissions": object_schema(
             {
@@ -8875,43 +6591,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         "workspace_overview": object_schema(
             {"path": {**string, "default": "."}, "max_files": {**integer, "minimum": 1, "maximum": 50000, "default": 20000}}
         ),
-        "repo_map": object_schema(
-            {
-                "path": {**string, "default": "."},
-                "query": string,
-                "impact": {**boolean, "default": False},
-                "changed_paths": {
-                    "type": "array",
-                    "items": {**string, "minLength": 1},
-                    "maxItems": 100,
-                },
-                "max_files": {**integer, "minimum": 1, "maximum": 20000, "default": 2000},
-                "max_symbols": {**integer, "minimum": 1, "maximum": 5000, "default": 300},
-                "max_impact_files": {**integer, "minimum": 1, "maximum": 500, "default": 100},
-                "max_impact_symbols": {**integer, "minimum": 1, "maximum": 200, "default": 40},
-            }
-        ),
         "project_instructions": object_schema({"path": {**string, "default": "."}}),
-        "skills_list": object_schema(
-            {"max_results": {**integer, "minimum": 1, "maximum": 1000, "default": 200}}
-        ),
-        "skills_read": object_schema({"path": {**string, "minLength": 1}}, ["path"]),
-        "agent_environment": object_schema(
-            {
-                "provider": {
-                    **string,
-                    "enum": ["all", "codex", "claude", "gemini", "cursor", "opencode"],
-                    "default": "all",
-                },
-                "query": {**string, "maxLength": 500},
-                "kind": {
-                    **string,
-                    "enum": ["all", "skill", "plugin_skill", "plugin", "rule", "worktree", "capability"],
-                    "default": "all",
-                },
-                "max_items": {**integer, "minimum": 1, "maximum": 500, "default": 200},
-            }
-        ),
         "checks_discover": object_schema(
             {
                 "path": {**string, "default": "."},
@@ -8922,139 +6602,6 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                     "maxItems": 100,
                 },
             }
-        ),
-        "checks_run": object_schema(
-            {
-                "check_id": {**string, "minLength": 1},
-                "path": {**string, "default": "."},
-                "task_id": {**string, "minLength": 1},
-                "operation_id": {**string, "minLength": 1, "maxLength": 200},
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 600000, "default": 30000},
-                "yield_time_ms": {**integer, "minimum": 0, "maximum": 30000, "default": 10000},
-                "max_output_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 65536},
-                "max_diagnostics": {**integer, "minimum": 1, "maximum": 500, "default": 100},
-                "approval_ids": {"type": "array", "items": {**string, "minLength": 1}, "maxItems": 16},
-            },
-            ["check_id"],
-        ),
-        "checks_result": object_schema(
-            {
-                "check_run_id": {**string, "minLength": 1},
-                "max_diagnostics": {**integer, "minimum": 1, "maximum": 500, "default": 100},
-            },
-            ["check_run_id"],
-        ),
-        "task_create": object_schema(
-            {
-                "title": {**string, "minLength": 1, "maxLength": 200},
-                "objective": {**string, "minLength": 1, "maxLength": 10000},
-                "details": {"type": "object", "additionalProperties": True},
-            },
-            ["title", "objective"],
-        ),
-        "task_get": object_schema({"task_id": {**string, "minLength": 1}}, ["task_id"]),
-        "task_list": object_schema(
-            {
-                "status": {**string, "enum": sorted(TASK_STATES)},
-                "max_results": {**integer, "minimum": 1, "maximum": 1000, "default": 100},
-            }
-        ),
-        "task_update": object_schema(
-            {
-                "task_id": {**string, "minLength": 1},
-                "expected_revision": {**integer, "minimum": 1},
-                "status": {**string, "enum": sorted(TASK_STATES)},
-                "title": {**string, "minLength": 1, "maxLength": 200},
-                "objective": {**string, "minLength": 1, "maxLength": 10000},
-                "details": {"type": "object", "additionalProperties": True},
-            },
-            ["task_id", "expected_revision"],
-        ),
-        "task_event_add": object_schema(
-            {
-                "task_id": {**string, "minLength": 1},
-                "event_type": {
-                    **string,
-                    "enum": ["progress", "decision", "evidence", "note", "blocked", "resumed"],
-                },
-                "message": {**string, "minLength": 1, "maxLength": 10000},
-                "details": {"type": "object", "additionalProperties": True},
-            },
-            ["task_id", "event_type", "message"],
-        ),
-        "task_events": object_schema(
-            {
-                "task_id": {**string, "minLength": 1},
-                "max_results": {**integer, "minimum": 1, "maximum": 1000, "default": 100},
-            },
-            ["task_id"],
-        ),
-        "task_context": object_schema(
-            {
-                "task_id": {**string, "minLength": 1},
-                "event_limit": {**integer, "minimum": 1, "maximum": 500, "default": 50},
-            },
-            ["task_id"],
-        ),
-        "task_plan_get": object_schema(
-            {"task_id": {**string, "minLength": 1}}, ["task_id"]
-        ),
-        "task_plan_update": object_schema(
-            {
-                "task_id": {**string, "minLength": 1},
-                "expected_revision": {**integer, "minimum": 1},
-                "steps": {
-                    "type": "array",
-                    "maxItems": 100,
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "step_id": {**string, "minLength": 1, "maxLength": 100},
-                            "title": {**string, "minLength": 1, "maxLength": 500},
-                            "status": {**string, "enum": ["pending", "in_progress", "completed"]},
-                            "result": {**string, "maxLength": 10000},
-                        },
-                        "required": ["step_id", "title", "status"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
-            ["task_id", "expected_revision", "steps"],
-        ),
-        "checkpoint_create": object_schema(
-            {
-                "paths": {"type": "array", "items": {**string, "minLength": 1}, "minItems": 1, "maxItems": 64},
-                "label": {**string, "minLength": 1, "maxLength": 200, "default": "checkpoint"},
-                "task_id": {**string, "minLength": 1},
-            },
-            ["paths"],
-        ),
-        "checkpoint_list": object_schema(
-            {"max_results": {**integer, "minimum": 1, "maximum": 1000, "default": 100}}
-        ),
-        "checkpoint_diff": object_schema(
-            {"checkpoint_id": {**string, "minLength": 1}}, ["checkpoint_id"]
-        ),
-        "checkpoint_restore": object_schema(
-            {
-                "checkpoint_id": {**string, "minLength": 1},
-                "restore_token": {**string, "minLength": 64, "maxLength": 64},
-            },
-            ["checkpoint_id", "restore_token"],
-        ),
-        "context_checkpoint": object_schema(
-            {
-                "action": {**string, "enum": ["create", "get", "list"]},
-                "context_checkpoint_id": {**string, "minLength": 1},
-                "label": {**string, "minLength": 1, "maxLength": 200, "default": "context checkpoint"},
-                "summary": {**string, "maxLength": 20000},
-                "decisions": {"type": "array", "items": {**string, "maxLength": 2000}, "maxItems": 50},
-                "unresolved": {"type": "array", "items": {**string, "maxLength": 2000}, "maxItems": 50},
-                "next_steps": {"type": "array", "items": {**string, "maxLength": 2000}, "maxItems": 50},
-                "task_id": {**string, "minLength": 1},
-                "max_results": {**integer, "minimum": 1, "maximum": 1000, "default": 100},
-            },
-            ["action"],
         ),
         "view_image": object_schema(
             {
@@ -9102,9 +6649,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             ["symbol"],
         ),
     }
-    for name in ("git_status", "git_diff", "git_log", "git_show", "git_blame", "git_branch_list",
-                 "git_branch_create", "git_worktree_list", "git_worktree_create", "git_worktree_remove",
-                 "git_conflicts", "git_stage", "git_unstage", "git_commit", "review_prepare"):
+    for name in ("git_status", "git_diff", "git_log", "git_show", "git_blame"):
         schemas[name]["properties"]["repo_path"] = {
             "type": "string", "minLength": 1,
             "description": "Select one Git worktree inside the workspace. Other path/paths arguments stay workspace-relative, not repo-relative.",
@@ -9132,7 +6677,7 @@ def _server_card_auth(runtime: Runtime, *, oauth_base_url: str | None = None) ->
     return {"type": "none", "scheme": None, "header": None}
 
 
-def server_card_payload(runtime: Runtime, *, oauth_base_url: str | None = None) -> dict[str, Any]:
+def server_card_payload(runtime: Any, *, oauth_base_url: str | None = None) -> dict[str, Any]:
     names = runtime.exposed_tool_names()
     # Always the real annotations, never the tools/list override: this card is
     # what an operator fetches to find out what the endpoint actually does.
@@ -9177,7 +6722,6 @@ MIRROR_HEADERS = ("MCP-Protocol-Version", "Mcp-Method", "Mcp-Name")
 MODERN_ERROR_STATUSES = {
     -32601: 404,
     -32602: 400,
-    TASKS_MISSING_REQUIRED_CLIENT_CAPABILITY: 400,
     HEADER_MISMATCH: 400,
     UNSUPPORTED_PROTOCOL_VERSION: 400,
 }
@@ -9197,8 +6741,8 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
     server_version = f"CodingToolsMCP/{__version__}"
 
     @property
-    def runtime(self) -> Runtime:
-        return cast(Runtime, self.server.runtime)  # type: ignore[attr-defined]
+    def runtime(self) -> Runtime | GatewayRuntime:
+        return cast(Runtime | GatewayRuntime, self.server.runtime)  # type: ignore[attr-defined]
 
     def _read_bounded_body(self, length: int) -> bytes | None:
         """Read exactly ``length`` bytes under one absolute body deadline."""
@@ -9282,8 +6826,28 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if not self.is_authorized():
             self.send_unauthorized()
             return
-        # There is no session to terminate: every request is served by the one
-        # workspace runtime, which outlives any single client.
+        if isinstance(self.runtime, GatewayRuntime):
+            session_id = self._session_header()
+            if session_id is None:
+                self.send_rpc_error(
+                    -32600,
+                    "Mcp-Session-Id is required to terminate a gateway session",
+                    status=400,
+                )
+                return
+            if not self.runtime.sessions.delete(session_id):
+                self.send_rpc_error(
+                    -32001,
+                    "Unknown or expired MCP session",
+                    status=404,
+                    data={"session_id": session_id},
+                )
+                return
+            self.send_response(204)
+            self.send_cors_headers()
+            self.end_headers()
+            return
+        # A normal workspace runtime remains stateless at the transport layer.
         self.send_rpc_error(
             -32601,
             "DELETE is not supported: this endpoint has no sessions to terminate",
@@ -9310,7 +6874,8 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             self.send_json({"error": "Origin denied"}, status=403)
             return
         self.send_response(204)
-        self.send_header("Allow", "GET, HEAD, POST, OPTIONS")
+        methods = "GET, HEAD, POST, OPTIONS, DELETE" if isinstance(self.runtime, GatewayRuntime) else "GET, HEAD, POST, OPTIONS"
+        self.send_header("Allow", methods)
         self.send_cors_headers()
         self.end_headers()
 
@@ -9424,6 +6989,35 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         method = str(request["method"])
         raw_params = request.get("params")
         params = raw_params if isinstance(raw_params, dict) else {}
+        session_id: str | None = None
+        response_session_id: str | None = None
+        if isinstance(self.runtime, GatewayRuntime):
+            session_values = self.headers.get_all("Mcp-Session-Id") or []
+            if len(session_values) > 1:
+                self.send_rpc_error(
+                    -32600,
+                    "Mcp-Session-Id must appear at most once",
+                    request_id=response_id(request),
+                    data={"header": "Mcp-Session-Id", "reason": "duplicate"},
+                )
+                return
+            if session_values:
+                session_id = session_values[0].strip()
+                if not session_id or self.runtime.sessions.get(session_id) is None:
+                    self.send_rpc_error(
+                        -32001,
+                        "Unknown or expired MCP session",
+                        status=404,
+                        request_id=response_id(request),
+                        data={"session_id": session_id},
+                    )
+                    return
+            elif self._request_establishes_gateway_session(method, params):
+                context = self.runtime.sessions.create(
+                    selected_project_id=self.runtime.projects.default_project_id
+                )
+                session_id = context.session_id
+                response_session_id = session_id
         era = request_era(method, params)
         if era == MODERN_ERA:
             duplicate = self.duplicated_mirror_header()
@@ -9475,13 +7069,43 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         except JsonRpcError as exc:
             self.send_rpc_error(exc.code, exc.message, request_id=response_id(request), data=exc.data)
             return
-        response = self.handle_rpc(request, transport_protocol_version=protocol_version)
+        response = self.handle_rpc(
+            request,
+            transport_protocol_version=protocol_version,
+            session_id=session_id,
+        )
+        response_headers = (
+            {"Mcp-Session-Id": response_session_id}
+            if response_session_id is not None
+            else None
+        )
         if response is None:
             self.send_response(202)
             self.send_cors_headers()
+            for name, value in (response_headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             return
-        self.send_json(response, status=rpc_response_status(era, response))
+        self.send_json(
+            response,
+            status=rpc_response_status(era, response),
+            extra_headers=response_headers,
+        )
+
+    @staticmethod
+    def _request_establishes_gateway_session(method: str, params: dict[str, Any]) -> bool:
+        if method == "initialize":
+            return True
+        if method != "tools/call":
+            return False
+        return params.get("name") == "project_context"
+
+    def _session_header(self) -> str | None:
+        values = self.headers.get_all("Mcp-Session-Id") or []
+        if len(values) != 1:
+            return None
+        value = values[0].strip()
+        return value or None
 
     def duplicated_mirror_header(self) -> str | None:
         """Name the first mirror header that was sent more than once, if any.
@@ -9502,6 +7126,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         request: dict[str, Any],
         *,
         transport_protocol_version: str | None = None,
+        session_id: str | None = None,
     ) -> dict[str, Any] | None:
         legacy_version = (
             transport_protocol_version
@@ -9509,7 +7134,8 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             else None
         )
         try:
-            return dispatch_rpc(self.runtime, request, transport_protocol_version=legacy_version)
+            runtime = self.runtime.bind(session_id) if isinstance(self.runtime, GatewayRuntime) else self.runtime
+            return dispatch_rpc(runtime, request, transport_protocol_version=legacy_version)
         except Exception as exc:  # noqa: BLE001 - HTTP must always answer with JSON-RPC
             return jsonrpc_error(response_id(request), -32603, str(exc))
 
@@ -9873,11 +7499,21 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if origin and is_allowed_origin(origin):
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
-            self.send_header("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS")
+            methods = (
+                "GET, HEAD, POST, OPTIONS, DELETE"
+                if isinstance(self.runtime, GatewayRuntime)
+                else "GET, HEAD, POST, OPTIONS"
+            )
+            self.send_header("Access-Control-Allow-Methods", methods)
+            allowed_headers = "Accept, Authorization, Content-Type, MCP-Protocol-Version, Mcp-Method, Mcp-Name"
+            if isinstance(self.runtime, GatewayRuntime):
+                allowed_headers += ", Mcp-Session-Id"
             self.send_header(
                 "Access-Control-Allow-Headers",
-                "Accept, Authorization, Content-Type, MCP-Protocol-Version, Mcp-Method, Mcp-Name",
+                allowed_headers,
             )
+            if isinstance(self.runtime, GatewayRuntime):
+                self.send_header("Access-Control-Expose-Headers", "Mcp-Session-Id")
 
     def send_json(
         self,
@@ -9907,7 +7543,7 @@ class RuntimeHTTPServer(http.server.ThreadingHTTPServer):
         self,
         address: tuple[str, int],
         handler: type[MCPHandler],
-        runtime: Runtime,
+        runtime: Runtime | GatewayRuntime,
     ) -> None:
         super().__init__(address, handler)
         self.runtime = runtime
@@ -9980,10 +7616,6 @@ def build_runtime(
         file_access_root=file_access_root,
         file_access_roots=file_access_roots,
         enable_view_image=args.enable_view_image,
-        enable_workflow_tools=bool(getattr(args, "enable_workflow_tools", False)),
-        defer_workflow_tools=bool(getattr(args, "defer_workflow_tools", False)),
-        enable_hooks=bool(getattr(args, "enable_hooks", False)),
-        hooks_file=getattr(args, "hooks_file", None),
         state_root=Path(args.state_root).expanduser() if getattr(args, "state_root", None) else None,
         permission_mode=runtime_policy.permission_mode,
         shell_env_policy=runtime_policy.shell_env_policy,
@@ -10191,7 +7823,78 @@ def run_http(args: argparse.Namespace) -> int:
         )
         return 2
 
-    runtime = build_runtime(args, runtime_policy, auth_token=auth_token, oauth_config=oauth_config, transport="http")
+    runtime: Runtime | GatewayRuntime
+    control_runtime = build_runtime(
+        args,
+        runtime_policy,
+        auth_token=auth_token,
+        oauth_config=oauth_config,
+        transport="http",
+    )
+    gateway_enabled = bool(
+        getattr(args, "project_gateway", False)
+        or getattr(args, "project_registry_file", None)
+    )
+    if getattr(args, "project_registry_only", False) and not getattr(
+        args, "project_registry_file", None
+    ):
+        print("ERROR: --project-registry-only requires --project-registry-file.", file=sys.stderr)
+        control_runtime.close()
+        return 2
+    if gateway_enabled:
+        workspace_root = control_runtime.workspace.root
+        configured_project_id = str(getattr(args, "project_id", "") or "").strip()
+        project_id = configured_project_id or (
+            "project-" + hashlib.sha256(str(workspace_root).encode("utf-8")).hexdigest()[:16]
+        )
+        project_name = str(getattr(args, "project_name", "") or "").strip() or workspace_root.name or project_id
+        registry_only = bool(getattr(args, "project_registry_only", False))
+        bootstrap = (
+            None
+            if registry_only
+            else ProjectDefinition(
+                id=project_id,
+                name=project_name,
+                path=workspace_root,
+            )
+        )
+        registry_path_raw = str(getattr(args, "project_registry_file", "") or "").strip()
+        registry_path = Path(registry_path_raw).expanduser() if registry_path_raw else None
+
+        def build_project_runtime(definition: ProjectDefinition) -> Any:
+            if definition.endpoint is not None:
+                return HTTPProjectRuntime(definition)
+            child_args = argparse.Namespace(**vars(args))
+            child_args.workspace = str(definition.path)
+            return build_runtime(
+                child_args,
+                runtime_policy,
+                auth_token=None,
+                oauth_config=None,
+                transport="http",
+                emit_warning=False,
+            )
+
+        project_registry = ProjectRegistry(
+            bootstrap,
+            None if registry_only else control_runtime,
+            runtime_factory=build_project_runtime,
+            registry_file=registry_path,
+        )
+        session_registry = SessionRegistry(
+            ttl_seconds=int(getattr(args, "gateway_session_ttl", DEFAULT_GATEWAY_SESSION_TTL_SECONDS))
+        )
+        runtime = GatewayRuntime(
+            control_runtime,
+            project_registry,
+            session_registry,
+            project_tool_definition=lambda: tool_definition(
+                "project_context",
+                fake_readonly=control_runtime.fake_readonly_annotations,
+            ),
+        )
+    else:
+        runtime = control_runtime
     server = RuntimeHTTPServer((args.host, args.port), MCPHandler, runtime)
     if oauth_config:
         url_label = oauth_config.server_url or "dynamic request URL"
@@ -10209,6 +7912,7 @@ def run_http(args: argparse.Namespace) -> int:
         return 130
     finally:
         server.server_close()
+        runtime.close()
     return 0
 
 
@@ -10230,6 +7934,51 @@ def build_parser() -> argparse.ArgumentParser:
         version=f"%(prog)s {__version__}",
     )
     parser.add_argument("--workspace", help="workspace root; defaults to CODING_TOOLS_MCP_WORKSPACE or cwd")
+    parser.add_argument(
+        "--project-gateway",
+        action="store_true",
+        help=(
+            "serve a persistent multi-project gateway at the normal MCP URL; the configured workspace becomes "
+            "the bootstrap/default project and project selection is scoped to MCP sessions"
+        ),
+    )
+    parser.add_argument(
+        "--project-registry-file",
+        default=os.environ.get(f"{ENV_PREFIX}_PROJECT_REGISTRY_FILE"),
+        help=(
+            "JSON project registry hot-loaded by --project-gateway; setting this option also enables gateway mode"
+        ),
+    )
+    parser.add_argument(
+        "--project-registry-only",
+        action="store_true",
+        help=(
+            "use --workspace only as the Gateway control anchor and expose projects exclusively from "
+            "--project-registry-file"
+        ),
+    )
+    parser.add_argument(
+        "--project-id",
+        default=os.environ.get(f"{ENV_PREFIX}_PROJECT_ID"),
+        help="stable id for the bootstrap workspace project; defaults to a deterministic path hash",
+    )
+    parser.add_argument(
+        "--project-name",
+        default=os.environ.get(f"{ENV_PREFIX}_PROJECT_NAME"),
+        help="display name for the bootstrap workspace project; defaults to the workspace directory name",
+    )
+    parser.add_argument(
+        "--gateway-session-ttl",
+        type=int,
+        default=env_int(
+            f"{ENV_PREFIX}_GATEWAY_SESSION_TTL",
+            DEFAULT_GATEWAY_SESSION_TTL_SECONDS,
+        ),
+        help=(
+            "seconds to retain inactive gateway project bindings; defaults to "
+            f"{DEFAULT_GATEWAY_SESSION_TTL_SECONDS}"
+        ),
+    )
     parser.add_argument(
         "--file-access-root",
         action="append",
@@ -10324,38 +8073,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="enable the P1 view_image tool",
     )
     parser.add_argument(
-        "--enable-workflow-tools",
-        action="store_true",
-        default=truthy_env(os.environ.get(f"{ENV_PREFIX}_ENABLE_WORKFLOW_TOOLS")),
-        help="enable the opt-in project insight, Skills, checks, task, and checkpoint toolset",
-    )
-    parser.add_argument(
-        "--defer-workflow-tools",
-        action="store_true",
-        default=truthy_env(os.environ.get(f"{ENV_PREFIX}_DEFER_WORKFLOW_TOOLS")),
-        help=(
-            "hide workflow tools from the direct catalog and expose them through tool_search + tool_invoke; "
-            "requires --enable-workflow-tools"
-        ),
-    )
-    parser.add_argument(
-        "--enable-hooks",
-        action="store_true",
-        default=truthy_env(os.environ.get(f"{ENV_PREFIX}_ENABLE_HOOKS")),
-        help="enable opt-in workspace hooks from .agents/hooks.json or --hooks-file",
-    )
-    parser.add_argument(
-        "--hooks-file",
-        default=os.environ.get(f"{ENV_PREFIX}_HOOKS_FILE") or DEFAULT_HOOK_CONFIG_PATH,
-        help=(
-            "workspace-relative hook configuration file; defaults to .agents/hooks.json "
-            f"or {ENV_PREFIX}_HOOKS_FILE"
-        ),
-    )
-    parser.add_argument(
         "--state-root",
         default=os.environ.get(f"{ENV_PREFIX}_STATE_ROOT"),
-        help="persistent workflow state root; defaults to the platform application-state directory",
+        help="persistent runtime state root; defaults to macOS Application Support",
     )
     parser.add_argument(
         "--dangerously-skip-all-permissions",

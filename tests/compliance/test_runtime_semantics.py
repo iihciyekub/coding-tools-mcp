@@ -41,7 +41,7 @@ class RuntimeSemanticsTests(ComplianceTestCase):
         with self.session_for_fixture("long-running-project") as (_workspace, client):
             started = client.call_tool(
                 "exec_command",
-                {"cmd": "python repl.py", "tty": True, "timeout_ms": 1000, "max_output_bytes": 4096},
+                {"cmd": "python3 repl.py", "tty": True, "timeout_ms": 1000, "max_output_bytes": 4096},
             )
             payload = self.assert_tool_success(started)
             command_id = payload.get("command_id")
@@ -55,7 +55,7 @@ class RuntimeSemanticsTests(ComplianceTestCase):
         with self.session_for_fixture("long-running-project") as (_workspace, client):
             started = client.call_tool(
                 "exec_command",
-                {"cmd": "python repl.py", "tty": True, "timeout_ms": 1000, "max_output_bytes": 4096},
+                {"cmd": "python3 repl.py", "tty": True, "timeout_ms": 1000, "max_output_bytes": 4096},
             )
             command_id = self.assert_tool_success(started).get("command_id")
             client.call_tool("kill_command", {"command_id": command_id})

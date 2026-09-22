@@ -78,9 +78,6 @@ MIRRORED_NAME_METHODS = {
     "tools/call": "name",
     "resources/read": "uri",
     "prompts/get": "name",
-    "tasks/get": "taskId",
-    "tasks/update": "taskId",
-    "tasks/cancel": "taskId",
 }
 
 
@@ -320,8 +317,8 @@ class MCPContractTests(ComplianceTestCase):
         self.assertTrue(trace_events, f"expected structured tool_call trace in stderr: {stderr!r}")
         event = trace_events[-1]
         self.assertEqual(event.get("tool"), "request_permissions")
-        self.assertFalse(event.get("ok"))
-        self.assertEqual(event.get("error_code"), "ELICITATION_UNSUPPORTED")
+        self.assertTrue(event.get("ok"))
+        self.assertIsNone(event.get("error_code"))
         serialized = json.dumps(event, sort_keys=True)
         self.assertNotIn("COMPLIANCE_SHOULD_NOT_LEAK", serialized)
         self.assertIn("[REDACTED]", serialized)
@@ -1537,8 +1534,9 @@ class MCPContractTests(ComplianceTestCase):
 
             tools = result.get("tools")
             self.assertIsInstance(tools, list)
-            self.assertEqual(len(tools), 28)
-            self.assertTrue({tool.get("name") for tool in tools} >= set(REQUIRED_TOOLS))
+            names = {tool.get("name") for tool in tools}
+            self.assertTrue(names >= set(REQUIRED_TOOLS))
+            self.assertEqual(names, set(TOOL_REGISTRY) - {"project_context"})
             for tool in tools:
                 # The cache hints describe the catalog, not the entries in it;
                 # a tool definition is a schema clients validate against.

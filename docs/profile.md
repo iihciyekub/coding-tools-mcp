@@ -1,10 +1,11 @@
 # Coding Tools MCP Contract
 
 The active contract is [runtime-contract-v0.4.md](runtime-contract-v0.4.md).
-The frozen 0.2.x one is [runtime-contract-v0.2.md](runtime-contract-v0.2.md),
-and [migration-0.4.md](migration-0.4.md) describes the current migration from 0.3.
+Older contract snapshots and migration compatibility documents are intentionally
+not retained in this macOS-first runtime line.
 
-Contract id: `coding-tools-mcp-v0.3`.
+Contract id: `coding-tools-mcp-runtime`.
 
 The word “contract” describes the wire/runtime version. The product exposes one
-fixed tool set; it has no tool-selection profiles.
+small direct primitive tool set; it has no secondary discovery gateway or
+workflow profiles.

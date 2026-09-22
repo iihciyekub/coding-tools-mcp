@@ -27,7 +27,7 @@ class MultiProjectTests(unittest.TestCase):
         self.a = self.make_repo("project-a")
         self.b = self.make_repo("project-b")
         self.runtime = Runtime(
-            self.workspace, enable_workflow_tools=True, permission_mode="dangerous",
+            self.workspace, permission_mode="dangerous",
             state_root=self.base / "state", project_context=ProjectContext((), (), ("Startup scan truncated",)),
         )
         self.addCleanup(self.temp.cleanup)
@@ -55,13 +55,15 @@ class MultiProjectTests(unittest.TestCase):
         return path
 
     def call(self, name: str, arguments: dict | None = None) -> dict:
-        result = self.runtime.call_tool(name, arguments or {})
+        args = arguments or {}
+        result = self.result(name, args)
         self.assertFalse(result["isError"], result)
         return result["structuredContent"]
 
-    def state(self, repo: str = "project-a") -> dict:
-        status = self.call("git_status", {"repo_path": repo})
-        return {"expected_head": status["head"], "expected_index_fingerprint": status["index_fingerprint"]}
+    def result(self, name: str, arguments: dict | None = None) -> dict:
+        args = arguments or {}
+        return self.runtime.call_tool(name, args)
+
 
     def test_read_tools_resolve_independent_repositories_and_deleted_paths(self) -> None:
         for name, root in (("project-a", self.a), ("project-b", self.b)):
@@ -88,45 +90,8 @@ class MultiProjectTests(unittest.TestCase):
         self.assertEqual(status["head"], self.git(self.b, "rev-parse", "HEAD").strip())
         self.assertEqual(self.call("git_log", {"path": "project-b"})["commits"][0]["subject"], "Initial project-b")
 
-    def test_stage_unstage_commit_do_not_touch_other_project(self) -> None:
-        b_head = self.git(self.b, "rev-parse", "HEAD")
-        b_index = self.git(self.b, "ls-files", "--stage")
-        (self.a / "src/same.py").write_text("value = 2\n", encoding="utf-8")
-        (self.b / "src/same.py").write_text("value = 3\n", encoding="utf-8")
-        paths = ["project-a/src/same.py"]
-        stage = self.call("git_stage", {"repo_path": "project-a", "paths": paths, **self.state()})
-        self.assertEqual(stage["repo_root"], str(self.a))
-        self.call("git_unstage", {"repo_path": "project-a", "paths": paths, **self.state()})
-        self.assertEqual(self.git(self.a, "diff", "--cached"), "")
-        self.call("git_stage", {"paths": paths, **self.state()})
-        self.call("git_commit", {"repo_path": "project-a", "paths": paths, "message": "A only", **self.state()})
-        self.assertEqual(self.git(self.a, "log", "-1", "--format=%s").strip(), "A only")
-        self.assertEqual(self.git(self.b, "rev-parse", "HEAD"), b_head)
-        self.assertEqual(self.git(self.b, "ls-files", "--stage"), b_index)
-        self.assertEqual((self.b / "src/same.py").read_text(), "value = 3\n")
 
-    def test_cross_repo_paths_and_explicit_conflicts_fail_before_writes(self) -> None:
-        for arguments in (
-            {"paths": ["project-a/src/same.py", "project-b/src/same.py"]},
-            {"repo_path": "project-a", "paths": ["project-b/src/same.py"]},
-        ):
-            result = self.runtime.call_tool("git_stage", {**arguments, **self.state()})
-            self.assertTrue(result["isError"])
-            self.assertEqual(result["structuredContent"]["error"]["code"], "GIT_REPOSITORY_MISMATCH")
-        self.assertEqual(self.git(self.a, "diff", "--cached"), "")
-        self.assertEqual(self.git(self.b, "diff", "--cached"), "")
 
-    def test_fingerprint_is_bound_to_worktree_even_for_identical_git_content(self) -> None:
-        clone = self.workspace / "clone"
-        self.git(self.workspace, "clone", "--local", str(self.a), str(clone))
-        a = self.call("git_status", {"repo_path": "project-a"})
-        b = self.call("git_status", {"repo_path": "clone"})
-        self.assertEqual(a["head"], b["head"])
-        self.assertNotEqual(a["index_fingerprint"], b["index_fingerprint"])
-        failed = self.runtime.call_tool("git_stage", {
-            "repo_path": "clone", "paths": ["clone/src/same.py"], **self.state(),
-        })
-        self.assertEqual(failed["structuredContent"]["error"]["code"], "GIT_STATE_CONFLICT")
 
     def test_linked_worktree_under_workspace_has_own_identity(self) -> None:
         linked = self.workspace / "linked"
@@ -139,24 +104,6 @@ class MultiProjectTests(unittest.TestCase):
         self.assertIn("+value = 9", self.call("git_diff", {"path": "linked"})["diff"])
         self.assertTrue(self.call("git_status", {"path": "project-a"})["clean"])
 
-    def test_managed_worktree_ids_are_namespaced_per_repository(self) -> None:
-        created = []
-        for repo in ("project-a", "project-b"):
-            result = self.call("git_worktree_create", {
-                "repo_path": repo, "worktree_id": "same-id", "branch": "fixture-managed", **self.state(repo),
-            })
-            created.append(result["path"])
-            listed = self.call("git_worktree_list", {"repo_path": repo})
-            self.assertTrue(any(item["path"] == result["path"] and item["managed"] for item in listed["worktrees"]))
-        self.assertNotEqual(*created)
-        self.call("git_worktree_remove", {"repo_path": "project-a", "worktree_id": "same-id"})
-        self.assertTrue(Path(created[1]).is_dir())
-        dirty = Path(created[1]) / "untracked.txt"
-        dirty.write_text("do not remove", encoding="utf-8")
-        failed = self.runtime.call_tool("git_worktree_remove", {"repo_path": "project-b", "worktree_id": "same-id"})
-        self.assertEqual(failed["structuredContent"]["error"]["code"], "GIT_WORKTREE_DIRTY")
-        dirty.unlink()
-        self.call("git_worktree_remove", {"repo_path": "project-b", "worktree_id": "same-id"})
 
     def test_status_preserves_special_filenames_and_rename(self) -> None:
         names = ["space name.txt", "arrow -> name.txt", "中文.txt", "file[1].txt"]
@@ -172,12 +119,6 @@ class MultiProjectTests(unittest.TestCase):
         rename = next(entry for entry in entries if entry["path"] == "src/renamed.py")
         self.assertEqual(rename["original_path"], "src/same.py")
 
-    @unittest.skipIf(os.name == "nt", "Windows cannot create a literal * filename")
-    def test_git_stage_treats_paths_literally(self) -> None:
-        for name in ("literal*.txt", "literal-other.txt"):
-            (self.a / name).write_text("fixture", encoding="utf-8")
-        self.call("git_stage", {"paths": ["project-a/literal*.txt"], **self.state()})
-        self.assertEqual(self.git(self.a, "diff", "--cached", "--name-only").strip(), "literal*.txt")
 
     def test_non_git_fallback_is_explicit_and_explicit_repo_never_falls_back(self) -> None:
         self.assertEqual(self.call("git_diff")["diff_source"], "patch_baseline")
@@ -223,16 +164,15 @@ class MultiProjectTests(unittest.TestCase):
         (self.a / "src/same.py").write_text("changed", encoding="utf-8")
         self.assertNotEqual(first["fingerprint"], workspace_fingerprint(self.workspace, self.a)["fingerprint"])
 
-    def test_review_uses_same_project_for_diff_rules_and_fingerprint(self) -> None:
+    def test_diff_and_rules_stay_with_selected_project(self) -> None:
         (self.a / "src/same.py").write_text("value = 'A change'\n", encoding="utf-8")
         (self.b / "src/same.py").write_text("value = 'B change'\n", encoding="utf-8")
-        review = self.call("review_prepare", {"path": "project-a"})
-        snapshot = review["snapshot"]
-        self.assertEqual(snapshot["git"]["repo_root"], str(self.a))
-        self.assertIn("A change", snapshot["diff"]["diff"])
-        self.assertNotIn("B change", snapshot["diff"]["diff"])
-        (self.b / "src/same.py").write_text("value = 'Another B change'\n", encoding="utf-8")
-        self.assertFalse(self.call("review_get", {"review_id": review["review_id"]})["stale"])
+        diff = self.call("git_diff", {"repo_path": "project-a"})
+        rules = self.call("project_instructions", {"path": "project-a/src/same.py"})
+        self.assertEqual(diff["repo_root"], str(self.a))
+        self.assertIn("A change", diff["diff"])
+        self.assertNotIn("B change", diff["diff"])
+        self.assertNotIn("project-b", str(rules["instructions"]))
 
     def test_commands_keep_workdirs_and_filter_recovery(self) -> None:
         runs = []
@@ -252,7 +192,7 @@ class MultiProjectTests(unittest.TestCase):
     def test_instruction_budget_warning_reaches_text_only_clients(self) -> None:
         (self.workspace / "AGENTS.md").write_text("12345678", encoding="utf-8")
         with mock.patch("coding_tools_mcp.project_context.MAX_APPLICABLE_CONTEXT_BYTES", 8):
-            result = self.runtime.call_tool("project_instructions", {"path": "project-a"})
+            result = self.result("project_instructions", {"path": "project-a"})
         self.assertIn("budget exhausted", str(result["content"]))
 
     def test_crlf_document_diagnostics_remain_fresh_when_content_matches(self) -> None:
@@ -266,7 +206,7 @@ class MultiProjectTests(unittest.TestCase):
             },
         )
         with mock.patch.object(self.runtime, "_lsp_document", return_value=(server, SimpleNamespace(path=path, display="project-a/src/same.py"), path.as_uri(), digest)):
-            result = self.call("lsp_diagnostics", {"path": "project-a/src/same.py"})
+            result = self.call("code_diagnostics", {"path": "project-a/src/same.py"})
         self.assertEqual(result["freshness"], "fresh")
 
     def test_git_location_environment_cannot_redirect_repository(self) -> None:

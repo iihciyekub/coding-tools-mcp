@@ -93,15 +93,6 @@ def _render_server_info(payload: dict[str, Any]) -> str:
     )
 
 
-def _render_exec_environment(payload: dict[str, Any]) -> str:
-    raw_landlock = payload.get("landlock")
-    landlock: dict[str, Any] = raw_landlock if isinstance(raw_landlock, dict) else {}
-    state = "available" if landlock.get("available") else "unavailable"
-    warnings = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
-    suffix = "\n" + "\n".join(str(item) for item in warnings) if warnings else ""
-    return f"Execution environment checked. Landlock: {state}.{suffix}"
-
-
 def _render_runtime_doctor(payload: dict[str, Any]) -> str:
     summary = str(payload.get("summary") or "Runtime doctor completed.")
     lines = [summary]
@@ -117,9 +108,6 @@ def _render_runtime_doctor(payload: dict[str, Any]) -> str:
             f"python={python.get('python') or 'missing'}; "
             f"python3={python.get('python3') or 'missing'}."
         )
-    snapshot = payload.get("shell_snapshot")
-    if isinstance(snapshot, dict):
-        lines.append(f"Shell snapshot: {'active' if snapshot.get('active') else 'not captured'}.")
     issues = payload.get("issues")
     if not isinstance(issues, list) or not issues:
         return "\n".join(lines)
@@ -172,82 +160,6 @@ def _render_read_files(payload: dict[str, Any]) -> str:
     if next_call:
         sections.append(f"Batch budget reached; continue with {next_call}")
     return "\n\n".join(sections)
-
-
-def _render_tool_search(payload: dict[str, Any]) -> str:
-    if payload.get("mode") == "directory":
-        lines = [
-            "Tool directory: "
-            f"{payload.get('direct_tool_count', 0)} direct, {payload.get('deferred_tool_count', 0)} deferred.",
-            str(payload.get("strategy", "")),
-        ]
-        categories = payload.get("categories", [])
-        for category in categories if isinstance(categories, list) else []:
-            if not isinstance(category, dict):
-                continue
-            lines.append(
-                f"\n{category.get('id')}: {category.get('title')} "
-                f"({category.get('direct_count', 0)} direct, {category.get('deferred_count', 0)} deferred)\n"
-                f"{category.get('use_when', '')}\n"
-                f"Browse: {_render_next_action(category)}"
-            )
-        return "\n".join(lines)
-    matches = payload.get("matches")
-    if not isinstance(matches, list) or not matches:
-        return f"No matching tools found. Browse enabled categories: {_render_next_action(payload)}"
-    lines = []
-    if payload.get("strategy"):
-        lines.append(str(payload["strategy"]))
-    for item in matches:
-        if not isinstance(item, dict):
-            continue
-        name = item.get("name", "unknown")
-        route = "deferred via tool_invoke" if item.get("deferred") else "direct"
-        lines.append(f"\n{name} ({route}): {item.get('description', '')}")
-        schema = item.get("input_schema")
-        if isinstance(schema, dict):
-            # Parameter schemas are essential model input, not incidental
-            # structured metadata: some hosts forward only text content.
-            lines.append("input_schema: " + json.dumps(schema, ensure_ascii=False, separators=(",", ":")))
-            if item.get("deferred"):
-                lines.append(f"Call tool_invoke with name={json.dumps(name)} and arguments matching input_schema.")
-            else:
-                lines.append(f"Call {name} directly with arguments matching input_schema.")
-        else:
-            action = item.get("schema_action")
-            if isinstance(action, dict):
-                lines.append("Parameters: " + _render_next_action({"next_action": action}))
-    if payload.get("truncated"):
-        lines.append(f"More tools: {_render_next_action(payload)}")
-    return "\n".join(lines)
-
-
-def _render_hooks_status(payload: dict[str, Any]) -> str:
-    state = "enabled" if payload.get("enabled") else "disabled"
-    return f"Hooks {state}; {payload.get('rule_count', 0)} rule(s) loaded."
-
-
-def _render_shell_snapshot(payload: dict[str, Any]) -> str:
-    tools = payload.get("tools")
-    resolved = 0
-    total = 0
-    if isinstance(tools, dict):
-        total = len(tools)
-        resolved = sum(1 for value in tools.values() if value)
-    cache_label = "cached" if payload.get("cached") else "captured"
-    return (
-        f"Shell snapshot {payload.get('snapshot_id', 'unknown')} {cache_label}. "
-        f"Resolved {resolved}/{total} requested tools."
-    )
-
-
-def _render_tool_invoke(payload: dict[str, Any]) -> str:
-    name = str(payload.get("tool") or "deferred tool")
-    nested = payload.get("result")
-    if not isinstance(nested, dict):
-        return f"Deferred tool {name} completed."
-    text = render_tool_text(name, nested, is_error=nested.get("ok") is False)
-    return f"Deferred tool {name}:\n{text}" if text else f"Deferred tool {name} completed."
 
 
 def _render_list(payload: dict[str, Any]) -> str:
@@ -716,25 +628,6 @@ def _render_workspace_overview(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _render_repo_map(payload: dict[str, Any]) -> str:
-    lines = [str(payload.get("summary") or "Repository map.")]
-    files = payload.get("files")
-    if isinstance(files, list):
-        for item in files:
-            if not isinstance(item, dict):
-                continue
-            lines.append(str(item.get("path", "")))
-            symbols = item.get("symbols")
-            if isinstance(symbols, list):
-                for symbol in symbols:
-                    if isinstance(symbol, dict):
-                        lines.append(
-                            f"  {symbol.get('kind', 'symbol')} {symbol.get('qualified_name') or symbol.get('name', '')}"
-                            f" :{symbol.get('line', '?')} [{symbol.get('backend', 'unknown')}]"
-                        )
-    if payload.get("truncated"):
-        lines.append("… repository map truncated; narrow query/path or raise limits.")
-    return "\n".join(lines)
 
 
 def _render_project_instructions(payload: dict[str, Any]) -> str:
@@ -752,116 +645,69 @@ def _render_project_instructions(payload: dict[str, Any]) -> str:
     return "\n\n".join(lines)
 
 
-def _render_skills_list(payload: dict[str, Any]) -> str:
-    skills = payload.get("skills")
-    if not isinstance(skills, list) or not skills:
-        return "No workspace skills found."
-    return "\n".join(
-        f"{item.get('name', '')}: {item.get('description', '')} ({item.get('path', '')})"
-        for item in skills
-        if isinstance(item, dict)
-    )
-
-
-def _render_skill(payload: dict[str, Any]) -> str:
-    content = payload.get("content")
-    return str(content) if isinstance(content, str) else str(payload.get("summary") or "Skill read.")
-
-
 def _render_checks(payload: dict[str, Any]) -> str:
     checks = payload.get("checks")
     if not isinstance(checks, list) or not checks:
         return "No checks discovered."
-    return "\n".join(
-        f"{item.get('id', '')}: {item.get('command', '')} (workdir={item.get('workdir', '.')}, source={item.get('source', '')})"
-        for item in checks
-        if isinstance(item, dict)
-    )
+    lines: list[str] = []
+    for item in checks:
+        if not isinstance(item, dict):
+            continue
+        suffix = ""
+        if item.get("recommended"):
+            reasons = item.get("recommendation_reasons")
+            detail = ", ".join(str(reason) for reason in reasons) if isinstance(reasons, list) else ""
+            suffix = f" [recommended{': ' + detail if detail else ''}]"
+        lines.append(
+            f"{item.get('id', '')}: {item.get('command', '')} "
+            f"(workdir={item.get('workdir', '.')}, source={item.get('source', '')}){suffix}"
+        )
+    recommended = payload.get("recommended_check_ids")
+    if isinstance(recommended, list) and recommended:
+        lines.append(f"Recommended IDs: {', '.join(str(item) for item in recommended)}")
+    lines.append("Run a chosen command with exec_command; check discovery does not execute or persist it.")
+    return "\n".join(lines)
 
 
-def _render_check_result(payload: dict[str, Any]) -> str:
-    lines = [str(payload.get("summary") or "Check evidence loaded.")]
+def _render_project_context(payload: dict[str, Any]) -> str:
+    current = payload.get("current")
+    lines: list[str] = []
+    if isinstance(current, dict):
+        lines.append(
+            "Current project: "
+            f"{current.get('name') or current.get('project_id')} "
+            f"(id={current.get('project_id')}, root={current.get('root')}, "
+            f"runtime={current.get('runtime_state', 'unknown')})"
+        )
+    else:
+        lines.append("Current project: none selected.")
     lines.append(
-        f"check_run_id={payload.get('check_run_id', '')} status={payload.get('status', 'unknown')} "
-        f"exit={payload.get('exit_code')} stale={bool(payload.get('stale'))}"
+        f"Session: {payload.get('session_id') or 'none'} | "
+        f"default={payload.get('default_project_id') or 'none'} | "
+        f"registry_generation={payload.get('registry_generation')}"
     )
-    result = payload.get("result")
-    if isinstance(result, dict):
-        for key in ("stdout", "stderr"):
-            value = result.get(key)
-            if isinstance(value, str) and value:
-                lines.append(f"{key}:\n{value}")
+    projects = payload.get("projects")
+    if isinstance(projects, list):
+        lines.append("Available projects:")
+        for item in projects:
+            if isinstance(item, dict):
+                lines.append(
+                    f"- {item.get('name') or item.get('project_id')} "
+                    f"(id={item.get('project_id')}, root={item.get('root')}, "
+                    f"runtime={item.get('runtime_state', 'unknown')})"
+                )
     return "\n".join(lines)
-
-
-def _render_task(payload: dict[str, Any]) -> str:
-    if isinstance(payload.get("tasks"), list):
-        return "\n".join(_bounded_json(item, 3000) for item in payload["tasks"]) or "No tasks found."
-    return _bounded_json(
-        {key: payload.get(key) for key in ("task_id", "title", "objective", "status", "revision", "details")},
-        12000,
-    )
-
-
-def _render_task_plan(payload: dict[str, Any]) -> str:
-    steps = payload.get("steps")
-    if not isinstance(steps, list) or not steps:
-        return str(payload.get("summary") or "Task plan is empty.")
-    lines = [str(payload.get("summary") or "Task plan.")]
-    lines.extend(
-        f"{item.get('step_id', '?')} [{item.get('status', 'pending')}] {item.get('title', '')}"
-        for item in steps
-        if isinstance(item, dict)
-    )
-    return "\n".join(lines)
-
-
-def _render_task_events(payload: dict[str, Any]) -> str:
-    events = payload.get("events")
-    if not isinstance(events, list):
-        return _bounded_json(payload, 12000)
-    if not events:
-        return "No task events found."
-    return "\n".join(
-        f"{item.get('event_type', 'event')}: {item.get('message', '')}"
-        for item in events
-        if isinstance(item, dict)
-    )
-
-
-def _render_task_context(payload: dict[str, Any]) -> str:
-    lines = [str(payload.get("summary") or "Task context loaded.")]
-    task = payload.get("task")
-    if isinstance(task, dict):
-        lines.append(_bounded_json(task, 6000))
-    for key in ("checks", "checkpoints", "events"):
-        value = payload.get(key)
-        if isinstance(value, list) and value:
-            lines.append(f"{key}: {_bounded_json(value, 12000)}")
-    return "\n".join(lines)
-
-
-def _render_checkpoint(payload: dict[str, Any]) -> str:
-    for key in ("changes", "checkpoints", "files", "restored_files"):
-        value = payload.get(key)
-        if isinstance(value, list):
-            return f"{payload.get('summary', 'Checkpoint operation completed.')}\n{_bounded_json(value, 20000)}"
-    return str(payload.get("summary") or "Checkpoint operation completed.")
 
 
 _RENDERERS = {
+    "project_context": _render_project_context,
     "server_info": _render_server_info,
-    "check_exec_environment": _render_exec_environment,
     "runtime_doctor": _render_runtime_doctor,
-    "hooks_status": _render_hooks_status,
-    "shell_snapshot": _render_shell_snapshot,
     "read_file": _render_read_file,
     "read_files": _render_read_files,
     "list_dir": _render_list,
     "list_files": _render_list,
     "search_text": _render_search,
-    "tool_search": _render_tool_search,
-    "tool_invoke": _render_tool_invoke,
     "apply_patch": _render_patch,
     "exec_command": _render_exec,
     "get_command": _render_command_status,
@@ -874,45 +720,11 @@ _RENDERERS = {
     "git_log": _render_git_log,
     "git_show": _render_git_show,
     "git_blame": _render_git_blame,
-    "git_branch_list": _render_git_workflow,
-    "git_branch_create": _render_git_workflow,
-    "git_conflicts": _render_git_workflow,
-    "git_stage": _render_git_workflow,
-    "git_unstage": _render_git_workflow,
-    "git_commit": _render_git_workflow,
-    "git_worktree_list": _render_git_workflow,
-    "git_worktree_create": _render_git_workflow,
-    "git_worktree_remove": _render_git_workflow,
-    "lsp_status": _render_lsp,
-    "lsp_definition": _render_lsp,
-    "lsp_references": _render_lsp,
-    "lsp_diagnostics": _render_lsp,
-    "lsp_rename_preview": _render_lsp,
-    "review_prepare": _render_review,
-    "review_record": _render_review,
-    "review_get": _render_review,
+    "code_diagnostics": _render_lsp,
     "request_permissions": lambda payload: f"Permission request: {payload.get('status', 'completed')}.",
     "workspace_overview": _render_workspace_overview,
-    "repo_map": _render_repo_map,
     "project_instructions": _render_project_instructions,
-    "skills_list": _render_skills_list,
-    "skills_read": _render_skill,
     "checks_discover": _render_checks,
-    "checks_run": _render_exec,
-    "checks_result": _render_check_result,
-    "task_create": _render_task,
-    "task_get": _render_task,
-    "task_list": _render_task,
-    "task_update": _render_task,
-    "task_event_add": _render_task_events,
-    "task_events": _render_task_events,
-    "task_context": _render_task_context,
-    "task_plan_get": _render_task_plan,
-    "task_plan_update": _render_task_plan,
-    "checkpoint_create": _render_checkpoint,
-    "checkpoint_list": _render_checkpoint,
-    "checkpoint_diff": _render_checkpoint,
-    "checkpoint_restore": _render_checkpoint,
     "view_image": _render_image,
     "code_symbols": _render_code_results,
     "code_definition": _render_code_results,

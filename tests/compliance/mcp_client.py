@@ -24,16 +24,11 @@ ROOT = Path(__file__).resolve().parents[2]
 
 REQUIRED_TOOLS = (
     "server_info",
-    "check_exec_environment",
-    "runtime_doctor",
-    "hooks_status",
-    "shell_snapshot",
     "read_file",
     "read_files",
     "list_dir",
     "list_files",
     "search_text",
-    "tool_search",
     "apply_patch",
     "exec_command",
     "get_command",
@@ -43,9 +38,6 @@ REQUIRED_TOOLS = (
     "read_output",
     "git_status",
     "git_diff",
-    "git_log",
-    "git_show",
-    "git_blame",
     "request_permissions",
     "view_image",
     "code_symbols",
@@ -115,6 +107,7 @@ class MCPClient:
     process: subprocess.Popen[str] | None = None
     request_id: int = 0
     initialized: bool = False
+    session_id: str | None = None
 
     def __enter__(self) -> "MCPClient":
         if self.url is None:
@@ -273,10 +266,15 @@ class MCPClient:
         auth_token = os.environ.get("CODING_TOOLS_MCP_AUTH_TOKEN")
         if auth_token:
             headers["Authorization"] = f"Bearer {auth_token}"
+        if self.session_id:
+            headers["Mcp-Session-Id"] = self.session_id
         request = urllib.request.Request(self.url, data=data, headers=headers, method="POST")
         try:
             request_timeout = float(os.environ.get("CODING_TOOLS_MCP_CLIENT_TIMEOUT", "30"))
             with urllib.request.urlopen(request, timeout=request_timeout) as response:
+                returned_session = response.headers.get("Mcp-Session-Id")
+                if returned_session:
+                    self.session_id = returned_session.strip() or None
                 body = response.read()
                 if response.status in (202, 204) or not body:
                     return {}
@@ -330,6 +328,7 @@ def stream_snapshot(stream: Any) -> str:
 
 def prepend_repo_pythonpath(env: dict[str, str]) -> dict[str, str]:
     """Ensure spawned server processes import the in-repo coding_tools_mcp package."""
+    env.pop("CODING_TOOLS_MCP_SERVER_NAME", None)
     existing = env.get("PYTHONPATH")
     env["PYTHONPATH"] = str(ROOT) if not existing else str(ROOT) + os.pathsep + existing
     return env
