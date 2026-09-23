@@ -1014,17 +1014,34 @@ fn write_gateway_registry(
                 })
         })
         .collect::<Vec<_>>();
+    let default_project_id = if entries.len() == 1 {
+        entries.first().map(|entry| entry.id.clone())
+    } else {
+        None
+    };
+    if path.is_file() {
+        if let Ok(existing_bytes) = fs::read(path) {
+            if let Ok(existing) = serde_json::from_slice::<serde_json::Value>(&existing_bytes) {
+                let same_default = existing.get("default_project_id")
+                    == Some(
+                        &serde_json::to_value(&default_project_id)
+                            .map_err(|error| error.to_string())?,
+                    );
+                let same_projects = existing.get("projects")
+                    == Some(&serde_json::to_value(&entries).map_err(|error| error.to_string())?);
+                if same_default && same_projects {
+                    return Ok(());
+                }
+            }
+        }
+    }
     let generation = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|error| error.to_string())?
         .as_millis();
     let document = GatewayRegistryDocument {
         generation,
-        default_project_id: if entries.len() == 1 {
-            entries.first().map(|entry| entry.id.clone())
-        } else {
-            None
-        },
+        default_project_id,
         projects: entries,
     };
     let parent = path.parent().ok_or("Invalid Gateway registry path.")?;
@@ -2269,6 +2286,11 @@ while True:
                 .as_str()
                 .unwrap()
                 .starts_with("http://127.0.0.1:")));
+        let generation = registry["generation"].clone();
+        write_gateway_registry(&registry_path, &profiles, &session.projects).unwrap();
+        let unchanged: serde_json::Value =
+            serde_json::from_slice(&fs::read(&registry_path).unwrap()).unwrap();
+        assert_eq!(unchanged["generation"], generation);
         terminate_gateway_session(&mut session);
         assert!(!port_is_listening(gateway_port));
         assert!(!port_is_listening(first_port));

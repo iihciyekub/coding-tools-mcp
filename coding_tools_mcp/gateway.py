@@ -578,7 +578,26 @@ class GatewayRuntime:
 
     def list_tools(self) -> dict[str, Any]:
         payload = self.control_runtime.list_tools()
-        tools = list(payload.get("tools", []))
+        tools = []
+        for raw_tool in payload.get("tools", []):
+            tool = dict(raw_tool)
+            schema = tool.get("inputSchema")
+            if isinstance(schema, dict) and schema.get("type") == "object":
+                schema = dict(schema)
+                properties = dict(schema.get("properties") or {})
+                properties["project"] = {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "description": (
+                        "Optional Gateway routing selector. Choose by exact project id, display name, "
+                        "directory name, or registered root path. The Gateway strips this field before "
+                        "forwarding the call to the selected Project Runtime."
+                    ),
+                }
+                schema["properties"] = properties
+                tool["inputSchema"] = schema
+            tools.append(tool)
         tools.insert(0, self._project_tool_definition())
         if self.local_capabilities and self._local_tool_definition:
             tools[1:1] = [self._local_tool_definition(name) for name in (
@@ -588,8 +607,9 @@ class GatewayRuntime:
 
     def tool_usage_instructions(self) -> str:
         base = (
-            "This endpoint is a persistent project gateway. Use project_context to inspect or explicitly select "
-            "the project for this MCP session. Project selection never follows the desktop frontmost window. "
+            "This endpoint is a persistent project gateway. Stateless clients should pass project=<name/path/id> "
+            "on project-scoped tool calls; session-aware clients may also use project_context to inspect or select "
+            "a persistent project binding. Project selection never follows the desktop frontmost window. "
             "After a project is selected, relative paths and default searches are rooted in that project's "
             "immutable workspace. Full Access changes the maximum permission scope, not the default search root. "
             + self.control_runtime.tool_usage_instructions()
@@ -689,14 +709,39 @@ class BoundGatewayRuntime:
             }[name]
             payload = operation(arguments or {})
             return make_tool_result(name, payload, is_error=payload.get("ok") is False)
-        runtime = self._selected_runtime()
+        forwarded_arguments = dict(arguments or {})
+        selector = str(forwarded_arguments.pop("project", "") or "").strip()
+        runtime = None
+        if selector:
+            definition, matches = self.gateway.projects.resolve_selector(selector)
+            if definition is None:
+                if matches:
+                    payload = self._project_error(
+                        "PROJECT_AMBIGUOUS",
+                        f"Project selector is ambiguous: {selector}",
+                        project=selector,
+                        matches=[
+                            {"project_id": item.id, "name": item.name, "root": str(item.path)}
+                            for item in matches
+                        ],
+                    )
+                else:
+                    payload = self._project_error(
+                        "PROJECT_NOT_FOUND",
+                        f"Project is not registered: {selector}",
+                        project=selector,
+                    )
+                return make_tool_result(name, payload, is_error=True)
+            runtime = self.gateway.projects.runtime_for(definition.id)
+        if runtime is None:
+            runtime = self._selected_runtime()
         if runtime is None:
             payload = self._project_error(
                 "PROJECT_NOT_SELECTED",
-                "No project is bound to this MCP session. Use project_context with action=select and project=<name-or-path> first.",
+                "No project is available for this call. Pass project=<name-or-path> explicitly, or use project_context with a session-aware client.",
             )
             return make_tool_result(name, payload, is_error=True)
-        return runtime.call_tool(name, arguments, context=context)
+        return runtime.call_tool(name, forwarded_arguments, context=context)
 
     def _require_runtime(self) -> Any:
         runtime = self._selected_runtime()

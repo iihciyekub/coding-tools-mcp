@@ -176,6 +176,85 @@ class GatewayUnitTests(unittest.TestCase):
             routed = structured_payload(bound.call_tool("read_file", {"path": "src/app.py"}))
             self.assertEqual(Path(routed["root"]).resolve(), (root / "beta").resolve())
 
+    def test_stateless_clients_route_by_explicit_project_on_every_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            alpha = root / "alpha"
+            beta = root / "beta"
+            alpha.mkdir()
+            beta.mkdir()
+            registry_file = root / "projects.json"
+            registry_file.write_text(
+                json.dumps(
+                    {
+                        "generation": 1,
+                        "default_project_id": None,
+                        "projects": [
+                            {"id": "alpha", "name": "alpha", "path": str(alpha)},
+                            {"id": "beta", "name": "beta", "path": str(beta)},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            control = _FakeRuntime(root)
+            gateway = GatewayRuntime(
+                control,
+                ProjectRegistry(
+                    None,
+                    None,
+                    runtime_factory=lambda definition: _FakeRuntime(definition.path),
+                    registry_file=registry_file,
+                ),
+                SessionRegistry(),
+                project_tool_definition=lambda: tool_definition("project_context"),
+            )
+
+            first_call = structured_payload(
+                gateway.bind("fresh-session-a").call_tool(
+                    "read_file", {"project": "alpha", "path": "README.md"}
+                )
+            )
+            second_call = structured_payload(
+                gateway.bind("fresh-session-b").call_tool(
+                    "read_file", {"project": "beta", "path": "README.md"}
+                )
+            )
+            self.assertEqual(Path(first_call["root"]).resolve(), alpha.resolve())
+            self.assertEqual(Path(second_call["root"]).resolve(), beta.resolve())
+
+    def test_gateway_tools_list_adds_project_selector_without_changing_runtime_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime = _FakeRuntime(root)
+            runtime.list_tools = lambda: {
+                "tools": [
+                    {
+                        "name": "read_file",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                            "additionalProperties": False,
+                        },
+                    }
+                ]
+            }
+            gateway = GatewayRuntime(
+                runtime,
+                ProjectRegistry(
+                    ProjectDefinition("one", "One", root),
+                    runtime,
+                    runtime_factory=lambda definition: _FakeRuntime(definition.path),
+                ),
+                SessionRegistry(),
+                project_tool_definition=lambda: tool_definition("project_context"),
+            )
+            tool = next(item for item in gateway.list_tools()["tools"] if item["name"] == "read_file")
+            self.assertIn("project", tool["inputSchema"]["properties"])
+            original = runtime.list_tools()["tools"][0]["inputSchema"]
+            self.assertNotIn("project", original["properties"])
+
     def test_registry_resolves_agent_friendly_project_selectors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
