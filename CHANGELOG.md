@@ -11,6 +11,15 @@
 - Added lightweight Project Runtime recovery and avoided no-op registry rewrites
   when project endpoints and Runtime build identities are unchanged.
 
+## 0.4.4 - 2026-09-23
+
+- Fixed the cross-platform `fd` fast path so the default `**/*` search includes
+  top-level files consistently on macOS and Linux.
+- Converted local-capability coverage to the repository's unittest harness so
+  release compliance no longer depends on an undeclared pytest runtime.
+- Kept descendant-process cleanup verification focused on the actual cleanup
+  contract rather than optional warning text.
+
 ## 0.4.3 - 2026-09-23
 
 - Reframed Coding Tools MCP as a macOS-first primitive coding runtime rather

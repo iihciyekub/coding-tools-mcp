@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "coding-tools-mcp"
-version = "0.4.3"
+version = "0.4.4"
 description = "macOS-first coding primitives exposed as a lightweight MCP runtime."
 requires-python = ">=3.11"
 dependencies = [
