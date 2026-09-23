@@ -29,6 +29,25 @@ class ReadFileGoldenTests(ComplianceTestCase):
         self.assertIs(payload.get("truncated"), False)
         self.assertIn("return a - b", self.tool_text(result))
 
+        revision = payload.get("revision")
+        self.assertIsInstance(revision, str)
+        unchanged = self.client.call_tool("read_file", {"path": "src/math.js", "if_revision": revision})
+        unchanged_payload = self.assert_tool_success(unchanged)
+        self.assertIs(unchanged_payload.get("unchanged"), True)
+        self.assertEqual(unchanged_payload.get("bytes_read"), 0)
+        self.assertNotIn("content", unchanged_payload)
+        model_text = "\n".join(
+            item["text"]
+            for item in unchanged.get("content", [])
+            if isinstance(item, dict) and isinstance(item.get("text"), str)
+        )
+        self.assertIn("Unchanged since revision", model_text)
+
+        stale = self.client.call_tool("read_file", {"path": "src/math.js", "if_revision": "0" * 64})
+        stale_payload = self.assert_tool_success(stale)
+        self.assertIsNot(stale_payload.get("unchanged"), True)
+        self.assertIn("return a - b", self.tool_text(stale))
+
         result = self.client.call_tool("read_file", {"path": "src/math.js", "start_line": 1, "end_line": 3})
         payload = self.assert_tool_success(result)
         self.assertEqual(payload.get("start_line"), 1)
@@ -56,7 +75,7 @@ class ListAndSearchGoldenTests(ComplianceTestCase):
         for excluded in (".git", ".reference", "node_modules", "dist", "ignored.log"):
             self.assertNotIn(excluded, text)
 
-        files = self.client.call_tool("list_files", {"glob": "**/*.js", "max_results": 2})
+        files = self.client.call_tool("list_files", {"include_globs": ["**/*.js"], "max_results": 2})
         payload = self.assert_tool_success(files)
         self.assertIn("src/math.js", self.tool_text(files))
         entries = payload.get("files") or payload.get("entries") or []
@@ -64,7 +83,7 @@ class ListAndSearchGoldenTests(ComplianceTestCase):
             self.assertLessEqual(len(entries), 2)
         self.assertTrue(payload.get("truncated", True), f"max_results should report truncation: {payload!r}")
 
-        all_files = self.client.call_tool("list_files", {"glob": "**/*"})
+        all_files = self.client.call_tool("list_files", {"include_globs": ["**/*"]})
         all_text = self.tool_text(all_files)
         self.assertNotIn("ignored.log", all_text)
         self.assertNotIn("node_modules", all_text)
@@ -73,7 +92,7 @@ class ListAndSearchGoldenTests(ComplianceTestCase):
     def test_search_text_query_glob_context_and_max_results(self) -> None:
         result = self.client.call_tool(
             "search_text",
-            {"query": "function add", "path": ".", "glob": "**/*.js", "context_lines": 1, "max_results": 10},
+            {"query": "function add", "path": ".", "include_globs": ["**/*.js"], "context_lines": 1, "max_results": 10},
         )
         payload = self.assert_tool_success(result)
         self.assertEqual(payload.get("query"), "function add")
@@ -84,7 +103,7 @@ class ListAndSearchGoldenTests(ComplianceTestCase):
         self.assertIn("return a - b", text)
         assert_search_entries_have_shape(self, payload)
 
-        miss = self.client.call_tool("search_text", {"query": "function add", "glob": "**/*.py"})
+        miss = self.client.call_tool("search_text", {"query": "function add", "include_globs": ["**/*.py"]})
         self.assertNotIn("src/math.js", self.tool_text(miss))
 
         truncated = self.client.call_tool("search_text", {"query": "common-token", "max_results": 3})
@@ -295,8 +314,9 @@ class ExecAndGitGoldenTests(ComplianceTestCase):
         )
         tailed_payload = self.assert_tool_success(tailed)
         self.assertTrue(tailed_payload.get("stdout_truncated"), f"tail output should truncate: {tailed_payload!r}")
-        self.assertIn("line-079", tailed_payload.get("stdout", ""))
-        self.assertNotIn("line-000", tailed_payload.get("stdout", ""))
+        tailed_text = self.tool_text(tailed)
+        self.assertIn("line-079", tailed_text)
+        self.assertNotIn("line-000", tailed_text)
 
         self.assert_denied_or_permission_required("exec_command", {"cmd": "pwd", "workdir": ".."})
         self.assert_denied_or_permission_required("exec_command", {"cmd": "rm -rf /"})
@@ -340,7 +360,7 @@ def assert_search_entries_have_shape(testcase: ComplianceTestCase, payload: dict
     first = entries[0]
     testcase.assertIsInstance(first.get("path"), str)
     testcase.assertIsInstance(first.get("line"), int)
-    testcase.assertIsInstance(first.get("preview"), str)
+    testcase.assertNotIn("preview", first)
 
 
 def json_dump(payload: dict[str, Any]) -> str:

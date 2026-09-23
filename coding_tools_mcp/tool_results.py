@@ -27,7 +27,39 @@ def make_tool_result(
         result_content.append(
             {"type": "text", "text": _bounded_model_text(text, tool_name)}
         )
-    return {"content": result_content, "structuredContent": payload, "isError": is_error}
+    return {
+        "content": result_content,
+        "structuredContent": _compact_structured_content(tool_name, payload),
+        "isError": is_error,
+    }
+
+
+def _compact_structured_content(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep model-visible large text in MCP content instead of mirroring it twice."""
+    structured = dict(payload)
+    heavy_fields = {
+        "read_file": ("content",),
+        "read_output": ("content",),
+        "git_diff": ("diff",),
+        "git_show": ("content",),
+        "exec_command": ("stdout", "stderr", "preview"),
+        "write_stdin": ("stdout", "stderr", "preview"),
+    }
+    for key in heavy_fields.get(tool_name, ()):
+        structured.pop(key, None)
+    if tool_name == "read_files" and isinstance(structured.get("files"), list):
+        structured["files"] = [
+            {key: value for key, value in item.items() if key != "content"}
+            if isinstance(item, dict) else item
+            for item in structured["files"]
+        ]
+    if tool_name == "search_text" and isinstance(structured.get("matches"), list):
+        structured["matches"] = [
+            {key: value for key, value in item.items() if key not in {"preview", "before", "after"}}
+            if isinstance(item, dict) else item
+            for item in structured["matches"]
+        ]
+    return structured
 
 
 def render_tool_text(tool_name: str, payload: dict[str, Any], *, is_error: bool) -> str:
@@ -124,6 +156,8 @@ def _render_runtime_doctor(payload: dict[str, Any]) -> str:
 
 
 def _render_read_file(payload: dict[str, Any]) -> str:
+    if payload.get("unchanged") is True:
+        return f"Unchanged since revision {payload.get('revision', 'unknown')}."
     content = payload.get("content")
     if not isinstance(content, str):
         return ""
@@ -253,7 +287,7 @@ def _render_exec(payload: dict[str, Any]) -> str:
     command_id = payload.get("command_id")
     if payload.get("status") == "running" and command_id:
         sections.append(
-            f'Command still running; poll with write_stdin(command_id="{command_id}", chars="", yield_time_ms=10000).'
+            f'Command still running; wait with get_command(command_id="{command_id}", wait_ms=10000).'
         )
     if payload.get("truncated"):
         continuations = _render_exec_continuations(payload)

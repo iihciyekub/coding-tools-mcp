@@ -100,8 +100,7 @@ class ExtendedToolTests(unittest.TestCase):
             instructions = self.payload(runtime, "project_instructions", {"path": "src/app.py"})
             self.assertEqual([item["path"] for item in instructions["instructions"]], ["AGENTS.md", "src/AGENTS.md"])
             self.assertIn("Source rule", self.text(runtime, "project_instructions", {"path": "src/app.py"}))
-            checks = self.payload(runtime, "checks_discover", {})
-            self.assertEqual({item["id"] for item in checks["checks"]}, {"npm:test", "npm:build"})
+            self.assertEqual({item["id"] for item in overview["checks"]}, {"npm:test", "npm:build"})
         finally:
             runtime.close()
 
@@ -138,21 +137,20 @@ class ExtendedToolTests(unittest.TestCase):
                 ),
             ):
                 overview = self.payload(runtime, "workspace_overview", {})
-                checks = self.payload(runtime, "checks_discover", {})
             self.assertTrue(overview["apple"]["detected"])
             self.assertEqual(overview["apple"]["xcodeproj"], ["Demo.xcodeproj"])
             self.assertEqual(overview["apple"]["swift_packages"], ["Package.swift"])
             self.assertEqual(overview["apple"]["xcode_version"], "Xcode 18.0")
-            check_ids = {item["id"] for item in checks["checks"]}
+            check_ids = {item["id"] for item in overview["checks"]}
             self.assertIn("swift:build", check_ids)
             self.assertIn("swift:test", check_ids)
             self.assertIn("xcode:list", check_ids)
-            xcode_check = next(item for item in checks["checks"] if item["id"] == "xcode:list")
+            xcode_check = next(item for item in overview["checks"] if item["id"] == "xcode:list")
             self.assertIn("-project Demo.xcodeproj -list -json", xcode_check["command"])
         finally:
             runtime.close()
 
-    def test_checks_discover_recommends_existing_checks_from_git_changes(self) -> None:
+    def test_workspace_overview_recommends_existing_checks_from_git_changes(self) -> None:
         (self.workspace / "pyproject.toml").write_text(
             "[tool.pytest.ini_options]\naddopts = '-q'\n[tool.ruff]\nline-length = 100\n[tool.mypy]\npython_version = '3.11'\n",
             encoding="utf-8",
@@ -174,9 +172,8 @@ class ExtendedToolTests(unittest.TestCase):
                 "def answer():\n    return 43\n",
                 encoding="utf-8",
             )
-            discovered = self.payload(runtime, "checks_discover", {})
-            self.assertEqual(discovered["recommendation_source"], "git_status")
-            self.assertEqual(discovered["changed_paths"], ["src/app.py"])
+            discovered = self.payload(runtime, "workspace_overview", {})
+            self.assertEqual(discovered["check_recommendation_source"], "git_status")
             self.assertEqual(
                 discovered["recommended_check_ids"],
                 ["python:mypy", "python:ruff", "python:pytest"],
@@ -189,17 +186,8 @@ class ExtendedToolTests(unittest.TestCase):
 
             subprocess.run(["git", "checkout", "--", "src/app.py"], cwd=self.workspace, check=True)
             (self.workspace / "README.md").write_text("# Fixture\nDocs only.\n", encoding="utf-8")
-            docs_only = self.payload(runtime, "checks_discover", {})
-            self.assertEqual(docs_only["changed_paths"], ["README.md"])
+            docs_only = self.payload(runtime, "workspace_overview", {})
             self.assertEqual(docs_only["recommended_check_ids"], [])
-
-            explicit = self.payload(
-                runtime,
-                "checks_discover",
-                {"changed_paths": ["package.json"]},
-            )
-            self.assertEqual(explicit["recommendation_source"], "explicit")
-            self.assertEqual(explicit["recommended_check_ids"], ["npm:lint", "npm:test"])
         finally:
             runtime.close()
 

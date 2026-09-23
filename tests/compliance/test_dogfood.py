@@ -25,7 +25,7 @@ class DogfoodMCPOnlyTests(ComplianceTestCase):
         agent = DeterministicMCPOnlyAgent(self.client)
         required_loop_tools = {"search_text", "read_file", "apply_patch", "exec_command", "git_diff"}
         self.assertTrue(required_loop_tools <= agent.discover_tools())
-        search = agent.call("search_text", {"query": "function add", "glob": "**/*.js"})
+        search = agent.call("search_text", {"query": "function add", "include_globs": ["**/*.js"]})
         self.assertIn("src/math.js", self.tool_text(search))
         source = agent.call("read_file", {"path": "src/math.js"})
         self.assertIn("return a - b", self.tool_text(source))

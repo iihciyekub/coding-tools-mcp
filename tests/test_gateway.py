@@ -103,6 +103,26 @@ class _FakeHTTPResponse:
 
 
 class GatewayUnitTests(unittest.TestCase):
+    def test_registry_discovers_direct_child_git_projects_without_registry_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            child = root / "child-project"
+            child.mkdir()
+            (child / ".git").mkdir()
+            ignored = root / "plain-dir"
+            ignored.mkdir()
+            bootstrap = ProjectDefinition("root", "Root", root)
+            runtime = _FakeRuntime(root)
+            projects = ProjectRegistry(
+                bootstrap,
+                runtime,
+                runtime_factory=lambda definition: _FakeRuntime(definition.path),
+            )
+            names = {item.name for item in projects.definitions()}
+            self.assertIn("Root", names)
+            self.assertIn("child-project", names)
+            self.assertNotIn("plain-dir", names)
+
     def test_authorized_local_skill_tools_are_gateway_only_and_readable_before_project_selection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -168,6 +188,52 @@ class GatewayUnitTests(unittest.TestCase):
             )
         self.assertFalse(result["isError"])
         self.assertGreaterEqual(captured["timeout"], 35.0)
+
+    def test_project_proxy_retries_one_safe_read_after_transient_failure(self) -> None:
+        definition = ProjectDefinition(
+            "project",
+            "Project",
+            Path("/tmp/project"),
+            "http://127.0.0.1:12345/mcp",
+        )
+        runtime = HTTPProjectRuntime(definition)
+        self.assertEqual(runtime.state, "configured")
+        response = _FakeHTTPResponse(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "result": {
+                    "content": [{"type": "text", "text": "ok"}],
+                    "structuredContent": {"ok": True, "path": "x"},
+                    "isError": False,
+                },
+            }
+        )
+        with mock.patch(
+            "coding_tools_mcp.gateway.urllib.request.urlopen",
+            side_effect=[OSError("transient"), response],
+        ) as opened:
+            result = runtime.call_tool("read_file", {"path": "x"})
+        self.assertFalse(result["isError"])
+        self.assertEqual(opened.call_count, 2)
+        self.assertEqual(runtime.state, "ready")
+
+    def test_project_proxy_does_not_retry_non_idempotent_input(self) -> None:
+        definition = ProjectDefinition(
+            "project",
+            "Project",
+            Path("/tmp/project"),
+            "http://127.0.0.1:12345/mcp",
+        )
+        runtime = HTTPProjectRuntime(definition)
+        with mock.patch(
+            "coding_tools_mcp.gateway.urllib.request.urlopen",
+            side_effect=OSError("offline"),
+        ) as opened:
+            result = runtime.call_tool("write_stdin", {"command_id": "abc", "chars": "yes\n"})
+        self.assertTrue(result["isError"])
+        self.assertEqual(opened.call_count, 1)
+        self.assertEqual(runtime.state, "unreachable")
 
     def test_sessions_keep_project_selection_isolated_and_runtimes_are_lazy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

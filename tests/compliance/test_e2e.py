@@ -8,7 +8,7 @@ from tests.compliance.test_support import ComplianceTestCase
 
 class DeterministicE2ETests(ComplianceTestCase):
     def test_js_bugfix_search_patch_test_and_diff(self) -> None:
-        search = self.client.call_tool("search_text", {"query": "function add", "glob": "**/*.js"})
+        search = self.client.call_tool("search_text", {"query": "function add", "include_globs": ["**/*.js"]})
         self.assertIn("src/math.js", self.tool_text(search))
 
         source = self.client.call_tool("read_file", {"path": "src/math.js"})
@@ -88,11 +88,9 @@ class DeterministicE2ETests(ComplianceTestCase):
             command_id = payload.get("command_id")
             self.assertIsInstance(command_id, str)
 
-            poll = client.call_tool(
-                "write_stdin",
-                {"command_id": command_id, "chars": "", "yield_time_ms": 500, "max_output_bytes": 4096},
-            )
-            self.assertIn("ready", self.tool_text(started) + self.tool_text(poll))
+            poll = client.call_tool("get_command", {"command_id": command_id, "wait_ms": 100})
+            poll_payload = self.assert_tool_success(poll)
+            self.assertEqual(poll_payload.get("status"), "running")
 
             alpha = client.call_tool(
                 "write_stdin",

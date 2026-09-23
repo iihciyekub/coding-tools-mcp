@@ -4,9 +4,9 @@ These recipes intentionally use explicit `exec_command` commands. The MCP server
 
 ## Foreground and background results
 
-The server always exposes the same four process tools: `exec_command`,
-`write_stdin`, `read_output`, and `kill_command`. It does not dynamically add a
-tool after a command starts.
+The server exposes one command lifecycle: start with `exec_command`, wait or
+recover with `get_command`, send interactive input with `write_stdin`, page
+retained output with `read_output`, and cancel with `kill_command`.
 
 `exec_command` waits up to 10 seconds by default. If the command exits in that
 window, the result is complete and no polling call is needed. If it is still
@@ -18,18 +18,17 @@ example:
   "status": "running",
   "command_id": "cmd_123",
   "next_action": {
-    "tool": "write_stdin",
+    "tool": "get_command",
     "arguments": {
       "command_id": "cmd_123",
-      "chars": "",
-      "yield_time_ms": 10000
+      "wait_ms": 10000
     }
   }
 }
 ```
 
-Calling `write_stdin` with empty `chars` means “wait/poll”; non-empty `chars`
-interacts with the process. `read_output` is for paging retained stdout/stderr
+`get_command(wait_ms=...)` handles waiting without consuming output cursors.
+`write_stdin` is only for non-empty interactive input. `read_output` is for paging retained stdout/stderr
 when a result explicitly says output was truncated (or when compact verbosity
 was requested). It is not an extra step for every command.
 

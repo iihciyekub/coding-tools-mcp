@@ -9,6 +9,7 @@ desktop frontmost window.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import time
@@ -25,6 +26,13 @@ from .tool_results import make_tool_result
 
 
 DEFAULT_SESSION_TTL_SECONDS = 24 * 60 * 60
+
+RETRYABLE_READ_TOOLS = frozenset({
+    "server_info", "read_file", "read_files", "list_dir", "list_files", "search_text",
+    "get_command", "list_commands", "read_output", "git_status", "git_diff",
+    "code_diagnostics", "workspace_overview", "project_instructions", "view_image",
+    "code_symbols", "code_definition", "code_references",
+})
 
 
 def _loopback_endpoint(raw: str) -> str:
@@ -50,6 +58,16 @@ class HTTPProjectRuntime:
         self.endpoint = definition.endpoint
         self._counter = 0
         self._lock = threading.Lock()
+        self._state = "configured"
+
+    @property
+    def state(self) -> str:
+        with self._lock:
+            return self._state
+
+    def _set_state(self, value: str) -> None:
+        with self._lock:
+            self._state = value
 
     def _next_id(self) -> int:
         with self._lock:
@@ -114,26 +132,43 @@ class HTTPProjectRuntime:
         context: Any = None,
     ) -> dict[str, Any]:
         del context
-        try:
-            return self._rpc(
-                "tools/call",
-                {"name": name, "arguments": arguments or {}},
-            )
-        except RuntimeError as exc:
-            payload = {
-                "ok": False,
-                "error": {
-                    "code": "PROJECT_RUNTIME_UNAVAILABLE",
-                    "message": str(exc),
-                    "category": "runtime",
-                    "retryable": True,
-                    "details": {
-                        "project_id": self.definition.id,
-                        "endpoint": self.endpoint,
-                    },
+        tool_arguments = arguments or {}
+        retry_safe = (
+            name in RETRYABLE_READ_TOOLS
+            or (name == "exec_command" and bool(tool_arguments.get("operation_id")))
+            or (name == "apply_patch" and bool(tool_arguments.get("idempotency_key")))
+        )
+        attempts = 2 if retry_safe else 1
+        last_error: RuntimeError | None = None
+        for attempt in range(attempts):
+            if attempt:
+                self._set_state("recovering")
+            try:
+                result = self._rpc(
+                    "tools/call",
+                    {"name": name, "arguments": tool_arguments},
+                )
+                self._set_state("ready")
+                return result
+            except RuntimeError as exc:
+                last_error = exc
+                self._set_state("unreachable")
+        assert last_error is not None
+        payload = {
+            "ok": False,
+            "error": {
+                "code": "PROJECT_RUNTIME_UNAVAILABLE",
+                "message": str(last_error),
+                "category": "runtime",
+                "retryable": True,
+                "details": {
+                    "project_id": self.definition.id,
+                    "endpoint": self.endpoint,
+                    "attempts": attempts,
                 },
-            }
-            return make_tool_result(name, payload, is_error=True)
+            },
+        }
+        return make_tool_result(name, payload, is_error=True)
 
     def close(self) -> None:
         return
@@ -286,7 +321,30 @@ class ProjectRegistry:
     def refresh(self, *, force: bool = False) -> set[str]:
         path = self.registry_file
         if path is None:
-            return set()
+            if self.bootstrap is None or (self.bootstrap.path / ".git").exists():
+                return set()
+            discovered: dict[str, ProjectDefinition] = {self.bootstrap.id: self.bootstrap}
+            try:
+                children = sorted(self.bootstrap.path.iterdir(), key=lambda item: item.name.casefold())
+            except OSError:
+                return set()
+            for child in children:
+                if child.name.startswith(".") or not child.is_dir() or not (child / ".git").exists():
+                    continue
+                resolved = child.resolve(strict=True)
+                project_id = "project-" + hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()[:16]
+                discovered[project_id] = ProjectDefinition(project_id, resolved.name, resolved)
+            with self._lock:
+                removed = set(self._definitions) - set(discovered)
+                self._definitions = discovered
+                for project_id in removed:
+                    runtime = self._runtimes.pop(project_id, None)
+                    if runtime is not None and project_id in self._owned_runtime_ids:
+                        close = getattr(runtime, "close", None)
+                        if callable(close):
+                            close()
+                    self._owned_runtime_ids.discard(project_id)
+                return removed
         try:
             stat = path.stat()
         except FileNotFoundError:
@@ -364,7 +422,8 @@ class ProjectRegistry:
         with self._lock:
             definition = self._definitions.get(project_id)
             if definition is not None and definition.endpoint is not None:
-                return "running"
+                runtime = self._runtimes.get(project_id)
+                return runtime.state if isinstance(runtime, HTTPProjectRuntime) else "configured"
             return "running" if project_id in self._runtimes else "stopped"
 
     def runtime_for(self, project_id: str) -> Any | None:

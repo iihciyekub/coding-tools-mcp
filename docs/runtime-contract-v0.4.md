@@ -107,7 +107,7 @@ Exposure: **direct**.
 
 Read a UTF-8 text file slice inside the configured file scope. Relative paths are workspace-relative; host mode also accepts host absolute and ~/... paths.
 
-Inputs: `"path"`, `"start_line"`, `"end_line"`, `"max_lines"`, `"max_bytes"`, `"encoding"`.
+Inputs: `"path"`, `"if_revision"`, `"start_line"`, `"end_line"`, `"max_lines"`, `"max_bytes"`, `"encoding"`.
 
 Required: `"path"`.
 
@@ -141,7 +141,7 @@ Exposure: **direct**.
 
 List files in the configured file scope using glob filters.
 
-Inputs: `"path"`, `"patterns"`, `"glob"`, `"exclude_patterns"`, `"include_hidden"`, `"include_ignored"`, `"max_results"`, `"sort"`.
+Inputs: `"path"`, `"include_globs"`, `"exclude_globs"`, `"include_hidden"`, `"include_ignored"`, `"max_results"`, `"sort"`.
 
 Annotations: `{"title":"List files","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
@@ -151,7 +151,7 @@ Exposure: **direct**.
 
 Search UTF-8 files in the configured file scope for text or regex matches.
 
-Inputs: `"query"`, `"path"`, `"regex"`, `"case_sensitive"`, `"include_globs"`, `"glob"`, `"exclude_globs"`, `"context_lines"`, `"max_results"`, `"max_preview_bytes"`.
+Inputs: `"query"`, `"path"`, `"regex"`, `"case_sensitive"`, `"include_globs"`, `"exclude_globs"`, `"context_lines"`, `"max_results"`, `"max_preview_bytes"`.
 
 Required: `"query"`.
 
@@ -180,7 +180,7 @@ Exposure: **direct**.
 
 Run a bounded command under runtime policy. Pass workdir explicitly for reconnect-safe paths. A still-running command returns command_id. Example: {"cmd":"pytest -q","workdir":".","yield_time_ms":30000}. Retained output is bounded per stream; for very large output redirect to a file (cmd > out.log 2>&1) and page it with read_file or search_text.
 
-Inputs: `"cmd"`, `"approval_ids"`, `"operation_id"`, `"workdir"`, `"cwd"`, `"timeout_ms"`, `"yield_time_ms"`, `"max_output_bytes"`, `"verbosity"`, `"preview_bytes"`, `"stdin"`, `"tty"`, `"env"`.
+Inputs: `"cmd"`, `"approval_ids"`, `"operation_id"`, `"workdir"`, `"timeout_ms"`, `"yield_time_ms"`, `"max_output_bytes"`, `"verbosity"`, `"preview_bytes"`, `"stdin"`, `"tty"`, `"env"`.
 
 Required: `"cmd"`.
 
@@ -190,9 +190,9 @@ Annotations: `{"title":"Execute command","readOnlyHint":false,"destructiveHint":
 
 Exposure: **direct**.
 
-Read command status without consuming output cursors. Resolve by command_id or operation_id; returned output_refs can be paged with read_output.
+Read or wait for command status without consuming output cursors. Resolve by command_id or operation_id; `wait_ms` waits for completion up to the requested bound. Returned output_refs can be paged with read_output.
 
-Inputs: `"command_id"`, `"operation_id"`.
+Inputs: `"command_id"`, `"operation_id"`, `"wait_ms"`.
 
 Annotations: `{"title":"Get command","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
@@ -210,11 +210,11 @@ Annotations: `{"title":"List commands","readOnlyHint":true,"destructiveHint":fal
 
 Exposure: **direct**.
 
-Poll or interact with a running command by command_id. Empty chars wait for output; non-empty chars writes to stdin. Example: {"command_id":"abc","chars":"","yield_time_ms":10000}.
+Send non-empty input to an interactive running command by command_id. Use `get_command(wait_ms=...)` to wait. Example: {"command_id":"abc","chars":"yes\n"}.
 
 Inputs: `"command_id"`, `"chars"`, `"yield_time_ms"`, `"max_output_bytes"`, `"verbosity"`, `"preview_bytes"`.
 
-Required: `"command_id"`.
+Required: `"command_id"`, `"chars"`.
 
 Annotations: `{"title":"Write stdin","readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false}`.
 

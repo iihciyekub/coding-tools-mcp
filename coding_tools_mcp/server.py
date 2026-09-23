@@ -805,8 +805,9 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "get_command": ToolSpec(
         title="Get command",
         description=(
-            "Read command status without consuming output cursors. Resolve by command_id or operation_id; "
-            "returned output_refs can be paged with read_output."
+            "Read or wait for command status without consuming output cursors. Resolve by command_id or "
+            "operation_id; wait_ms blocks for completion up to the requested bound. Returned output_refs "
+            "can be paged with read_output."
         ),
         read_only=True,
         idempotent=True,
@@ -823,8 +824,8 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "write_stdin": ToolSpec(
         title="Write stdin",
         description=(
-            "Poll or interact with a running command by command_id. Empty chars wait for output; non-empty "
-            "chars writes to stdin. Example: {\"command_id\":\"abc\",\"chars\":\"\",\"yield_time_ms\":10000}."
+            "Send non-empty input to an interactive running command by command_id. Use get_command with "
+            "wait_ms to wait for completion. Example: {\"command_id\":\"abc\",\"chars\":\"yes\\n\"}."
         ),
     ),
     "kill_command": ToolSpec(
@@ -945,6 +946,15 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         idempotent=True,
     ),
 }
+
+DEFAULT_HIDDEN_TOOLS = frozenset({
+    "runtime_doctor",
+    "git_log",
+    "git_show",
+    "git_blame",
+    "checks_discover",
+    "code_symbols",
+})
 
 
 LANDLOCK_CREATE_RULESET_VERSION = 1
@@ -1792,7 +1802,8 @@ class Runtime:
         self._available_tool_names = [
             name
             for name, spec in TOOL_REGISTRY.items()
-            if spec.gated_by is None or getattr(self, spec.gated_by)
+            if name not in DEFAULT_HIDDEN_TOOLS
+            and (spec.gated_by is None or getattr(self, spec.gated_by))
         ]
         self._available_tool_name_set = frozenset(self._available_tool_names)
         if permission_mode not in PERMISSION_MODE_CHOICES:
@@ -2491,6 +2502,41 @@ class Runtime:
         resolved = self.resolve_file_existing(requested_path)
         if resolved.path.is_dir():
             raise ToolFailure("IS_DIRECTORY", "Path is a directory.", category="validation")
+        if_revision = args.get("if_revision")
+        if if_revision is not None:
+            if not isinstance(if_revision, str) or not if_revision:
+                raise ToolFailure("INVALID_ARGUMENT", "if_revision must be a non-empty sha256 revision.", category="validation")
+            conditional_digest = hashlib.sha256()
+            with resolved.path.open("rb") as raw_handle:
+                first_chunk = raw_handle.read(1024 * 1024)
+                if b"\x00" in first_chunk[:4096]:
+                    raise ToolFailure("BINARY_FILE", "Binary file read blocked for text tool.", category="validation")
+                conditional_digest.update(first_chunk)
+                while True:
+                    chunk = raw_handle.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    conditional_digest.update(chunk)
+            current_revision = conditional_digest.hexdigest()
+            if current_revision == if_revision:
+                stat = resolved.path.stat()
+                return {
+                    "path": resolved.display,
+                    "content": "",
+                    "encoding": "utf-8",
+                    "revision": current_revision,
+                    "revision_algorithm": REVISION_ALGORITHM,
+                    "unchanged": True,
+                    "total_bytes": stat.st_size,
+                    "bytes_read": 0,
+                    "truncated": False,
+                    "truncated_by": None,
+                    "first_line_exceeds_limit": False,
+                    "output_lines": 0,
+                    "output_bytes": 0,
+                    "next_start_line": None,
+                    "warnings": [],
+                }
         max_bytes = int(args.get("max_bytes", 131072))
         start_line = int(args.get("start_line", 1))
         end_line = args.get("end_line")
@@ -2679,15 +2725,8 @@ class Runtime:
         if not resolved.path.is_dir():
             raise ToolFailure("NOT_A_DIRECTORY", "Path is not a directory.", category="validation")
         file_workspace = self.file_access.workspace_for_resolved(resolved)
-        patterns_arg = args.get("patterns")
-        glob_arg = args.get("glob")
-        if isinstance(patterns_arg, list) and patterns_arg:
-            patterns = [str(item) for item in patterns_arg]
-        elif isinstance(glob_arg, str) and glob_arg:
-            patterns = [glob_arg]
-        else:
-            patterns = ["**/*"]
-        exclude_patterns = [str(item) for item in args.get("exclude_patterns", [])]
+        patterns = [str(item) for item in args.get("include_globs", [])] or ["**/*"]
+        exclude_patterns = [str(item) for item in args.get("exclude_globs", [])]
         include_hidden = bool(args.get("include_hidden", False))
         include_ignored = bool(args.get("include_ignored", False))
         max_results = int(args.get("max_results", 5000))
@@ -2854,8 +2893,6 @@ class Runtime:
         regex = bool(args.get("regex", False))
         case_sensitive = bool(args.get("case_sensitive", False))
         include_globs = [str(item) for item in args.get("include_globs", [])]
-        if isinstance(args.get("glob"), str):
-            include_globs.append(str(args["glob"]))
         exclude_globs = [str(item) for item in args.get("exclude_globs", [])]
         context_lines = int(args.get("context_lines", 0))
         max_results = int(args.get("max_results", 1000))
@@ -3435,9 +3472,9 @@ class Runtime:
         cmd = str(args.get("cmd", ""))
         if not cmd:
             raise ToolFailure("INVALID_ARGUMENT", "cmd is required.", category="validation")
-        workdir_arg = args.get("workdir", args.get("cwd", "."))
-        if "workdir" in args and "cwd" in args and str(args["workdir"]) != str(args["cwd"]):
-            raise ToolFailure("INVALID_ARGUMENT", "workdir and cwd refer to different directories.", category="validation")
+        if "cwd" in args:
+            raise ToolFailure("INVALID_ARGUMENT", "Use workdir; cwd is not supported.", category="validation")
+        workdir_arg = args.get("workdir", ".")
         workdir = (
             self.resolve_file_existing(str(workdir_arg))
             if self.capabilities.host_environment
@@ -3887,7 +3924,9 @@ class Runtime:
             target = self.resolve_existing(str(explicit)).path
             repo = discover_repository(self.workspace.root, target, git=git, env=env, required=True)
         for raw_path in paths:
-            target = self.workspace.root if raw_path == "." else self.resolve_for_write(raw_path).path
+            target = repo.root if raw_path == "." and repo is not None else (
+                self.workspace.root if raw_path == "." else self.resolve_for_write(raw_path).path
+            )
             found = discover_repository(self.workspace.root, target, git=git, env=env, required=required or explicit is not None)
             if found is not None:
                 if repo is not None and found.root != repo.root:
@@ -3901,7 +3940,7 @@ class Runtime:
             repo = discover_repository(self.workspace.root, self.workspace.root, git=git, env=env, required=required)
         if repo is not None:
             for raw_path in paths:
-                target = self.workspace.root if raw_path == "." else self.resolve_for_write(raw_path).path
+                target = repo.root if raw_path == "." else self.resolve_for_write(raw_path).path
                 if not target.is_relative_to(repo.root):
                     raise ToolFailure("GIT_REPOSITORY_MISMATCH", "A path is outside the selected repository.", category="validation")
         if required and repo is None:
@@ -4012,7 +4051,7 @@ class Runtime:
             path_filters.extend(str(item) for item in args["paths"])
         if repo is None:
             return [self.git_path_filter(path) for path in path_filters]
-        return [(self.workspace.root if path == "." else self.resolve_for_write(path).path).relative_to(repo.root).as_posix()
+        return [(repo.root if path == "." else self.resolve_for_write(path).path).relative_to(repo.root).as_posix()
                 for path in path_filters]
 
     def _base_command_env(self) -> dict[str, str]:
@@ -4129,6 +4168,8 @@ class Runtime:
         self._prune_commands()
         command_id = str(args.get("command_id") or "").strip()
         operation_id = str(args.get("operation_id") or "").strip()
+        wait_ms = int(args.get("wait_ms", 0))
+        deadline = time.monotonic() + (wait_ms / 1000.0)
         if bool(command_id) == bool(operation_id):
             raise ToolFailure(
                 "INVALID_ARGUMENT",
@@ -4136,17 +4177,21 @@ class Runtime:
                 category="validation",
             )
         if operation_id:
-            with self.commands_lock:
-                record = self.command_manager.operations.get(operation_id)
-                if record is None:
-                    raise ToolFailure(
-                        "OPERATION_NOT_FOUND",
-                        "operation_id is not known or has expired.",
-                        category="not_found",
-                        details={"operation_id": operation_id},
-                    )
-                resolved_command_id = record.command_id
-                accepted_at = record.accepted_at
+            while True:
+                with self.commands_lock:
+                    record = self.command_manager.operations.get(operation_id)
+                    if record is None:
+                        raise ToolFailure(
+                            "OPERATION_NOT_FOUND",
+                            "operation_id is not known or has expired.",
+                            category="not_found",
+                            details={"operation_id": operation_id},
+                        )
+                    resolved_command_id = record.command_id
+                    accepted_at = record.accepted_at
+                if resolved_command_id is not None or time.monotonic() >= deadline:
+                    break
+                time.sleep(0.02)
             if resolved_command_id is None:
                 return {
                     "ok": True,
@@ -4156,11 +4201,14 @@ class Runtime:
                     "accepted_at": accepted_at,
                     "next_action": {
                         "tool": "get_command",
-                        "arguments": {"operation_id": operation_id},
+                        "arguments": {"operation_id": operation_id, "wait_ms": 10000},
                     },
                 }
             command_id = resolved_command_id
-        return self._command_status_payload(self._get_output_command(command_id))
+        command = self._get_output_command(command_id)
+        if wait_ms > 0 and command.process.poll() is None:
+            self._wait_for_command_exit(command, max(0.0, deadline - time.monotonic()))
+        return self._command_status_payload(command)
 
     def list_commands(self, args: dict[str, Any]) -> dict[str, Any]:
         self._prune_commands()
@@ -4266,11 +4314,10 @@ class Runtime:
             self._complete_command(command)
         if payload.get("status") == "running":
             payload["next_action"] = {
-                "tool": "write_stdin",
+                "tool": "get_command",
                 "arguments": {
                     "command_id": command.command_id,
-                    "chars": "",
-                    "yield_time_ms": 10000,
+                    "wait_ms": 10000,
                 },
             }
         output_refs = {
@@ -4479,13 +4526,15 @@ class Runtime:
         command = self._get_command(command_id)
         command.refresh_status()
         chars = str(args.get("chars", ""))
+        if not chars:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "write_stdin requires non-empty chars; use get_command(wait_ms=...) to wait.",
+                category="validation",
+            )
         if command.process.poll() is not None:
-            if chars:
-                raise ToolFailure("COMMAND_CLOSED", "Command is closed; stdin write blocked.", category="runtime")
-            payload = command.snapshot_since_cursor(int(args.get("max_output_bytes", 65536)))
-            return self._format_command_output(command, payload, args)
-        if chars:
-            command.write_input(chars.encode("utf-8"))
+            raise ToolFailure("COMMAND_CLOSED", "Command is closed; stdin write blocked.", category="runtime")
+        command.write_input(chars.encode("utf-8"))
         wait_until = time.time() + (int(args.get("yield_time_ms", 10000)) / 1000.0)
         first_output_at: float | None = None
         while time.time() < wait_until and command.process.poll() is None:
@@ -4495,9 +4544,7 @@ class Runtime:
                     command.stdout_total_bytes > command.stdout_cursor
                     or command.stderr_total_bytes > command.stderr_cursor
                 )
-                if has_new_output and not chars:
-                    break
-                if has_new_output and chars:
+                if has_new_output:
                     if first_output_at is None:
                         first_output_at = time.time()
                     if time.time() - first_output_at >= 0.05:
@@ -5143,6 +5190,21 @@ class Runtime:
             env=self._command_env(None),
         )
         result["applicable_instructions"] = self.project_instructions({"path": args.get("path", ".")})
+        checks = workspace_insight.discover_checks(
+            self.workspace.root,
+            target,
+            env=self._command_env(None),
+        )
+        changed_paths, recommendation_source, recommendation_truncated = self._changed_paths_for_target(
+            target=target,
+            path_arg=str(args.get("path", ".")),
+            max_entries=100,
+        )
+        checks = workspace_insight.recommend_checks(checks, changed_paths)
+        result["checks"] = checks
+        result["recommended_check_ids"] = [str(item["id"]) for item in checks if item.get("recommended")]
+        result["check_recommendation_source"] = recommendation_source
+        result["check_recommendation_truncated"] = recommendation_truncated
         return result
 
     def _changed_paths_for_target(
@@ -6592,6 +6654,7 @@ def tool_output_properties() -> dict[str, dict[str, Any]]:
             "content": string,
             "revision": string,
             "revision_algorithm": {**string, "enum": [REVISION_ALGORITHM]},
+            "unchanged": boolean,
             "start_line": integer,
             "end_line": integer,
             "total_lines": integer,
@@ -6838,6 +6901,11 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         "read_file": object_schema(
             {
                 "path": {**string, "minLength": 1},
+                "if_revision": {
+                    **string,
+                    "minLength": 1,
+                    "description": "If this sha256 revision still matches the file, return unchanged=true without resending file content.",
+                },
                 "start_line": {**integer, "minimum": 1, "default": 1},
                 "end_line": {**integer, "minimum": 1},
                 "max_lines": {**integer, "minimum": 1},
@@ -6884,9 +6952,8 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         "list_files": object_schema(
             {
                 "path": {**string, "description": "Omit for the configured default search folder; '.' explicitly means the project workspace."},
-                "patterns": string_array,
-                "glob": string,
-                "exclude_patterns": string_array,
+                "include_globs": string_array,
+                "exclude_globs": string_array,
                 "include_hidden": {**boolean, "default": False},
                 "include_ignored": {**boolean, "default": False},
                 "max_results": {**integer, "minimum": 1, "maximum": 50000, "default": 5000},
@@ -6900,7 +6967,6 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "regex": {**boolean, "default": False},
                 "case_sensitive": {**boolean, "default": False},
                 "include_globs": string_array,
-                "glob": string,
                 "exclude_globs": string_array,
                 "context_lines": {**integer, "minimum": 0, "maximum": 5, "default": 0},
                 "max_results": {**integer, "minimum": 1, "maximum": 10000, "default": 1000},
@@ -6930,7 +6996,6 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "approval_ids": {"type": "array", "items": {**string, "minLength": 1}, "maxItems": 16},
                 "operation_id": {**string, "minLength": 1, "maxLength": 200},
                 "workdir": {**string, "default": "."},
-                "cwd": {**string},
                 "timeout_ms": {**integer, "minimum": 1, "maximum": 600000, "default": 300000},
                 "yield_time_ms": {**integer, "minimum": 0, "maximum": 30000, "default": 10000},
                 "max_output_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 65536},
@@ -6946,6 +7011,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             {
                 "command_id": {**string, "minLength": 1},
                 "operation_id": {**string, "minLength": 1, "maxLength": 200},
+                "wait_ms": {**integer, "minimum": 0, "maximum": 30000, "default": 0},
             }
         ),
         "list_commands": object_schema(
@@ -6957,13 +7023,13 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         "write_stdin": object_schema(
             {
                 "command_id": {**string, "minLength": 1},
-                "chars": {**string, "default": ""},
+                "chars": {**string, "minLength": 1},
                 "yield_time_ms": {**integer, "minimum": 0, "maximum": 30000, "default": 10000},
                 "max_output_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 65536},
                 "verbosity": {**string, "enum": ["summary", "preview", "full"]},
                 "preview_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 4096},
             },
-            ["command_id"],
+            ["command_id", "chars"],
         ),
         "kill_command": object_schema(
             {

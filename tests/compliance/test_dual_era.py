@@ -365,7 +365,12 @@ class ConcurrentClientTests(ComplianceTestCase):
                 self.assertEqual(response.get("id"), 1)
                 payload = structured_payload(response["result"])
                 self.assertEqual(payload.get("path"), f"{tag}.txt", payload)
-                self.assertIn(f"{tag}-marker", str(payload.get("content")))
+                text = "\n".join(
+                    item["text"]
+                    for item in response["result"].get("content", [])
+                    if isinstance(item, dict) and isinstance(item.get("text"), str)
+                )
+                self.assertIn(f"{tag}-marker", text)
 
     def test_a_legacy_and_a_modern_client_each_get_the_shape_they_asked_for(self) -> None:
         url = str(self.client.url)
@@ -488,7 +493,12 @@ class WorkspaceRaceTests(unittest.TestCase):
             diff_payload = structured_payload(outcomes["diff"])
             self.assertFalse(outcomes["diff"].get("isError"), diff_payload)
             self.assertIn("non-git diff fallback", diff_payload.get("warnings", []))
-            self.assertIn("return a + b;", diff_payload.get("diff", ""))
+            diff_text = "\n".join(
+                item["text"]
+                for item in outcomes["diff"].get("content", [])
+                if isinstance(item, dict) and isinstance(item.get("text"), str)
+            )
+            self.assertIn("return a + b;", diff_text)
 
 
 def require_official_sdk(test: unittest.TestCase) -> None:

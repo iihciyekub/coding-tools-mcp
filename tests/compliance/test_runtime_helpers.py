@@ -681,9 +681,8 @@ class RuntimeHelperTests(unittest.TestCase):
                     "homebrew": "/opt/homebrew/bin/brew",
                 },
             ):
-                result = runtime.call_tool("runtime_doctor", {})
+                payload = runtime.runtime_doctor({})
 
-            payload = result["structuredContent"]
             codes = {item["code"] for item in payload["issues"]}
             self.assertIn("PYTHON_ALIAS_MISSING", codes)
             self.assertEqual(payload["network"]["mode"], "allowlist")
@@ -692,7 +691,7 @@ class RuntimeHelperTests(unittest.TestCase):
             self.assertEqual(payload["apple"]["architecture"], "arm64")
             self.assertTrue(payload["apple"]["xcode_available"])
             self.assertEqual(payload["apple"]["sourcekit_lsp"], "/usr/bin/sourcekit-lsp")
-            self.assertIn("PYTHON_ALIAS_MISSING", self.agent_text(result))
+            self.assertIn("PYTHON_ALIAS_MISSING", render_tool_text("runtime_doctor", payload, is_error=False))
             runtime.close()
 
     def test_command_env_core_is_not_windows_toolchain_specific(self) -> None:
@@ -1208,7 +1207,12 @@ Maven home: /usr/share/maven
             self.assertIn("exec_command", names)
             self.assertIn("read_file", names)
             self.assertIn("read_files", names)
-            self.assertIn("runtime_doctor", names)
+            self.assertNotIn("runtime_doctor", names)
+            self.assertNotIn("git_log", names)
+            self.assertNotIn("git_show", names)
+            self.assertNotIn("git_blame", names)
+            self.assertNotIn("checks_discover", names)
+            self.assertNotIn("code_symbols", names)
             self.assertIn("workspace_overview", names)
             self.assertNotIn("tool_search", names)
             self.assertNotIn("tool_invoke", names)
@@ -1228,7 +1232,7 @@ Maven home: /usr/share/maven
                 available = set(runtime.exposed_tool_names())
                 expected = set(TOOL_GUIDES) - {
                     "project_context", "local_capabilities_search", "local_skill_read", "local_plugin_inspect"
-                }
+                } - set(server_module.DEFAULT_HIDDEN_TOOLS)
                 self.assertEqual(available, expected)
                 self.assertEqual(set(schemas), set(TOOL_GUIDES))
                 guidance = runtime.tool_usage_instructions()
@@ -1285,12 +1289,14 @@ Maven home: /usr/share/maven
             self.assertEqual(payload["processed_count"], 1)
             self.assertEqual(payload["remaining_request_count"], 1)
             self.assertIs(payload["truncated"], True)
-            self.assertEqual(payload["files"][0]["content"], "aaaaa")
+            self.assertNotIn("content", payload["files"][0])
+            self.assertIn("aaaaa", self.agent_text(first))
             action = payload["next_action"]
             self.assertEqual(action["tool"], "read_files")
             self.assertEqual(action["arguments"]["requests"], [{"path": "second.txt"}])
             second = runtime.call_tool(action["tool"], action["arguments"])
-            self.assertEqual(second["structuredContent"]["files"][0]["content"], "bbbbb")
+            self.assertNotIn("content", second["structuredContent"]["files"][0])
+            self.assertIn("bbbbb", self.agent_text(second))
             self.assertIn("### first.txt", self.agent_text(first))
             runtime.close()
 
@@ -1312,7 +1318,7 @@ Maven home: /usr/share/maven
                 for item in result["content"]
                 if item.get("type") == "text"
             )
-            self.assertEqual(payload["content"], content)
+            self.assertNotIn("content", payload)
             self.assertEqual(model_text, content)
             self.assertNotIn("preview truncated", model_text)
 
@@ -1437,7 +1443,7 @@ Maven home: /usr/share/maven
             )
             model_text = self.agent_text(result)
             self.assertIn("Status: running", model_text)
-            self.assertIn('write_stdin(command_id="', model_text)
+            self.assertIn('get_command(command_id="', model_text)
 
     def test_read_file_truncation_is_visible_with_continuation(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1516,34 +1522,29 @@ Maven home: /usr/share/maven
             self.assertEqual(committed.returncode, 0, committed.stderr)
             runtime = Runtime(workspace)
 
-            log_result = runtime.call_tool("git_log", {"max_count": 1})
-            log_payload = log_result["structuredContent"]
+            log_payload = runtime.git_log({"max_count": 1})
             self.assertIs(log_payload.get("truncated"), True)
             self.assertEqual(
                 log_payload.get("next_action", {}).get("arguments", {}).get("skip"),
                 1,
             )
-            log_text = self.agent_text(log_result)
+            log_text = render_tool_text("git_log", log_payload, is_error=False)
             self.assertIn("more commits available", log_text)
             self.assertIn("git_log(", log_text)
             self.assertIn("skip=1", log_text)
 
-            blame_result = runtime.call_tool(
-                "git_blame",
-                {
-                    "path": "tracked.txt",
-                    "start_line": 1,
-                    "end_line": 3,
-                    "max_lines": 1,
-                },
-            )
-            blame_payload = blame_result["structuredContent"]
+            blame_payload = runtime.git_blame({
+                "path": "tracked.txt",
+                "start_line": 1,
+                "end_line": 3,
+                "max_lines": 1,
+            })
             self.assertIs(blame_payload.get("truncated"), True)
             self.assertEqual(
                 blame_payload.get("next_action", {}).get("arguments", {}).get("start_line"),
                 2,
             )
-            blame_text = self.agent_text(blame_result)
+            blame_text = render_tool_text("git_blame", blame_payload, is_error=False)
             self.assertIn("blame lines truncated", blame_text)
             self.assertIn("git_blame(", blame_text)
             self.assertIn("start_line=2", blame_text)
@@ -1724,7 +1725,7 @@ Maven home: /usr/share/maven
             listed_item = next(item for item in listed["commands"] if item["command_id"] == command_id)
             self.assertEqual(listed_item["activity_state"], "long_silent")
             self.assertTrue(listed_item["needs_attention"])
-            polled = runtime.write_stdin({"command_id": command_id, "chars": "", "yield_time_ms": 0})
+            polled = runtime.get_command({"command_id": command_id})
             self.assertEqual(polled["activity_state"], "long_silent")
             self.assertTrue(polled["needs_attention"])
             self.assertIsNone(command.process.poll())
@@ -1743,18 +1744,10 @@ Maven home: /usr/share/maven
                     "yield_time_ms": 5000,
                 }
             )
-            # The tty fast-path intentionally returns as soon as the first
-            # output arrives, which can race the exit becoming observable.
-            # Follow the documented next_action contract and poll to completion.
-            stdout = str(result.get("stdout", ""))
-            deadline = time.time() + 5
-            while result.get("status") == "running" and time.time() < deadline:
-                result = runtime.write_stdin(
-                    {"command_id": result["command_id"], "chars": "", "yield_time_ms": 500}
-                )
-                stdout += str(result.get("stdout", ""))
-            self.assertEqual(result.get("status"), "exited", result)
-            self.assertIn("True True True", stdout)
+            status = runtime.get_command({"command_id": result["command_id"], "wait_ms": 5000})
+            self.assertEqual(status.get("status"), "exited", status)
+            stdout = runtime.read_output({"output_ref": status["output_refs"]["stdout"], "limit": 4096})
+            self.assertIn("True True True", stdout.get("content", ""))
 
     def test_completed_commands_are_evicted_from_active_storage(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1797,7 +1790,7 @@ Maven home: /usr/share/maven
                 {"cmd": "sleep 1", "timeout_ms": 5000, "yield_time_ms": 0, "max_output_bytes": 64}
             )
             self.assertEqual(running.get("status"), "running")
-            self.assertEqual(running.get("next_action", {}).get("tool"), "write_stdin")
+            self.assertEqual(running.get("next_action", {}).get("tool"), "get_command")
             runtime.kill_command({"command_id": running["command_id"], "signal": "KILL"})
 
             truncated = runtime.exec_command(
@@ -1888,7 +1881,7 @@ Maven home: /usr/share/maven
                     )
                 self.assertEqual(too_small.exception.code, "INVALID_ARGUMENT")
 
-    def test_write_stdin_detects_new_output_after_rolling_buffer_drop(self) -> None:
+    def test_get_command_without_wait_is_nonblocking(self) -> None:
         class RunningProcess:
             def poll(self) -> None:
                 return None
@@ -1900,19 +1893,14 @@ Maven home: /usr/share/maven
                 process=RunningProcess(),  # type: ignore[arg-type]
                 buffer_limit=64,
             )
-            command.append_stdout(b"x" * 100)
-            command.stdout_cursor = command.stdout_total_bytes
-            command.append_stdout(b"NEW")
             runtime.commands[command.command_id] = command
             started = time.monotonic()
-            result = runtime.write_stdin(
-                {"command_id": command.command_id, "chars": "", "yield_time_ms": 250}
-            )
+            result = runtime.get_command({"command_id": command.command_id, "wait_ms": 0})
             elapsed = time.monotonic() - started
             runtime.commands.pop(command.command_id, None)
 
         self.assertLess(elapsed, 0.15, result)
-        self.assertEqual(result.get("stdout"), "NEW")
+        self.assertEqual(result.get("status"), "running")
 
     @unittest.skipIf(os.name == "nt", "POSIX process groups are required for descendant cleanup")
     def test_exec_reaps_background_descendants_after_shell_exit(self) -> None:
@@ -2093,14 +2081,8 @@ Maven home: /usr/share/maven
             (workspace / "sample.txt").write_text("one\ntwo\nthree\n", encoding="utf-8")
             runtime = Runtime(workspace, permission_mode="trusted")
 
-            cwd_result = runtime.exec_command(
-                {"cmd": "pwd", "cwd": "nested", "timeout_ms": 5000, "max_output_bytes": 4096}
-            )
-            self.assertEqual(cwd_result.get("exit_code"), 0)
-            self.assertEqual(Path(str(cwd_result.get("stdout", "")).strip()).name, "nested")
-
             with self.assertRaises(ToolFailure):
-                runtime.exec_command({"cmd": "pwd", "workdir": ".", "cwd": "nested"})
+                runtime.exec_command({"cmd": "pwd", "cwd": "nested"})
 
             read = runtime.read_file({"path": "sample.txt", "start_line": 2, "max_lines": 1})
             self.assertEqual(read.get("content"), "two\n")

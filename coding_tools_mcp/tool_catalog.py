@@ -18,7 +18,7 @@ class ToolGuide:
 
 _GROUPS: dict[str, tuple[tuple[str, str], ...]] = {
     "files": (
-        ("read_file", "Read one known file or continue a bounded slice."),
+        ("read_file", "Read one known file or continue a bounded slice; reuse its revision with if_revision to avoid resending unchanged content."),
         ("read_files", "Read several known files together under one total budget."),
         ("list_dir", "Inspect immediate directory structure; use list_files for glob-based lookup."),
         ("list_files", "Find paths by filename or glob; use search_text for file contents."),
@@ -28,9 +28,9 @@ _GROUPS: dict[str, tuple[tuple[str, str], ...]] = {
     ),
     "commands": (
         ("exec_command", "Run a known command or test; retain command_id and use operation_id for recoverable retries."),
-        ("get_command", "Recover status by command_id or operation_id before retrying uncertain execution."),
+        ("get_command", "Wait for or recover command status by command_id or operation_id; use wait_ms instead of polling with write_stdin."),
         ("list_commands", "Find existing command handles after reconnecting."),
-        ("write_stdin", "Poll output or send input to a running command; do not relaunch it just to wait."),
+        ("write_stdin", "Send non-empty input to an interactive running command; use get_command to wait."),
         ("kill_command", "Stop a specific runtime-owned command when cancellation is intended."),
         ("read_output", "Page retained command output using its stream reference and absolute byte offsets."),
     ),
@@ -49,7 +49,7 @@ _GROUPS: dict[str, tuple[tuple[str, str], ...]] = {
     ),
     "project": (
         ("project_context", "List projects, inspect the session-bound project, or explicitly switch this MCP session."),
-        ("workspace_overview", "Orient in an unfamiliar project, including bounded Apple/Xcode/Swift metadata."),
+        ("workspace_overview", "Orient in an unfamiliar project, including instructions, recommended checks, and bounded Apple/Xcode/Swift metadata."),
         ("project_instructions", "Read root and nested instructions applicable to the path you will edit."),
     ),
     "local capabilities": (

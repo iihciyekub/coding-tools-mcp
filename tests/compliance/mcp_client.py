@@ -40,7 +40,6 @@ REQUIRED_TOOLS = (
     "git_diff",
     "request_permissions",
     "view_image",
-    "code_symbols",
     "code_definition",
     "code_references",
 )

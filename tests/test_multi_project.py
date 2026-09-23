@@ -64,6 +64,15 @@ class MultiProjectTests(unittest.TestCase):
         args = arguments or {}
         return self.runtime.call_tool(name, args)
 
+    def model_text(self, name: str, arguments: dict | None = None) -> str:
+        result = self.result(name, arguments)
+        self.assertFalse(result["isError"], result)
+        return "\n".join(
+            item["text"]
+            for item in result.get("content", [])
+            if isinstance(item, dict) and isinstance(item.get("text"), str)
+        )
+
 
     def test_read_tools_resolve_independent_repositories_and_deleted_paths(self) -> None:
         for name, root in (("project-a", self.a), ("project-b", self.b)):
@@ -72,23 +81,23 @@ class MultiProjectTests(unittest.TestCase):
             self.assertEqual(status["repo_root"], str(root))
             self.assertEqual(status["entries"][0]["path"], "src/same.py")
             diff = self.call("git_diff", {"path": name})
-            self.assertIn(f"+value = '{name}'", diff["diff"])
+            self.assertIn(f"+value = '{name}'", self.model_text("git_diff", {"path": name}))
             self.assertEqual(diff["diff_source"], "git")
-            log = self.call("git_log", {"path": name})
+            log = self.runtime.git_log({"path": name})
             self.assertEqual(log["commits"][0]["subject"], f"Initial {name}")
-            shown = self.call("git_show", {"repo_path": name})
+            shown = self.runtime.git_show({"repo_path": name})
             self.assertIn(f"Initial {name}", shown["content"])
-            blame = self.call("git_blame", {"path": f"{name}/src/same.py", "max_lines": 1})
+            blame = self.runtime.git_blame({"path": f"{name}/src/same.py", "max_lines": 1})
             self.assertEqual(blame["repo_root"], str(root))
         (self.a / "src/same.py").unlink()
-        self.assertIn("-value = 1", self.call("git_diff", {"path": "project-a/src/same.py"})["diff"])
+        self.assertIn("-value = 1", self.model_text("git_diff", {"path": "project-a/src/same.py"}))
 
     def test_nested_repo_does_not_use_parent_repo(self) -> None:
         self.git(self.workspace, "init", "-q")
         status = self.call("git_status", {"path": "project-b"})
         self.assertEqual(status["repo_root"], str(self.b))
         self.assertEqual(status["head"], self.git(self.b, "rev-parse", "HEAD").strip())
-        self.assertEqual(self.call("git_log", {"path": "project-b"})["commits"][0]["subject"], "Initial project-b")
+        self.assertEqual(self.runtime.git_log({"path": "project-b"})["commits"][0]["subject"], "Initial project-b")
 
 
 
@@ -101,7 +110,7 @@ class MultiProjectTests(unittest.TestCase):
         self.assertEqual(status["repo_root"], str(linked))
         self.assertNotEqual(status["index_fingerprint"], self.call("git_status", {"path": "project-a"})["index_fingerprint"])
         (linked / "src/same.py").write_text("value = 9\n", encoding="utf-8")
-        self.assertIn("+value = 9", self.call("git_diff", {"path": "linked"})["diff"])
+        self.assertIn("+value = 9", self.model_text("git_diff", {"path": "linked"}))
         self.assertTrue(self.call("git_status", {"path": "project-a"})["clean"])
 
 
@@ -124,6 +133,8 @@ class MultiProjectTests(unittest.TestCase):
         self.assertFalse(self.call("git_status")["is_repo"])
         self.assertEqual(self.call("git_status", {"repo_path": "project-a"})["repo_root"], str(self.a))
         self.assertEqual(self.call("git_status", {"repo_path": "project-b"})["repo_root"], str(self.b))
+        dotted = self.call("git_status", {"repo_path": "project-a", "path": "."})
+        self.assertEqual(dotted["repo_root"], str(self.a))
         self.assertEqual(self.call("git_diff")["diff_source"], "patch_baseline")
         self.assertFalse(self.call("git_diff")["is_repo"])
         (self.workspace / "not-a-repo").mkdir()
@@ -173,8 +184,9 @@ class MultiProjectTests(unittest.TestCase):
         diff = self.call("git_diff", {"repo_path": "project-a"})
         rules = self.call("project_instructions", {"path": "project-a/src/same.py"})
         self.assertEqual(diff["repo_root"], str(self.a))
-        self.assertIn("A change", diff["diff"])
-        self.assertNotIn("B change", diff["diff"])
+        diff_text = self.model_text("git_diff", {"repo_path": "project-a"})
+        self.assertIn("A change", diff_text)
+        self.assertNotIn("B change", diff_text)
         self.assertNotIn("project-b", str(rules["instructions"]))
 
     def test_git_diff_includes_untracked_files_by_default_and_can_exclude_them(self) -> None:
@@ -182,14 +194,17 @@ class MultiProjectTests(unittest.TestCase):
         new_file.write_text("NEW_FILE_MARKER = True\n", encoding="utf-8")
         included = self.call("git_diff", {"repo_path": "project-a"})
         self.assertTrue(included["include_untracked"])
-        self.assertIn("+NEW_FILE_MARKER = True", included["diff"])
+        self.assertIn("+NEW_FILE_MARKER = True", self.model_text("git_diff", {"repo_path": "project-a"}))
 
         excluded = self.call(
             "git_diff",
             {"repo_path": "project-a", "include_untracked": False},
         )
         self.assertFalse(excluded["include_untracked"])
-        self.assertNotIn("NEW_FILE_MARKER", excluded["diff"])
+        self.assertNotIn(
+            "NEW_FILE_MARKER",
+            self.model_text("git_diff", {"repo_path": "project-a", "include_untracked": False}),
+        )
 
     def test_commands_keep_workdirs_and_filter_recovery(self) -> None:
         runs = []

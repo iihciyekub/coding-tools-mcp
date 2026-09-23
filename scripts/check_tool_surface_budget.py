@@ -4,7 +4,7 @@ import json
 import math
 from typing import Any
 
-from coding_tools_mcp.server import TOOL_REGISTRY, input_schemas
+from coding_tools_mcp.server import DEFAULT_HIDDEN_TOOLS, TOOL_REGISTRY, input_schemas
 
 MAX_REGISTERED_TOOLS = 32
 MAX_SINGLE_SCHEMA_BYTES = 2 * 1024
@@ -14,8 +14,13 @@ TOP_COUNT = 10
 
 def measure() -> dict[str, Any]:
     schemas = input_schemas()
+    default_names = {
+        name
+        for name, spec in TOOL_REGISTRY.items()
+        if name not in DEFAULT_HIDDEN_TOOLS and spec.gated_by is None
+    }
     rows: list[dict[str, Any]] = []
-    for name in sorted(schemas):
+    for name in sorted(default_names):
         encoded = json.dumps(
             schemas[name],
             sort_keys=True,
@@ -31,6 +36,8 @@ def measure() -> dict[str, Any]:
         gate_counts[key] = gate_counts.get(key, 0) + 1
     return {
         "registered_tools": len(TOOL_REGISTRY),
+        "default_exposed_tools": len(default_names),
+        "hidden_default_tools": sorted(DEFAULT_HIDDEN_TOOLS),
         "gate_counts": dict(sorted(gate_counts.items())),
         "total_schema_bytes": total_bytes,
         "estimated_schema_tokens": math.ceil(total_bytes / 4),
@@ -42,9 +49,9 @@ def measure() -> dict[str, Any]:
 def main() -> int:
     result = measure()
     failures: list[str] = []
-    if int(result["registered_tools"]) > MAX_REGISTERED_TOOLS:
+    if int(result["default_exposed_tools"]) > MAX_REGISTERED_TOOLS:
         failures.append(
-            f"registered tools {result['registered_tools']} exceed budget {MAX_REGISTERED_TOOLS}"
+            f"default exposed tools {result['default_exposed_tools']} exceed budget {MAX_REGISTERED_TOOLS}"
         )
     if int(result["total_schema_bytes"]) > MAX_TOTAL_SCHEMA_BYTES:
         failures.append(
@@ -56,10 +63,12 @@ def main() -> int:
         )
 
     print(
-        f"tool surface: {result['registered_tools']} tools, "
+        f"tool surface: {result['default_exposed_tools']} default tools "
+        f"({result['registered_tools']} registered), "
         f"{result['total_schema_bytes']} schema bytes, "
         f"~{result['estimated_schema_tokens']} tokens"
     )
+    print(f"hidden by default: {result['hidden_default_tools']}")
     print(f"tool groups: {result['gate_counts']}")
     print("largest schemas:")
     for item in result["largest_tools"]:

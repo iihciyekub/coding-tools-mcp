@@ -9,8 +9,9 @@ primitives rather than an agent workflow engine or a second tool-discovery layer
 
 ## Fixed inventory
 
-The implementation declares exactly 32 tools. A normal macOS project runtime
-exposes every enabled coding capability directly in one stable `tools/list`;
+The implementation declares exactly 32 tools as contracts, but the normal macOS
+project runtime intentionally exposes a smaller model-facing core. Diagnostic
+and Git-history helpers can remain implemented without occupying `tools/list`.
 Gateway mode adds `project_context` and, only when explicit local capability
 roots are configured, three read-only catalog tools. There is no workflow-tool mode.
 
@@ -19,31 +20,31 @@ roots are configured, three read-only catalog tools. There is no workflow-tool m
 - `local_skill_read`: **optional gateway-only read-only** — Read a selected `SKILL.md` and bounded text references; it does not execute the Skill.
 - `local_plugin_inspect`: **optional gateway-only read-only** — Inspect public plugin metadata; it does not activate plugin actions or hooks.
 - `server_info`: **direct** — Return server, workspace, project-context, auth, policy, and fixed-tool metadata.
-- `runtime_doctor`: **direct** — Run a non-destructive runtime health check covering common toolchain commands, workspace access, shell snapshot, LSP availability, sandbox status, network policy, and macOS Apple toolchain metadata including Xcode, Swift, SourceKit-LSP, codesign, notarytool, xcresulttool, and Homebrew.
+- `runtime_doctor`: **implemented diagnostic helper; hidden from the default model surface** — Run a non-destructive runtime health check covering common toolchain commands, workspace access, shell snapshot, LSP availability, sandbox status, network policy, and macOS Apple toolchain metadata including Xcode, Swift, SourceKit-LSP, codesign, notarytool, xcresulttool, and Homebrew.
 - `read_file`: **direct** — Read a UTF-8 text file slice inside the configured file scope. Relative paths are workspace-relative; host mode also accepts host absolute and ~/... paths.
 - `read_files`: **direct** — Read bounded UTF-8 slices from multiple files in the configured file scope.
 - `list_dir`: **direct** — List directory entries inside the configured file scope.
-- `list_files`: **direct** — List files using glob filters. An omitted `path` uses the configured default search folder; an explicit relative path uses the project workspace.
+- `list_files`: **direct** — List files using `include_globs` / `exclude_globs`. An omitted `path` uses the configured default search folder; an explicit relative path uses the project workspace.
 - `search_text`: **direct** — Search UTF-8 files for text or regex matches. An omitted `path` uses the configured default search folder; an explicit relative path uses the project workspace.
 - `apply_patch`: **direct** — Stage, validate, and atomically apply a patch envelope. Example: *** Begin Patch *** Update File: app.py @@ -old +new *** End Patch
 - `exec_command`: **direct** — Run a bounded command under runtime policy. Pass workdir explicitly for reconnect-safe paths. A still-running command returns command_id. Example: {"cmd":"pytest -q","workdir":".","yield_time_ms":30000}. Retained output is bounded per stream; for very large output redirect to a file (cmd > out.log 2>&1) and page it with read_file or search_text.
-- `get_command`: **direct** — Read command status without consuming output cursors. Resolve by command_id or operation_id; returned output_refs can be paged with read_output.
+- `get_command`: **direct** — Read or wait for command status without consuming output cursors. Resolve by command_id or operation_id and use `wait_ms` to wait for completion; returned output_refs can be paged with read_output.
 - `list_commands`: **direct** — List recent server-managed commands and operation_ids for reconnect/recovery. This is read-only and does not consume command output.
-- `write_stdin`: **direct** — Poll or interact with a running command by command_id. Empty chars wait for output; non-empty chars writes to stdin. Example: {"command_id":"abc","chars":"","yield_time_ms":10000}.
+- `write_stdin`: **direct** — Send non-empty input to an interactive running command. Waiting belongs to `get_command`. Example: {"command_id":"abc","chars":"yes\n"}.
 - `kill_command`: **direct** — Terminate a server-managed command by command_id. Example: {"command_id":"abc","signal":"KILL"}.
 - `read_output`: **direct** — Read retained command output using an output_ref returned by exec_command/write_stdin. Each stream retains the earliest output (head) plus the most recent output (rolling tail); bytes between them may be evicted and are reported via evicted_gap_bytes. Example: {"output_ref":"command:abc:stdout","offset":0,"limit":4096}.
 - `git_status`: **direct** — Return git working tree status for the workspace.
 - `git_diff`: **direct** — Return unified git diff for workspace changes.
-- `git_log`: **direct** — Return recent git commits with bounded structured metadata.
-- `git_show`: **direct** — Return bounded git show output for a revision.
-- `git_blame`: **direct** — Return bounded git blame metadata for a workspace file.
+- `git_log`: **implemented helper; hidden from the default model surface** — Native `git log` through `exec_command` is the default agent path.
+- `git_show`: **implemented helper; hidden from the default model surface** — Native `git show` through `exec_command` is the default agent path.
+- `git_blame`: **implemented helper; hidden from the default model surface** — Native `git blame` through `exec_command` is the default agent path.
 - `code_diagnostics`: **direct** — Open or refresh a source file and return bounded published language-server diagnostics.
 - `request_permissions`: **direct** — Create an exact, expiring operator approval request without silently granting operations.
 - `workspace_overview`: **direct** — Summarize project manifests, languages, entry points, top-level areas, and instruction files. Detected Apple projects also include bounded read-only Xcode, Swift, SDK, and SourceKit-LSP metadata.
 - `project_instructions`: **direct** — Resolve root and nested project instruction files that apply to one workspace path.
-- `checks_discover`: **direct** — Discover test, lint, typecheck, and build commands from project manifests without running them. By default, current Git changes deterministically rank the existing checks and explain why; explicit changed_paths can override the seed.
+- `checks_discover`: **implemented helper; hidden from the default model surface** — Check discovery and recommendations are included in `workspace_overview` so project orientation does not require another tool call.
 - `view_image`: **direct when image content is enabled** — Return a workspace image as MCP image content.
-- `code_symbols`: **direct** — List bounded language-aware symbol definitions under a workspace path.
+- `code_symbols`: **implemented helper; hidden from the default model surface** — Definition/reference tools and text search cover the normal agent path; the lightweight symbol scanner remains available internally as a fallback primitive.
 - `code_definition`: **direct** — Find language-aware definitions for a symbol under a workspace path. When a file path plus line/column is supplied, line/column are one-based and semantic LSP is preferred; the runtime converts the column to UTF-16 and falls back to the bounded symbol scan if the LSP runtime is unavailable.
 - `code_references`: **direct** — Find references for a symbol under a workspace path. When a file path plus line/column is supplied, prefer semantic LSP references using one-based public positions converted internally to UTF-16; fall back to the bounded exact-identifier scan if the LSP runtime is unavailable.
 
@@ -73,8 +74,10 @@ Every successful tool call has:
 }
 ```
 
-`content` is not a JSON mirror. `structuredContent` is the complete machine
-interface and retains existing fields where possible. Normal model-facing text
+`content` is not a JSON mirror. Large human/model-facing text appears only in
+`content`; `structuredContent` carries metadata, identifiers, offsets, status,
+and bounded structural records without duplicating file bodies, diffs, command
+output, or search previews. Normal model-facing text
 is governed by each tool's own result limits, with a final 2,162,688-byte
 defense-in-depth ceiling for pathological count-bounded entries. If that safety
 ceiling is reached, the full structured value is still present. Errors use the
@@ -115,10 +118,13 @@ Lines are split on `\n` only, so a line containing another Unicode line
 boundary (`\x0c`, `\u2028`, `\x85`, …) is one line to both the file and the
 patch. A file's final newline is an ordinary line the hunk can add or remove.
 
-`read_file` returns a SHA-256 `revision`. `apply_patch.expected_revisions` may
-bind selected paths to those revisions for optimistic concurrency. An optional
-`idempotency_key` makes retries replay the original result instead of applying
-the same patch twice.
+`read_file` returns a SHA-256 `revision`. A later `read_file` can pass that
+value as `if_revision`; if the file is unchanged, the result sets
+`unchanged=true` and omits the file content instead of resending it. This is
+intended for long agent sessions that revisit already-read files.
+`apply_patch.expected_revisions` may bind selected paths to revisions for
+optimistic concurrency. An optional `idempotency_key` makes retries replay the
+original result instead of applying the same patch twice.
 
 ## Model-ready examples
 
@@ -147,7 +153,7 @@ an explicit `"path":"."` still targets the workspace.
 If the result is still running, copy its `command_id` exactly:
 
 ```json
-{"command_id":"abc","chars":"","yield_time_ms":10000}
+{"command_id":"abc","wait_ms":10000}
 ```
 
 Terminate that command when needed:
@@ -171,10 +177,10 @@ anchored to the configured workspace.
 
 ## Command and output behavior
 
-`exec_command` and `write_stdin` default `yield_time_ms` to `10000`. Short
-commands ordinarily return `status: "exited"` in one call. A still-running
-command returns a `command_id` and a machine-readable `next_action` for
-`write_stdin` with empty `chars`.
+`exec_command` defaults `yield_time_ms` to `10000`. Short commands ordinarily
+return `status: "exited"` in one call. A still-running command returns a
+`command_id` and a machine-readable `next_action` for `get_command` with
+`wait_ms`. `write_stdin` is reserved for non-empty interactive input.
 
 `exec_command.timeout_ms` is the process lifetime limit and defaults to
 `300000` (5 minutes). `yield_time_ms` is only how long one call waits before

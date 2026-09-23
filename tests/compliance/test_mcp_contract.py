@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from coding_tools_mcp import __version__
-from coding_tools_mcp.server import MAX_HTTP_REQUEST_BYTES, TOOL_REGISTRY
+from coding_tools_mcp.server import DEFAULT_HIDDEN_TOOLS, MAX_HTTP_REQUEST_BYTES, TOOL_REGISTRY
 from tests.compliance.fixtures import workspace_from_fixture
 from tests.compliance.mcp_client import (
     FORBIDDEN_TOOL_NAMES,
@@ -139,7 +139,7 @@ class MCPContractTests(ComplianceTestCase):
         expected_fragments = {
             "apply_patch": ("*** Begin Patch", "*** Update File"),
             "exec_command": ("workdir", "command_id", '"yield_time_ms":30000'),
-            "write_stdin": ("command_id", '"chars":""'),
+            "write_stdin": ("command_id", "non-empty input"),
             "kill_command": ("command_id", '"signal":"KILL"'),
             "read_output": ("command:abc:stdout", '"offset":0'),
         }
@@ -158,9 +158,7 @@ class MCPContractTests(ComplianceTestCase):
             payload = self.assert_tool_success(started)
             command_id = payload.get("command_id")
             self.assertIsInstance(command_id, str)
-            polled = self.assert_tool_success(
-                sibling.call_tool("write_stdin", {"command_id": command_id, "chars": "", "yield_time_ms": 0})
-            )
+            polled = self.assert_tool_success(sibling.call_tool("get_command", {"command_id": command_id}))
             self.assertEqual(polled.get("command_id"), command_id)
             killed = self.assert_tool_success(
                 sibling.call_tool("kill_command", {"command_id": command_id, "signal": "KILL"})
@@ -178,9 +176,7 @@ class MCPContractTests(ComplianceTestCase):
             command_id = started.get("command_id")
             self.assertIsInstance(command_id, str)
 
-        polled = self.assert_tool_success(
-            self.client.call_tool("write_stdin", {"command_id": command_id, "chars": "", "yield_time_ms": 0})
-        )
+        polled = self.assert_tool_success(self.client.call_tool("get_command", {"command_id": command_id}))
         self.assertEqual(polled.get("status"), "running")
         killed = self.assert_tool_success(
             self.client.call_tool("kill_command", {"command_id": command_id, "signal": "KILL"})
@@ -199,9 +195,7 @@ class MCPContractTests(ComplianceTestCase):
 
         self.client.notify("notifications/cancelled", {"requestId": self.client.request_id})
 
-        polled = self.assert_tool_success(
-            self.client.call_tool("write_stdin", {"command_id": command_id, "chars": "", "yield_time_ms": 0})
-        )
+        polled = self.assert_tool_success(self.client.call_tool("get_command", {"command_id": command_id}))
         self.assertEqual(polled.get("status"), "running")
         killed = self.assert_tool_success(
             self.client.call_tool("kill_command", {"command_id": command_id, "signal": "KILL"})
@@ -468,9 +462,7 @@ class MCPContractTests(ComplianceTestCase):
         unknown_status, _, _ = self.raw_base_http_request(base, "DELETE", "/not-mcp")
         self.assertEqual(unknown_status, 404)
 
-        polled = self.assert_tool_success(
-            self.client.call_tool("write_stdin", {"command_id": command_id, "chars": "", "yield_time_ms": 0})
-        )
+        polled = self.assert_tool_success(self.client.call_tool("get_command", {"command_id": command_id}))
         self.assertEqual(polled.get("status"), "running")
         killed = self.assert_tool_success(
             self.client.call_tool("kill_command", {"command_id": command_id, "signal": "KILL"})
@@ -1553,7 +1545,7 @@ class MCPContractTests(ComplianceTestCase):
             self.assertTrue(names >= set(REQUIRED_TOOLS))
             self.assertEqual(names, set(TOOL_REGISTRY) - {
                 "project_context", "local_capabilities_search", "local_skill_read", "local_plugin_inspect"
-            })
+            } - set(DEFAULT_HIDDEN_TOOLS))
             for tool in tools:
                 # The cache hints describe the catalog, not the entries in it;
                 # a tool definition is a schema clients validate against.

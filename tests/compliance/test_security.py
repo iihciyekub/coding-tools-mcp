@@ -191,10 +191,7 @@ class SecurityComplianceTests(ComplianceTestCase):
 
         try:
             time.sleep(0.35)
-            polled = self.client.call_tool(
-                "write_stdin",
-                {"command_id": command_id, "chars": "", "yield_time_ms": 0, "max_output_bytes": 4096},
-            )
+            polled = self.client.call_tool("get_command", {"command_id": command_id})
             poll_payload = self.assert_tool_success(polled)
             self.assertNotEqual(
                 poll_payload.get("status"),
@@ -225,10 +222,7 @@ class SecurityComplianceTests(ComplianceTestCase):
         self.assertIsInstance(command_id, str, payload)
 
         time.sleep(0.35)
-        polled = self.client.call_tool(
-            "write_stdin",
-            {"command_id": command_id, "chars": "", "yield_time_ms": 0, "max_output_bytes": 4096},
-        )
+        polled = self.client.call_tool("get_command", {"command_id": command_id})
         poll_payload = self.assert_tool_success(polled)
         self.assertEqual(poll_payload.get("status"), "timeout", poll_payload)
         self.assertIs(poll_payload.get("timed_out"), True, poll_payload)
@@ -248,13 +242,15 @@ class SecurityComplianceTests(ComplianceTestCase):
         command_id = payload.get("command_id")
         self.assertIsInstance(command_id, str, payload)
         time.sleep(0.5)
-        polled = self.client.call_tool(
-            "write_stdin",
-            {"command_id": command_id, "chars": "", "yield_time_ms": 0, "max_output_bytes": 1024},
-        )
+        polled = self.client.call_tool("get_command", {"command_id": command_id})
         poll_payload = self.assert_tool_success(polled)
         self.assertGreater(poll_payload.get("stdout_dropped_bytes", 0), 0, poll_payload)
-        self.assertTrue(poll_payload.get("truncated"), poll_payload)
+        output_ref = poll_payload.get("output_refs", {}).get("stdout")
+        self.assertIsInstance(output_ref, str, poll_payload)
+        page = self.client.call_tool("read_output", {"output_ref": output_ref, "offset": 0, "limit": 1024})
+        page_payload = self.assert_tool_success(page)
+        self.assertIs(page_payload.get("truncated"), True, page_payload)
+        self.assertGreater(page_payload.get("evicted_gap_bytes", 0), 0, page_payload)
         self.client.call_tool("kill_command", {"command_id": command_id, "signal": "KILL"})
 
     def test_sensitive_environment_is_not_leaked_to_child_processes(self) -> None:
@@ -275,7 +271,7 @@ class SecurityComplianceTests(ComplianceTestCase):
         self.assert_tool_success(listed)
         self.assertNotIn("TOP_SECRET_DO_NOT_READ", self.tool_text(listed))
 
-        files = self.client.call_tool("list_files", {"glob": "**/*", "include_hidden": True})
+        files = self.client.call_tool("list_files", {"include_globs": ["**/*"], "include_hidden": True})
         payload = self.assert_tool_success(files)
         paths = {entry.get("path") for entry in payload.get("files", []) if isinstance(entry, dict)}
         self.assertNotIn("outside-link.txt", paths)

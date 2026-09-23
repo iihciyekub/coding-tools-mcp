@@ -261,7 +261,7 @@ def run_workload(workload: Workload, checkout_root: Path, raw_dir: Path, port: i
         listed = tool_payload(
             client.call_tool(
                 "list_files",
-                {"path": ".", "patterns": ["*", "**/*"], "max_results": 2000, "include_ignored": True},
+                {"path": ".", "include_globs": ["*", "**/*"], "max_results": 2000, "include_ignored": True},
             )
         )
         listed_files = listed.get("files") if isinstance(listed.get("files"), list) else []
