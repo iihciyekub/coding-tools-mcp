@@ -2165,7 +2165,8 @@ while True:
             WorkspaceProfile::new(beta.to_string_lossy().into_owned(), 28766).unwrap();
         explicit_beta.name = "beta-explicit".into();
         explicit_beta.runtime.permission_mode = "host".into();
-        let with_explicit = gateway_project_profiles(&[profile.clone(), explicit_beta.clone()]).unwrap();
+        let with_explicit =
+            gateway_project_profiles(&[profile.clone(), explicit_beta.clone()]).unwrap();
         assert_eq!(with_explicit.len(), 2);
         let beta_project = with_explicit
             .iter()

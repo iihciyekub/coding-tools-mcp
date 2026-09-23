@@ -66,9 +66,9 @@ Registry 是可热更新的非敏感路由表：
 ```
 
 Desktop 写 registry 时必须 atomic replace。Gateway 使用 generation / mtime 发现变化。
-Registry 是某个 Desktop App instance 的运行时状态，必须位于该 bundle 自己的
-app-local data 目录；preview/dev 与 production、旧版与新版不得共享同一个 registry
-文件或 endpoint 集合。
+Registry 是某个 Desktop App instance / runtime build 的运行时状态，必须位于该 bundle
+自己的 app-local data 目录，并继续按 `runtime_build_id` 分目录；preview/dev 与 production、
+旧版与新版不得共享同一个 registry 文件或 endpoint 集合。
 
 `runtime_build_id` 来自 Desktop bundle 内置 Runtime 的内容哈希环境键。Gateway 第一次
 代理某 Project Runtime 前必须通过 `server_info.runtime_build_id` 校验实际执行器；不一致时
@@ -100,7 +100,8 @@ Project 管理由 Desktop App 负责。
 若 Desktop 保存的是一个“项目容器目录”而该目录自身不是 Git repository，则 Gateway
 启动前应把其直属 Git roots 展开为独立 Project，并使用父配置 + canonical path 派生稳定
 Project ID。用户无需手工把同一父目录下的每个仓库重新添加一次。若父目录本身是 Git
-repository，则它继续作为单一 Project。
+repository，则它继续作为单一 Project。若某个自动发现的子 Project 同时被用户显式保存
+为独立 ProjectProfile，则显式配置优先，保留其独立权限和环境设置。
 
 ## 6. 路径语义
 
