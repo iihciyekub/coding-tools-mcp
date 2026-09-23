@@ -22,8 +22,10 @@ API.
   the workspace. Git evidence, LSP, check discovery, project instructions, and project
   context stay anchored to the selected workspace rather than following arbitrary host paths.
 - Workspace settings expose a separate default search folder for `list_files` and
-  `search_text` when no path is supplied. It can be the project, an allowed folder,
-  or (in Full Access) the user's home or a chosen folder; it never changes the
+  `search_text` when no path is supplied. Full Access defaults to the user's home
+  directory, including existing profiles that never chose a search folder; Standard
+  access defaults to the project. It can be changed to the project, an allowed folder,
+  or (in Full Access) another chosen folder; it never changes the
   underlying MCP access permissions. Whole-Mac searches require an explicit path.
 - **Full Access** launches host mode with SSH/Git credentials and compatibility
   annotations enabled for clients that otherwise refuse command tools. On macOS,
@@ -39,8 +41,9 @@ API.
 - Desktop-launched runtimes expose the same small direct primitive catalog as
   other clients, plus gateway-scoped `project_context`. Planning, review, task,
   checkpoint, and Git-write workflows stay with the calling model and native CLIs.
-- Optionally share specific local Agent Skill or plugin directories with the shared
-  Gateway. ChatGPT can search their metadata and read `SKILL.md` files; local plugin
+- The shared Gateway automatically discovers installed Skills in known Codex and
+  other agent directories. Additional directories can be added in settings, and
+  automatic discovery can be switched off. ChatGPT can search their metadata and read `SKILL.md` files; local plugin
   actions and hooks do not become callable without separate MCP tools.
 - The compact panel surfaces pending approval decisions only when user action is
   required. Runtime and installation logs remain directly accessible in the same panel.
@@ -77,8 +80,8 @@ locations.
 pipeline. For a new version, push a version-matched tag such as:
 
 ```bash
-git tag desktop-v0.5.0
-git push origin desktop-v0.5.0
+git tag desktop-v0.5.1
+git push origin desktop-v0.5.1
 ```
 
 Pushing the tag automatically starts the complete release workflow. To release
@@ -88,7 +91,7 @@ or retry an **existing** tag, use the standard maintainer/agent command:
 gh workflow run desktop-release.yml \
   -R iihciyekub/coding-tools-mcp \
   --ref iiaide \
-  -f tag=desktop-v0.5.0 \
+  -f tag=desktop-v0.5.1 \
   -f mode=release
 ```
 
@@ -103,7 +106,7 @@ signs and notarizes both the app and final DMG, builds the Windows x64 portable
 ZIP when selected by `releasePlatforms` in `package.json`, publishes immutable GitHub Release assets and checksums, then updates the
 Homebrew Tap.
 
-Version 0.5.0 selects macOS only. Existing Windows releases remain available.
+Version 0.5.1 selects macOS only. Existing Windows releases remain available.
 
 The macOS release job uses the protected `production-release` GitHub
 Environment, matching the production signing model used by WOS Aide. Configure
@@ -237,9 +240,12 @@ Server URL to the clipboard automatically.
 The temporary hostname changes whenever the workspace tunnel restarts. Update
 the custom MCP app address in ChatGPT after starting a new tunnel.
 
-To use installed local Skills, stop the shared Gateway, open Workspace settings,
-and add only the specific Skill or plugin folders to **Local Skills and plugins**.
-After restarting, refresh the MCP connection metadata in ChatGPT developer mode
+Installed Skills in known Codex, Claude Code, Cursor, Gemini CLI, Agents, and
+OpenCode folders are found automatically; the app checks these locations without
+scanning the entire home directory. Workspace settings lists the detected roots,
+lets you add other specific folders, and lets you disable automatic discovery.
+Shared settings can be saved while the Gateway is running and take effect when it
+next starts. Then refresh the MCP connection metadata in ChatGPT developer mode
 and start a new conversation. The optional catalog tools let ChatGPT search and
 read those files; they do not activate Codex-only plugin scripts or hooks.
 

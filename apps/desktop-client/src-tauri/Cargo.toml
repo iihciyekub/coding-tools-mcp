@@ -1,6 +1,6 @@
 [package]
 name = "coding-tools-mcp-desktop"
-version = "0.5.0"
+version = "0.5.1"
 description = "Cross-platform desktop control plane for Coding Tools MCP"
 authors = ["Coding Tools MCP Contributors"]
 license = "Apache-2.0"

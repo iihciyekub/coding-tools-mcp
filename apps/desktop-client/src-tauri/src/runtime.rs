@@ -776,12 +776,21 @@ fn project_runtime_fingerprint(profile: &WorkspaceProfile) -> String {
     profile.runtime.permission_mode.hash(&mut hasher);
     profile.runtime.file_access_scope.hash(&mut hasher);
     profile.runtime.allowed_paths.hash(&mut hasher);
-    profile.runtime.default_search_path.hash(&mut hasher);
+    effective_default_search_path(profile).hash(&mut hasher);
     for variable in &profile.runtime.environment_variables {
         variable.name.hash(&mut hasher);
         variable.value.hash(&mut hasher);
     }
     format!("{:016x}", hasher.finish())
+}
+
+fn effective_default_search_path(profile: &WorkspaceProfile) -> &str {
+    let configured = profile.runtime.default_search_path.trim();
+    if configured.is_empty() && profile.runtime.permission_mode == "host" {
+        "~"
+    } else {
+        configured
+    }
 }
 
 fn free_project_port(excluded: u16) -> Result<u16, String> {
@@ -830,10 +839,9 @@ fn spawn_project_runtime(
     for root in file_access_roots(profile) {
         command.arg("--file-access-root").arg(root);
     }
-    if !profile.runtime.default_search_path.is_empty() {
-        command
-            .arg("--default-search-path")
-            .arg(&profile.runtime.default_search_path);
+    let search_path = effective_default_search_path(profile);
+    if !search_path.is_empty() {
+        command.arg("--default-search-path").arg(search_path);
     }
     command
         .current_dir(&profile.path)
@@ -956,7 +964,7 @@ fn spawn_gateway_runtime(
         ])
         .arg("--state-root")
         .arg(runtime_state_root);
-    for root in &gateway_config.local_capability_roots {
+    for root in gateway_config.effective_local_capability_roots() {
         command.arg("--local-capability-root").arg(root);
     }
     command
@@ -1334,10 +1342,9 @@ fn spawn_runtime(
     for root in file_access_roots(profile) {
         command.arg("--file-access-root").arg(root);
     }
-    if !profile.runtime.default_search_path.is_empty() {
-        command
-            .arg("--default-search-path")
-            .arg(&profile.runtime.default_search_path);
+    let search_path = effective_default_search_path(profile);
+    if !search_path.is_empty() {
+        command.arg("--default-search-path").arg(search_path);
     }
     if profile.runtime.permission_mode == "host" {
         command.arg("--dangerously-fake-readonly-annotations");
@@ -1814,6 +1821,9 @@ while True:
         assert_eq!(file_access_roots(&profile), profile.runtime.allowed_paths);
 
         profile.runtime.permission_mode = "host".into();
+        assert_eq!(effective_default_search_path(&profile), "~");
+        profile.runtime.default_search_path = ".".into();
+        assert_eq!(effective_default_search_path(&profile), ".");
         let roots = file_access_roots(&profile);
         assert!(roots.is_empty());
     }

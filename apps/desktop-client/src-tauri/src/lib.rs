@@ -47,6 +47,7 @@ struct DesktopSnapshot {
     language: String,
     home_directory: Option<String>,
     gateway: GatewayConfig,
+    discovered_local_capability_roots: Vec<String>,
     projects: Vec<ProjectProfile>,
     migration_warning: Option<String>,
     profiles: Vec<WorkspaceProfile>,
@@ -92,11 +93,17 @@ fn desktop_snapshot(state: tauri::State<'_, DesktopState>) -> Result<DesktopSnap
             (profile.id.clone(), snapshot)
         })
         .collect();
+    let discovered_local_capability_roots = if gateway.auto_discover_local_capabilities {
+        models::discovered_local_capability_roots()
+    } else {
+        Vec::new()
+    };
     Ok(DesktopSnapshot {
         language,
         home_directory: models::user_home_directory()
             .map(|path| path.to_string_lossy().into_owned()),
         gateway,
+        discovered_local_capability_roots,
         projects,
         migration_warning,
         profiles,
@@ -208,6 +215,8 @@ fn save_profile(
         .map_err(|_| "Profile store is unavailable.")?
         .gateway();
     requested_gateway.local_capability_roots = current_gateway.local_capability_roots.clone();
+    requested_gateway.auto_discover_local_capabilities =
+        current_gateway.auto_discover_local_capabilities;
     let gateway_active = state
         .runtime
         .lock()
@@ -230,14 +239,6 @@ fn save_local_capability_roots(
     roots: Vec<String>,
     state: tauri::State<'_, DesktopState>,
 ) -> Result<GatewayConfig, String> {
-    if state
-        .runtime
-        .lock()
-        .map_err(|_| "Runtime manager is unavailable.")?
-        .gateway_is_active()
-    {
-        return Err("Stop the shared Gateway before changing local Skill folders.".into());
-    }
     let home = models::user_home_directory();
     let mut normalized = Vec::new();
     for raw in roots {
@@ -256,6 +257,30 @@ fn save_local_capability_roots(
         .lock()
         .map_err(|_| "Profile store is unavailable.")?
         .set_local_capability_roots(normalized)
+}
+
+#[tauri::command]
+fn save_auto_discover_local_capabilities(
+    enabled: bool,
+    state: tauri::State<'_, DesktopState>,
+) -> Result<GatewayConfig, String> {
+    state
+        .store
+        .lock()
+        .map_err(|_| "Profile store is unavailable.")?
+        .set_auto_discover_local_capabilities(enabled)
+}
+
+#[tauri::command]
+fn save_server_name_prefix(
+    prefix: String,
+    state: tauri::State<'_, DesktopState>,
+) -> Result<GatewayConfig, String> {
+    state
+        .store
+        .lock()
+        .map_err(|_| "Profile store is unavailable.")?
+        .set_server_name_prefix(prefix)
 }
 
 fn reconcile_project_runtimes(state: &DesktopState) -> Result<(), String> {
@@ -1874,6 +1899,8 @@ pub fn run() {
             create_full_access_profile,
             save_profile,
             save_local_capability_roots,
+            save_auto_discover_local_capabilities,
+            save_server_name_prefix,
             delete_profile,
             start_profile,
             stop_profile,

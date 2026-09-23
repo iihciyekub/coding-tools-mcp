@@ -37,6 +37,7 @@ export interface GatewayConfig {
   tunnel: TunnelConfig;
   auth: AuthConfig;
   local_capability_roots: string[];
+  auto_discover_local_capabilities: boolean;
 }
 
 export interface ProjectProfile {
@@ -77,6 +78,7 @@ export interface DesktopSnapshot {
   language: "en" | "zh-CN";
   home_directory: string | null;
   gateway: GatewayConfig;
+  discovered_local_capability_roots: string[];
   projects: ProjectProfile[];
   migration_warning: string | null;
   profiles: WorkspaceProfile[];

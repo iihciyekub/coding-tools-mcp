@@ -1,6 +1,6 @@
 # 本机 Agent Skill 能力桥接设计
 
-状态：目录桥接第一阶段已实现（2026-09-23）；原生 ChatGPT Skill 打包、专有插件动作适配和网页端验收仍待按具体 Skill／插件完成。
+状态：目录桥接第一阶段已实现；Desktop 自动发现常见本机 Skill／插件目录。原生 ChatGPT Skill 打包、专有插件动作适配和网页端验收仍待按具体 Skill／插件完成。
 
 ## 要解决的问题
 
@@ -46,9 +46,9 @@
 
 ## 放置位置与启用条件
 
-桥接是可选的本机目录服务，接在持久网关的工具层。目录属于主机环境，与网关当前选中的 Project 分开；项目内的 Skill 必须由该项目的授权目录明确登记。普通单项目 Runtime、现有工具名和输入输出契约不因该功能改变。命令行可重复指定 `--local-capability-root <具体目录>`；桌面端在 Workspace settings → Local Skills and plugins 添加目录，须在共享 Gateway 停止时更改。
+桥接是可选的本机目录服务，接在持久网关的工具层。目录属于主机环境，与网关当前选中的 Project 分开；项目内的 Skill 必须由该项目的授权目录明确登记。普通单项目 Runtime、现有工具名和输入输出契约不因该功能改变。命令行可重复指定 `--local-capability-root <具体目录>`；桌面端默认发现 Codex、Claude Code、Cursor、Gemini CLI、Agents 和 OpenCode 的用户级 Skill 目录及 Codex 插件缓存，并允许在 Workspace settings → Local Skills and plugins 增加其他具体目录或关闭自动发现。运行中也可保存配置，下次启动 Gateway 后生效。
 
-桥接默认关闭。桌面端由用户明确选择允许展示的目录；服务只扫描这些目录，不递归扫描整个 HOME，也不从任意绝对路径读取。目录本身不能是 HOME 或文件系统根目录；符号链接目录、逃逸目录和过大的文件被跳过。远程请求仍经过网关现有认证，桥接读取权限独立于 `host` 命令模式：启用桥接不等于授予 `exec_command` 完全访问；启用 `host` 也不自动开放桥接目录。配置只保存授权目录，不保存凭据正文。目录配置的增删和启用状态只由本机操作端管理，远程模型不能修改。
+命令行桥接默认关闭；Desktop 自动发现仅检查上述固定位置，且界面列出实际发现的目录，用户可以关闭。服务只扫描这些目录和用户另行添加的具体目录，不递归扫描整个 HOME，也不从任意绝对路径读取。目录本身不能是 HOME 或文件系统根目录；符号链接目录、逃逸目录和过大的文件被跳过。远程请求仍经过网关现有认证，桥接读取权限独立于 `host` 命令模式：启用桥接不等于授予 `exec_command` 完全访问；启用 `host` 也不自动开放桥接目录。配置只保存授权目录与开关，不保存凭据正文。目录配置的增删和启用状态只由本机操作端管理，远程模型不能修改。
 
 网关的 `tools/list` 在进程生命周期内保持稳定。桥接启用时增加固定的只读工具定义；安装或删除某个 Skill 只改变查询结果，不动态增减工具定义。禁用时不公布这些工具。
 从禁用切换为启用后，需要重启 Gateway，并在 ChatGPT 开发者模式中刷新 MCP 连接元数据、开启新对话，客户端才会看到新增工具。[官方刷新流程](https://developers.openai.com/plugins/deploy/connect-chatgpt)
@@ -61,7 +61,7 @@
 2. `local_skill_read(id, resources?)`：按搜索结果的 ID 读取 `SKILL.md`；`resources` 可批量指定最多三个该 Skill 的 `references/` 下文本文件，并受总字节预算约束。返回有界正文和 SHA-256 修订号；超过限制返回错误而非静默截断。拒绝目录外路径、符号链接逃逸、二进制、脚本自动执行和隐式外部请求。服务本身不执行其中的命令。
 3. `local_plugin_inspect(id)`：返回 manifest 中可公开的名称、描述和在该插件目录下找到的 Skill 名称，标记 `metadata_only`。MCP 服务器无法从本机 manifest 判断另一个 ChatGPT 会话已经启用了哪些插件或工具，因此不返回 `connected_to_chatgpt` 之类未经客户端验证的状态。绝不回传 token、环境变量、MCP 服务器 URL、Hook 正文或执行器内部配置。
 
-每个工具要有真实的 `readOnlyHint`、`destructiveHint` 和 `openWorldHint`，明确的 `inputSchema`／`outputSchema`，以及能指导下一次调用的精简文本结果。`id` 必须由服务解析到当前仍获授权的目录；目录撤销后旧 ID 立即失效。目录内容更改时通过修订号提示客户端结果已过期。插件 manifest 中声明的相对路径只用于授权根目录内校验，不能扩展读取范围。
+每个工具要有真实的 `readOnlyHint`、`destructiveHint` 和 `openWorldHint`，明确的 `inputSchema`／`outputSchema`，以及能指导下一次调用的精简文本结果。`id` 必须由服务解析到当前 Gateway 启动时获授权的目录；Desktop 保存目录移除后，须重启 Gateway 才会撤销当前进程的读取范围，届时旧 ID 失效。目录内容更改时通过修订号提示客户端结果已过期。插件 manifest 中声明的相对路径只用于授权根目录内校验，不能扩展读取范围。
 
 **不设计通用 `invoke_local_plugin(name, arguments)`。** 插件可能提供远程服务、账户连接、脚本或 UI，其权限和参数不能从 manifest 名称安全推断。真正需要在 ChatGPT 使用某插件的动作时，应通过已安装的 ChatGPT 插件或经明确配置的 MCP 连接公布为独立工具，让客户端看到其真实 schema、权限标注及确认要求。
 

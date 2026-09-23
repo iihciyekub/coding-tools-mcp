@@ -8,7 +8,7 @@ import type { DependencyStatus, GatewayConfig, LogBundle, PermissionMode, Runtim
 import { publicEndpoint, workspaceHue } from "./utils";
 
 const PANEL_WIDTH = 420;
-const APP_VERSION = "0.5.0";
+const APP_VERSION = "0.5.1";
 type Page = "home" | "new-access" | "workspaces" | "environment" | "logs" | "settings" | "approvals" | "more";
 type CopyAction = "server-name" | "server-url" | "credential" | "logs";
 type ConfirmAction = { kind: "stop"; profileId: string } | { kind: "stop-all" } | { kind: "quit" } | null;
@@ -29,6 +29,7 @@ function App() {
   const [backTarget, setBackTarget] = useState<Page>("home");
   const [profiles, setProfiles] = useState<WorkspaceProfile[]>([]);
   const [gateway, setGateway] = useState<GatewayConfig | null>(null);
+  const [discoveredCapabilityRoots, setDiscoveredCapabilityRoots] = useState<string[]>([]);
   const [migrationWarning, setMigrationWarning] = useState<string | null>(null);
   const [statuses, setStatuses] = useState<Record<string, RuntimeStatus>>({});
   const [workspaceActions, setWorkspaceActions] = useState<Record<string, WorkspaceAction>>({});
@@ -68,7 +69,7 @@ function App() {
   const credential = gateway?.auth.type === "bearer" ? gateway.auth.bearer_token : gateway?.auth.oauth_password ?? "";
   const selectedRuntimeState = selected ? runtimeState[selected.id] : undefined;
   const allowedFolderCount = selected?.runtime.allowed_paths.length ?? 0;
-  const defaultSearchPath = selected?.runtime.default_search_path ?? "";
+  const defaultSearchPath = selected?.runtime.default_search_path || (selected?.runtime.permission_mode === "host" ? "~" : "");
   const localCapabilityRoots = gateway?.local_capability_roots ?? [];
   const environmentReady = dependencies.runtime_ready && dependencies.cloudflared;
   const activeWorkspaceCount = profiles.reduce((count, profile) => {
@@ -84,6 +85,7 @@ function App() {
       setLanguage(snapshot.language);
       setHomeDirectory(snapshot.home_directory);
       setGateway(snapshot.gateway);
+      setDiscoveredCapabilityRoots(snapshot.discovered_local_capability_roots);
       setMigrationWarning(snapshot.migration_warning);
       setProfiles(snapshot.profiles);
       setStatuses(snapshot.statuses);
@@ -203,7 +205,7 @@ function App() {
   };
   const savePermission = async (permissionMode: PermissionMode) => {
     if (!selected) return; setBusy("permission");
-    try { const saved = await api.saveProfile({ ...selected, runtime: { ...selected.runtime, permission_mode: permissionMode, default_search_path: permissionMode === "host" ? defaultSearchPath : "" } }); setProfiles((current) => current.map((profile) => profile.id === saved.id ? saved : profile)); setError(""); }
+    try { const saved = await api.saveProfile({ ...selected, runtime: { ...selected.runtime, permission_mode: permissionMode, default_search_path: permissionMode === "host" ? defaultSearchPath || "~" : "" } }); setProfiles((current) => current.map((profile) => profile.id === saved.id ? saved : profile)); setError(""); }
     catch (reason) { setError(String(reason)); } finally { setBusy(null); }
   };
   const saveDefaultSearchPath = async (path: string) => {
@@ -227,7 +229,7 @@ function App() {
     } catch (reason) { setError(String(reason)); } finally { setBusy(null); }
   };
   const saveMcpNamePrefix = async () => {
-    if (!selected || activeWorkspaceCount) return;
+    if (!gateway) return;
     const nextPrefix = mcpNamePrefix.trim();
     if (!nextPrefix || nextPrefix === gateway?.server_name_prefix) {
       setMcpNamePrefix(gateway?.server_name_prefix ?? "www");
@@ -235,8 +237,9 @@ function App() {
     }
     setBusy("mcp-prefix");
     try {
-      const saved = await api.saveProfile({ ...selected, runtime: { ...selected.runtime, server_name_prefix: nextPrefix } });
-      setMcpNamePrefix(saved.runtime.server_name_prefix);
+      const saved = await api.saveServerNamePrefix(nextPrefix);
+      setGateway(saved);
+      setMcpNamePrefix(saved.server_name_prefix);
       await refresh();
       setError("");
     } catch (reason) {
@@ -258,7 +261,7 @@ function App() {
     } catch (reason) { setError(String(reason)); } finally { setBusy(null); }
   };
   const addLocalCapabilityFolder = async () => {
-    if (!gateway || activeWorkspaceCount) return;
+    if (!gateway) return;
     const appWindow = getCurrentWindow(); setBusy("local-capabilities"); setError("");
     try {
       await appWindow.hide();
@@ -270,9 +273,15 @@ function App() {
     } catch (reason) { setError(String(reason)); } finally { setBusy(null); }
   };
   const removeLocalCapabilityFolder = async (path: string) => {
-    if (!gateway || activeWorkspaceCount) return;
+    if (!gateway) return;
     setBusy("local-capabilities"); setError("");
     try { setGateway(await api.saveLocalCapabilityRoots(localCapabilityRoots.filter((item) => item !== path))); }
+    catch (reason) { setError(String(reason)); } finally { setBusy(null); }
+  };
+  const setAutoDiscoverLocalCapabilities = async (enabled: boolean) => {
+    if (!gateway) return;
+    setBusy("local-capabilities"); setError("");
+    try { setGateway(await api.saveAutoDiscoverLocalCapabilities(enabled)); await refresh(); }
     catch (reason) { setError(String(reason)); } finally { setBusy(null); }
   };
   const changeWorkspace = async () => {
@@ -358,7 +367,7 @@ function App() {
 
     {page === "new-access" && <section className="subpage-body access-mode-page">
       <button className="access-mode-choice" type="button" onClick={() => void addStandardWorkspace()}><span className="access-mode-icon"><FolderIcon /></span><span><strong>{t("Standard")}</strong><small>{t("Work in your project and folders you add.")}</small></span><ChevronIcon /></button>
-      <button className="access-mode-choice full" type="button" disabled={busy === "full-access-profile"} onClick={() => void addFullAccess()}><span className="access-mode-icon"><ShieldIcon /></span><span><strong>{t("Full Access")}</strong><small>{t("Use Mac files and commands. Searches still start in your project.")}</small></span>{busy === "full-access-profile" ? <SpinnerIcon /> : <ChevronIcon />}</button>
+      <button className="access-mode-choice full" type="button" disabled={busy === "full-access-profile"} onClick={() => void addFullAccess()}><span className="access-mode-icon"><ShieldIcon /></span><span><strong>{t("Full Access")}</strong><small>{t("Use Mac files and commands. Searches start in your home folder.")}</small></span>{busy === "full-access-profile" ? <SpinnerIcon /> : <ChevronIcon />}</button>
     </section>}
 
     {page === "workspaces" && <section className="subpage-body workspace-page">
@@ -387,7 +396,7 @@ function App() {
       <button className="secondary-button add-folder-button" type="button" disabled={busy === "workspace-path"} onClick={() => void changeWorkspace()}><FolderIcon />{t("Change folder")}</button>
       <div className="field-copy scope-copy"><strong>{t("Default search folder")}</strong><small>{t("Searches without a path start here. Larger folders are slower; access stays unchanged.")}</small></div>
       <select className="search-folder-select" aria-label={t("Default search folder")} value={defaultSearchPath} disabled={busy === "search-path"} onChange={(event) => void saveDefaultSearchPath(event.target.value)}>
-        <option value="">{selected.path}</option>
+        <option value={selected.runtime.permission_mode === "host" ? "." : ""}>{selected.path}</option>
         {selected.runtime.permission_mode === "host" && homeDirectory && <option value="~">{homeDirectory}</option>}
         {selected.runtime.allowed_paths.map((path) => <option value={path} key={path}>{path}</option>)}
         {defaultSearchPath && defaultSearchPath !== "~" && !selected.runtime.allowed_paths.includes(defaultSearchPath) && <option value={defaultSearchPath}>{defaultSearchPath}</option>}
@@ -400,11 +409,14 @@ function App() {
       </>}
       <details className="advanced-settings"><summary>{t("Advanced settings")}</summary><div className="advanced-settings-body">
         <div className="field-copy"><strong>{t("MCP name prefix")}</strong><small>{t("Shared by all projects.")}</small></div>
-        <div className="mcp-prefix-row"><input aria-label={t("MCP name prefix")} value={mcpNamePrefix} maxLength={24} spellCheck={false} disabled={Boolean(activeWorkspaceCount) || busy === "mcp-prefix"} onChange={(event) => setMcpNamePrefix(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void saveMcpNamePrefix(); }} /><button className="secondary-button" type="button" disabled={Boolean(activeWorkspaceCount) || busy === "mcp-prefix" || !mcpNamePrefix.trim() || mcpNamePrefix.trim() === gateway?.server_name_prefix} onClick={() => void saveMcpNamePrefix()}>{t("Save")}</button></div>
+        <div className="mcp-prefix-row"><input aria-label={t("MCP name prefix")} value={mcpNamePrefix} maxLength={24} spellCheck={false} disabled={busy === "mcp-prefix"} onChange={(event) => setMcpNamePrefix(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void saveMcpNamePrefix(); }} /><button className="secondary-button" type="button" disabled={busy === "mcp-prefix" || !mcpNamePrefix.trim() || mcpNamePrefix.trim() === gateway?.server_name_prefix} onClick={() => void saveMcpNamePrefix()}>{t("Save")}</button></div>
         <div className="field-copy scope-copy"><strong>{t("Local Skills and plugins")}</strong><small>{t("Share folders for Skill discovery. Plugin actions need their own tools.")}</small></div>
-        <div className="allowed-folder-list">{localCapabilityRoots.map((path) => <div className="allowed-folder-row" key={path}><span><strong title={path}>{path}</strong></span><button type="button" disabled={Boolean(activeWorkspaceCount) || busy === "local-capabilities"} onClick={() => void removeLocalCapabilityFolder(path)} aria-label={t("Remove capability folder")}>×</button></div>)}</div>
-        <button className="secondary-button add-folder-button" type="button" disabled={Boolean(activeWorkspaceCount) || busy === "local-capabilities"} onClick={() => void addLocalCapabilityFolder()}><PlusIcon />{t("Add folder")}</button>
-        {Boolean(activeWorkspaceCount) && <p className="hint-copy">{t("Stop all projects to change shared settings.")}</p>}
+        <label className="auto-discover-row"><input type="checkbox" checked={gateway?.auto_discover_local_capabilities ?? true} disabled={busy === "local-capabilities"} onChange={(event) => void setAutoDiscoverLocalCapabilities(event.target.checked)} /><span><strong>{t("Automatically find installed Skills")}</strong><small>{t("Checks known Codex and other agent folders, not your whole home folder.")}</small></span></label>
+        {gateway?.auto_discover_local_capabilities && <><div className="field-copy scope-copy"><strong>{t("Found folders")}</strong><small>{discoveredCapabilityRoots.length} {t("folders")}</small></div><div className="allowed-folder-list">{discoveredCapabilityRoots.map((path) => <div className="allowed-folder-row fixed" key={path}><span><strong title={path}>{path}</strong></span></div>)}</div></>}
+        <div className="field-copy scope-copy"><strong>{t("Additional Skill folders")}</strong></div>
+        <div className="allowed-folder-list">{localCapabilityRoots.map((path) => <div className="allowed-folder-row" key={path}><span><strong title={path}>{path}</strong></span><button type="button" disabled={busy === "local-capabilities"} onClick={() => void removeLocalCapabilityFolder(path)} aria-label={t("Remove capability folder")}>×</button></div>)}</div>
+        <button className="secondary-button add-folder-button" type="button" disabled={busy === "local-capabilities"} onClick={() => void addLocalCapabilityFolder()}><PlusIcon />{t("Add folder")}</button>
+        {Boolean(activeWorkspaceCount) && <p className="hint-copy">{t("Shared changes apply when the Gateway restarts.")}</p>}
         <button className={`secondary-button remove-button ${confirmDelete ? "confirm" : ""}`} type="button" disabled={busy === "delete"} onClick={() => void removeWorkspace()}>{confirmDelete ? t("Click again to remove project") : t("Remove project")}</button>
         <p className="hint-copy">{t("Your project files stay on this Mac.")}</p>
       </div></details>

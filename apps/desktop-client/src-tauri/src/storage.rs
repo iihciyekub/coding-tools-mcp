@@ -1,4 +1,7 @@
-use crate::models::{user_home_directory, EnvironmentVariable, GatewayConfig, WorkspaceProfile};
+use crate::models::{
+    user_home_directory, validate_server_name_prefix, EnvironmentVariable, GatewayConfig,
+    WorkspaceProfile,
+};
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -332,6 +335,7 @@ impl ProfileStore {
         validate_profile_uniqueness(&self.profiles, &profile)?;
         let mut gateway = GatewayConfig::from_workspace_profile(&profile);
         gateway.local_capability_roots = self.gateway.local_capability_roots.clone();
+        gateway.auto_discover_local_capabilities = self.gateway.auto_discover_local_capabilities;
         save_gateway_secrets(&gateway)?;
         self.gateway = gateway;
         self.gateway.apply_to_workspace_profile(&mut profile);
@@ -351,6 +355,25 @@ impl ProfileStore {
         roots: Vec<String>,
     ) -> Result<GatewayConfig, String> {
         self.gateway.local_capability_roots = roots;
+        self.persist()?;
+        Ok(self.gateway.clone())
+    }
+
+    pub fn set_auto_discover_local_capabilities(
+        &mut self,
+        enabled: bool,
+    ) -> Result<GatewayConfig, String> {
+        self.gateway.auto_discover_local_capabilities = enabled;
+        self.persist()?;
+        Ok(self.gateway.clone())
+    }
+
+    pub fn set_server_name_prefix(&mut self, prefix: String) -> Result<GatewayConfig, String> {
+        validate_server_name_prefix(&prefix)?;
+        self.gateway.server_name_prefix = prefix.trim().to_string();
+        for profile in &mut self.profiles {
+            self.gateway.apply_to_workspace_profile(profile);
+        }
         self.persist()?;
         Ok(self.gateway.clone())
     }
@@ -673,6 +696,35 @@ mod tests {
             serde_json::from_slice(&std::fs::read(temporary.path().join("profiles.json")).unwrap())
                 .unwrap();
         assert_eq!(saved["language"], "zh-CN");
+    }
+
+    #[test]
+    fn shared_prefix_and_skill_discovery_settings_persist_together() {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = temporary.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let profile =
+            WorkspaceProfile::new(workspace.to_string_lossy().into_owned(), 28766).unwrap();
+        let mut store = ProfileStore {
+            home: temporary.path().to_path_buf(),
+            language: "en".into(),
+            gateway: GatewayConfig::default(),
+            profiles: vec![profile.clone()],
+            migration_warning: None,
+        };
+        assert!(store.set_server_name_prefix("bad prefix".into()).is_err());
+        store.set_server_name_prefix("my-mcp".into()).unwrap();
+        store.set_auto_discover_local_capabilities(false).unwrap();
+        let saved = store.get(&profile.id).unwrap();
+        assert_eq!(saved.runtime.server_name_prefix, "my-mcp");
+        let document: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(temporary.path().join("profiles.json")).unwrap())
+                .unwrap();
+        assert_eq!(document["gateway"]["server_name_prefix"], "my-mcp");
+        assert_eq!(
+            document["gateway"]["auto_discover_local_capabilities"],
+            false
+        );
     }
 
     #[test]

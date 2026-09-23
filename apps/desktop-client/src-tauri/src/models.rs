@@ -23,11 +23,65 @@ fn default_file_access_scope() -> String {
 fn default_server_name_prefix() -> String {
     "www".into()
 }
+fn default_auto_discover_local_capabilities() -> bool {
+    true
+}
+
+pub(crate) fn validate_server_name_prefix(value: &str) -> Result<(), String> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.chars().count() > 24
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+    {
+        return Err(
+            "MCP name prefix must be 1-24 characters using letters, numbers, '.', '-' or '_'."
+                .into(),
+        );
+    }
+    Ok(())
+}
 
 pub(crate) fn user_home_directory() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .and_then(|home| std::fs::canonicalize(home).ok())
+}
+
+fn discover_local_capability_roots_in(home: &Path, codex_home: &Path) -> Vec<String> {
+    let candidates = [
+        codex_home.join("skills"),
+        codex_home.join("plugins/cache"),
+        home.join(".claude/skills"),
+        home.join(".cursor/skills"),
+        home.join(".gemini/skills"),
+        home.join(".agents/skills"),
+        home.join(".config/opencode/skills"),
+    ];
+    let mut found = Vec::new();
+    for candidate in candidates {
+        if let Ok(path) = std::fs::canonicalize(candidate) {
+            if path.is_dir() && path != home && path.parent().is_some() {
+                let value = path.to_string_lossy().into_owned();
+                if !found.contains(&value) {
+                    found.push(value);
+                }
+            }
+        }
+    }
+    found
+}
+
+pub(crate) fn discovered_local_capability_roots() -> Vec<String> {
+    let Some(home) = user_home_directory() else {
+        return Vec::new();
+    };
+    let codex_home = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home.join(".codex"));
+    discover_local_capability_roots_in(&home, &codex_home)
 }
 fn default_allowed_paths() -> Vec<String> {
     Vec::new()
@@ -167,6 +221,8 @@ pub struct GatewayConfig {
     pub auth: AuthConfig,
     #[serde(default)]
     pub local_capability_roots: Vec<String>,
+    #[serde(default = "default_auto_discover_local_capabilities")]
+    pub auto_discover_local_capabilities: bool,
 }
 
 impl Default for GatewayConfig {
@@ -177,6 +233,7 @@ impl Default for GatewayConfig {
             tunnel: TunnelConfig::default(),
             auth: AuthConfig::default(),
             local_capability_roots: Vec::new(),
+            auto_discover_local_capabilities: true,
         }
     }
 }
@@ -189,7 +246,20 @@ impl GatewayConfig {
             tunnel: profile.tunnel.clone(),
             auth: profile.auth.clone(),
             local_capability_roots: Vec::new(),
+            auto_discover_local_capabilities: true,
         }
+    }
+
+    pub fn effective_local_capability_roots(&self) -> Vec<String> {
+        let mut roots = self.local_capability_roots.clone();
+        if self.auto_discover_local_capabilities {
+            for path in discovered_local_capability_roots() {
+                if !roots.contains(&path) {
+                    roots.push(path);
+                }
+            }
+        }
+        roots
     }
 
     pub fn apply_to_workspace_profile(&self, profile: &mut WorkspaceProfile) {
@@ -276,6 +346,7 @@ impl WorkspaceProfile {
     pub fn new_full_access(path: String, port: u16) -> Result<Self, String> {
         let mut profile = Self::new(path, port)?;
         profile.enable_full_access();
+        profile.runtime.default_search_path = "~".into();
         Ok(profile)
     }
 
@@ -299,18 +370,7 @@ impl WorkspaceProfile {
         if self.name.trim().is_empty() {
             return Err("Workspace name cannot be empty.".into());
         }
-        let server_name_prefix = self.runtime.server_name_prefix.trim();
-        if server_name_prefix.is_empty()
-            || server_name_prefix.chars().count() > 24
-            || !server_name_prefix
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
-        {
-            return Err(
-                "MCP name prefix must be 1-24 characters using letters, numbers, '.', '-' or '_'."
-                    .into(),
-            );
-        }
+        validate_server_name_prefix(&self.runtime.server_name_prefix)?;
         if self.runtime.local_port < 1024 {
             return Err("Local port must be between 1024 and 65535.".into());
         }
@@ -568,7 +628,29 @@ mod tests {
             std::fs::canonicalize(workspace.path()).unwrap()
         );
         assert!(profile.runtime.allowed_paths.is_empty());
+        assert_eq!(profile.runtime.default_search_path, "~");
         assert!(profile.validate().is_ok());
+    }
+
+    #[test]
+    fn known_agent_directories_are_discovered_without_scanning_home() {
+        let temporary = tempfile::tempdir().unwrap();
+        let home = temporary.path();
+        let codex_home = home.join(".codex");
+        std::fs::create_dir_all(codex_home.join("skills")).unwrap();
+        std::fs::create_dir_all(codex_home.join("plugins/cache")).unwrap();
+        std::fs::create_dir_all(home.join(".claude/skills")).unwrap();
+        std::fs::create_dir_all(home.join("unrelated/skills")).unwrap();
+
+        let discovered = discover_local_capability_roots_in(home, &codex_home);
+        assert_eq!(discovered.len(), 3);
+        let resolved_home = std::fs::canonicalize(home).unwrap();
+        assert!(discovered
+            .iter()
+            .all(|path| Path::new(path).starts_with(&resolved_home)));
+        assert!(!discovered.iter().any(|path| path.contains("unrelated")));
+        let old: GatewayConfig = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(old.auto_discover_local_capabilities);
     }
 
     #[test]
