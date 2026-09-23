@@ -335,16 +335,12 @@ async fn start_profile(
     let store = Arc::clone(&state.store);
     let runtime = Arc::clone(&state.runtime);
     tauri::async_runtime::spawn_blocking(move || {
-        let (profiles, gateway_config, registry_path) = {
+        let (profiles, gateway_config) = {
             let mut store = store.lock().map_err(|_| "Profile store is unavailable.")?;
             store.prepare_for_start(&profile_id)?;
-            (
-                store.profiles(),
-                store.gateway(),
-                store.project_registry_path(),
-            )
+            (store.profiles(), store.gateway())
         };
-        start_gateway(&runtime, &profiles, &gateway_config, &registry_path)
+        start_gateway(&runtime, &profiles, &gateway_config)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1429,7 +1425,7 @@ fn start_workspace_from_menu(app: AppHandle, profile_id: String) {
     tauri::async_runtime::spawn_blocking(move || {
         let result = (|| {
             let state = app.state::<DesktopState>();
-            let (profiles, gateway_config, registry_path) = {
+            let (profiles, gateway_config) = {
                 let mut store = state
                     .store
                     .lock()
@@ -1439,13 +1435,9 @@ fn start_workspace_from_menu(app: AppHandle, profile_id: String) {
                     .ok_or_else(|| "Workspace profile was not found.".to_string())?;
                 let profile = store.update(quick_tunnel_profile(profile))?;
                 store.prepare_for_start(&profile.id)?;
-                (
-                    store.profiles(),
-                    store.gateway(),
-                    store.project_registry_path(),
-                )
+                (store.profiles(), store.gateway())
             };
-            start_gateway(&state.runtime, &profiles, &gateway_config, &registry_path)?;
+            start_gateway(&state.runtime, &profiles, &gateway_config)?;
             Ok::<(), String>(())
         })();
         if let Err(error) = result {

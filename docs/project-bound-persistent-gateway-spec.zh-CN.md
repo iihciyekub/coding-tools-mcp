@@ -57,13 +57,22 @@ Registry 是可热更新的非敏感路由表：
     {
       "id": "wosaide",
       "name": "wosaide",
-      "path": "/Users/.../wosaide"
+      "path": "/Users/.../wosaide",
+      "endpoint": "http://127.0.0.1:54321/mcp",
+      "runtime_build_id": "0.4.2-0123456789abcdefabcd"
     }
   ]
 }
 ```
 
 Desktop 写 registry 时必须 atomic replace。Gateway 使用 generation / mtime 发现变化。
+Registry 是某个 Desktop App instance 的运行时状态，必须位于该 bundle 自己的
+app-local data 目录；preview/dev 与 production、旧版与新版不得共享同一个 registry
+文件或 endpoint 集合。
+
+`runtime_build_id` 来自 Desktop bundle 内置 Runtime 的内容哈希环境键。Gateway 第一次
+代理某 Project Runtime 前必须通过 `server_info.runtime_build_id` 校验实际执行器；不一致时
+返回 `PROJECT_RUNTIME_VERSION_MISMATCH`，不得继续把业务 Tool 调用发送给旧 Runtime。
 
 Registry 删除 Project 时：
 
@@ -87,6 +96,11 @@ project_context
 远程模型默认不拥有 add/remove/rename/permission mutation。
 
 Project 管理由 Desktop App 负责。
+
+若 Desktop 保存的是一个“项目容器目录”而该目录自身不是 Git repository，则 Gateway
+启动前应把其直属 Git roots 展开为独立 Project，并使用父配置 + canonical path 派生稳定
+Project ID。用户无需手工把同一父目录下的每个仓库重新添加一次。若父目录本身是 Git
+repository，则它继续作为单一 Project。
 
 ## 6. 路径语义
 
@@ -148,6 +162,10 @@ Project Runtime 继续负责：
 
 不得在 Gateway 重写上述工程能力。
 
+Gateway Runtime 与全部 Project Runtime 必须来自同一个 Desktop bundle runtime build。
+Desktop 允许借用系统 Python/uv 来创建私有环境，但不得仅凭相同 semantic version 直接
+复用系统已安装的 `coding-tools-mcp` 包；实际执行代码必须来自当前 App bundle 内置 wheel。
+
 ## 8. Desktop 数据模型
 
 目标模型：
@@ -208,6 +226,9 @@ Project 切换不得要求重新 OAuth。
 - Session project switch；
 - Project Registry 更新。
 
+Desktop App 升级或 bundle runtime build 变化时不属于热更新：旧 Gateway/Project Runtime
+必须停止，并使用新的 bundle hash 对应私有环境重新启动后再发布 endpoint。
+
 项目权限、环境变量等若需要重启，只允许重启对应 Project Runtime。
 
 ## 12. 单 Project Runtime
@@ -236,6 +257,9 @@ Gateway 不增加第二层工具发现或 workflow。除 `project_context` 外�
 7. Desktop 的 Tunnel/Auth 逐步提升为 Gateway 级配置。
 8. Project secrets 不进入 registry 明文。
 9. Python、Desktop TypeScript、Desktop Rust、compliance 全部通过。
+10. Gateway / Project Runtime `runtime_build_id` 一致；故意制造版本漂移时调用被阻断。
+11. 一个非 Git 父容器下存在多个直属 Git repo 时，registry 只发布真实子 Project，且多
+    Project 时 `default_project_id` 为空。
 
 ## 15. 当前实施顺序
 

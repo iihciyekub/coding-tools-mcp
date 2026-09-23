@@ -287,6 +287,8 @@ Before considering a desktop release complete, confirm:
 - [ ] The Cask points to the maintained fork and the exact release asset.
 - [ ] Homebrew style/info/fetch checks pass.
 - [ ] An isolated Homebrew install launches the expected desktop version.
+- [ ] The installed Desktop prepares/runs the bundled Runtime identified by its manifest `environment_key`; an unrelated globally installed `coding-tools-mcp` with the same package version is not reused as the execution runtime.
+- [ ] Gateway registry state is written under the app-local data directory, so preview/dev and production installations cannot overwrite each other's live project endpoints.
 - [ ] No signing, notarization, SSH, or GitHub private credentials were committed.
 - [ ] Release-related documentation remains consistent with this contract.
 

@@ -19,7 +19,7 @@ roots are configured, three read-only catalog tools. There is no workflow-tool m
 - `local_capabilities_search`: **optional gateway-only read-only** — Search Skill and plugin metadata in explicitly authorized directories.
 - `local_skill_read`: **optional gateway-only read-only** — Read a selected `SKILL.md` and bounded text references; it does not execute the Skill.
 - `local_plugin_inspect`: **optional gateway-only read-only** — Inspect public plugin metadata; it does not activate plugin actions or hooks.
-- `server_info`: **direct** — Return server, project-root, auth, policy, and runtime metadata when configuration or environment details matter.
+- `server_info`: **direct** — Return server, project-root, auth, policy, and runtime metadata when configuration or environment details matter. Desktop-managed runtimes also expose `runtime_build_id`, allowing the Gateway and operators to verify that schema and execution come from the same bundled runtime build.
 - `runtime_doctor`: **implemented diagnostic helper; hidden from the default model surface** — Run a non-destructive runtime health check covering common toolchain commands, workspace access, shell snapshot, LSP availability, sandbox status, network policy, and macOS Apple toolchain metadata including Xcode, Swift, SourceKit-LSP, codesign, notarytool, xcresulttool, and Homebrew.
 - `read_file`: **direct** — Read a UTF-8 text file slice inside the configured file scope. Relative paths are Project-relative; host mode also accepts host absolute and ~/... paths.
 - `read_files`: **direct** — Read bounded UTF-8 slices from multiple files in the configured file scope.

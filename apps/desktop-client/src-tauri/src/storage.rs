@@ -262,10 +262,6 @@ impl ProfileStore {
         self.migration_warning.clone()
     }
 
-    pub fn project_registry_path(&self) -> PathBuf {
-        self.home.join("project-registry.json")
-    }
-
     pub fn language(&self) -> &str {
         &self.language
     }

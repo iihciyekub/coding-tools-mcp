@@ -41,6 +41,10 @@ impl Package {
     }
 }
 
+pub(super) fn runtime_build_id(resources: &Path) -> Result<String, String> {
+    Ok(Package::read(&resources.join("runtime"))?.environment_key)
+}
+
 fn safe_component(value: &str) -> bool {
     !value.is_empty()
         && value != "."
@@ -201,22 +205,11 @@ pub(super) fn resolve(
             which::which_in(name, Some(path), resources).ok()
         }
     };
-    if let Some(program) = find("coding-tools-mcp") {
-        let mut command = Command::new(&program);
-        command.arg("--version").current_dir(resources);
-        if probe(command)
-            .is_some_and(|s| s.split_whitespace().last() == Some(package.version.as_str()))
-        {
-            return Ok((program, vec![]));
-        }
-    }
-    for name in ["python3", "python"] {
-        if let Some(python) = find(name) {
-            if usable_python(&python, &package.version) {
-                return Ok(python_command(python));
-            }
-        }
-    }
+    // Desktop must execute the exact wheel bundled with this app build.
+    // Reusing a globally installed package merely because its semantic
+    // version matches can pair a new Gateway schema with an older project
+    // runtime. System Python may still create the private environment below,
+    // but an existing coding-tools-mcp installation is never reused directly.
     let environments = data.join("runtimes");
     let target = environments.join(&package.environment_key);
     let python = python_in(&target);

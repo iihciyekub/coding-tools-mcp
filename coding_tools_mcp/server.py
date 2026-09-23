@@ -2222,6 +2222,7 @@ class Runtime:
             "server": SERVER_NAME,
             "title": SERVER_TITLE,
             "version": __version__,
+            "runtime_build_id": os.environ.get("CODING_TOOLS_MCP_RUNTIME_BUILD_ID") or None,
             "supported_protocol_versions": list(KNOWN_PROTOCOL_VERSIONS),
             **self._exec_environment_summary(),
             "auth_enabled": self.auth_enabled(),

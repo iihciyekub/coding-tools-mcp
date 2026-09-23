@@ -6,6 +6,7 @@ use chrono::Local;
 use rand::distr::{Alphanumeric, SampleString};
 use regex::Regex;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::hash::{Hash, Hasher};
@@ -119,13 +120,20 @@ struct ManagedProjectRuntime {
     runtime: ManagedChild,
     port: u16,
     fingerprint: String,
+    build_id: String,
+}
+
+#[derive(Clone)]
+struct ResolvedRuntime {
+    command: (PathBuf, Vec<String>),
+    build_id: String,
 }
 
 struct ManagedGatewaySession {
     gateway: ManagedSession,
     projects: HashMap<String, ManagedProjectRuntime>,
     registry_path: PathBuf,
-    resolved_runtime: (PathBuf, Vec<String>),
+    resolved_runtime: ResolvedRuntime,
 }
 
 #[derive(Serialize)]
@@ -141,6 +149,7 @@ struct GatewayRegistryProject {
     name: String,
     path: String,
     endpoint: String,
+    runtime_build_id: String,
 }
 
 fn new_server_name(prefix: &str) -> String {
@@ -366,13 +375,13 @@ pub fn start_gateway(
     manager: &Arc<Mutex<RuntimeManager>>,
     profiles: &[WorkspaceProfile],
     gateway_config: &GatewayConfig,
-    registry_path: &Path,
 ) -> Result<RuntimeStatus, String> {
     let gateway_profile = profiles
         .first()
         .cloned()
         .ok_or("Add at least one project before starting the Gateway.")?;
-    for profile in profiles {
+    let project_profiles = gateway_project_profiles(profiles)?;
+    for profile in &project_profiles {
         profile.validate()?;
     }
     let operation = Arc::new(PendingOperation::default());
@@ -399,16 +408,25 @@ pub fn start_gateway(
 
     let log_dir = data.join("logs").join("gateway");
     fs::create_dir_all(&log_dir).map_err(|error| error.to_string())?;
-    let resolved = environment::resolve(&resources, &data, &log_dir, &effective_path(), cancelled);
+    let runtime_build_id = environment::runtime_build_id(&resources)?;
+    let registry_path = data
+        .join("gateway")
+        .join(&runtime_build_id)
+        .join("project-registry.json");
+    let resolved = environment::resolve(&resources, &data, &log_dir, &effective_path(), cancelled)
+        .map(|command| ResolvedRuntime {
+            command,
+            build_id: runtime_build_id,
+        });
     let runtime_ready = resolved.is_ok();
     let startup = resolved.and_then(|resolved| {
         if gateway_profile.tunnel.r#type == "cloudflare" && resolve_cloudflared(&data).is_err() {
             resource_installer::install("cloudflared", &data, cancelled)?;
         }
         start_gateway_session(
-            profiles,
+            &project_profiles,
             (&gateway_profile, gateway_config),
-            registry_path,
+            &registry_path,
             &log_dir,
             resolved,
             &data,
@@ -496,7 +514,8 @@ pub fn reconcile_gateway_projects(
     manager: &Arc<Mutex<RuntimeManager>>,
     profiles: &[WorkspaceProfile],
 ) -> Result<(), String> {
-    for profile in profiles {
+    let profiles = gateway_project_profiles(profiles)?;
+    for profile in &profiles {
         profile.validate()?;
     }
     let (resolved, data, registry_path, current_ids, current_fingerprints) = {
@@ -556,7 +575,7 @@ pub fn reconcile_gateway_projects(
         project.runtime.terminate();
     }
 
-    for profile in profiles {
+    for profile in &profiles {
         let needs_start = {
             let state = manager
                 .lock()
@@ -573,7 +592,8 @@ pub fn reconcile_gateway_projects(
         let project = spawn_project_runtime(
             profile,
             &project_log_dir,
-            resolved.clone(),
+            resolved.command.clone(),
+            &resolved.build_id,
             &data.join("state"),
             profile.runtime.local_port,
         )?;
@@ -594,7 +614,7 @@ pub fn reconcile_gateway_projects(
         .gateway
         .as_ref()
         .ok_or("Gateway stopped during reconciliation.")?;
-    write_gateway_registry(&registry_path, profiles, &session.projects)
+    write_gateway_registry(&registry_path, &profiles, &session.projects)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -629,13 +649,21 @@ pub fn start_workspace(
         (state.resource_dir.clone(), state.data_dir.clone())
     };
     // Resolve dependencies and launch processes without holding the UI/status mutex.
+    let runtime_build_id = environment::runtime_build_id(&resources)?;
     let resolved = environment::resolve(&resources, &data, log_dir, &effective_path(), cancelled);
     let runtime_ready = resolved.is_ok();
     let startup = resolved.and_then(|resolved| {
         if profile.tunnel.r#type == "cloudflare" && resolve_cloudflared(&data).is_err() {
             resource_installer::install("cloudflared", &data, cancelled)?;
         }
-        start_session(profile, log_dir, resolved, &data, cancelled)
+        start_session(
+            profile,
+            log_dir,
+            resolved,
+            &runtime_build_id,
+            &data,
+            cancelled,
+        )
     });
     let mut state = manager
         .lock()
@@ -784,6 +812,75 @@ fn project_runtime_fingerprint(profile: &WorkspaceProfile) -> String {
     format!("{:016x}", hasher.finish())
 }
 
+fn derived_project_id(parent_id: &str, path: &Path) -> String {
+    let mut digest = Sha256::new();
+    digest.update(parent_id.as_bytes());
+    digest.update(b"\0");
+    digest.update(path.as_os_str().as_encoded_bytes());
+    let hex = format!("{:x}", digest.finalize());
+    hex[..32].to_string()
+}
+
+fn direct_git_projects(profile: &WorkspaceProfile) -> Result<Vec<WorkspaceProfile>, String> {
+    let root = fs::canonicalize(&profile.path).map_err(|error| error.to_string())?;
+    if root.join(".git").exists() {
+        return Ok(vec![profile.clone()]);
+    }
+    let mut children = fs::read_dir(&root)
+        .map_err(|error| {
+            format!(
+                "Could not inspect project container {}: {error}",
+                root.display()
+            )
+        })?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir() && path.join(".git").exists())
+        .collect::<Vec<_>>();
+    children.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+    if children.is_empty() {
+        return Ok(vec![profile.clone()]);
+    }
+    children
+        .into_iter()
+        .map(|child| {
+            let resolved = fs::canonicalize(&child).map_err(|error| error.to_string())?;
+            let mut derived = profile.clone();
+            derived.id = derived_project_id(&profile.id, &resolved);
+            derived.name = resolved
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or(&profile.name)
+                .to_string();
+            derived.path = resolved.to_string_lossy().into_owned();
+            Ok(derived)
+        })
+        .collect()
+}
+
+fn gateway_project_profiles(
+    profiles: &[WorkspaceProfile],
+) -> Result<Vec<WorkspaceProfile>, String> {
+    let explicit_roots = profiles
+        .iter()
+        .map(|profile| fs::canonicalize(&profile.path).map_err(|error| error.to_string()))
+        .collect::<Result<std::collections::HashSet<_>, _>>()?;
+    let mut expanded = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for profile in profiles {
+        for project in direct_git_projects(profile)? {
+            let canonical = fs::canonicalize(&project.path).map_err(|error| error.to_string())?;
+            if project.id != profile.id && explicit_roots.contains(&canonical) {
+                continue;
+            }
+            if seen.insert(canonical) {
+                expanded.push(project);
+            }
+        }
+    }
+    Ok(expanded)
+}
+
 fn effective_default_search_path(profile: &WorkspaceProfile) -> &str {
     let configured = profile.runtime.default_search_path.trim();
     if configured.is_empty() && profile.runtime.permission_mode == "host" {
@@ -813,6 +910,7 @@ fn spawn_project_runtime(
     profile: &WorkspaceProfile,
     log_dir: &Path,
     resolved: (PathBuf, Vec<String>),
+    runtime_build_id: &str,
     runtime_state_root: &Path,
     gateway_port: u16,
 ) -> Result<ManagedProjectRuntime, String> {
@@ -845,7 +943,8 @@ fn spawn_project_runtime(
     }
     command
         .current_dir(&profile.path)
-        .env("PATH", effective_path());
+        .env("PATH", effective_path())
+        .env("CODING_TOOLS_MCP_RUNTIME_BUILD_ID", runtime_build_id);
     if let Some(ssh_auth_sock) = effective_ssh_auth_sock() {
         command.env("SSH_AUTH_SOCK", ssh_auth_sock);
     }
@@ -884,6 +983,7 @@ fn spawn_project_runtime(
         runtime,
         port,
         fingerprint: project_runtime_fingerprint(profile),
+        build_id: runtime_build_id.to_string(),
     })
 }
 
@@ -902,6 +1002,7 @@ fn write_gateway_registry(
                     name: profile.name.clone(),
                     path: profile.path.clone(),
                     endpoint: format!("http://127.0.0.1:{}{MCP_ENDPOINT_PATH}", project.port),
+                    runtime_build_id: project.build_id.clone(),
                 })
         })
         .collect::<Vec<_>>();
@@ -911,7 +1012,11 @@ fn write_gateway_registry(
         .as_millis();
     let document = GatewayRegistryDocument {
         generation,
-        default_project_id: entries.first().map(|entry| entry.id.clone()),
+        default_project_id: if entries.len() == 1 {
+            entries.first().map(|entry| entry.id.clone())
+        } else {
+            None
+        },
         projects: entries,
     };
     let parent = path.parent().ok_or("Invalid Gateway registry path.")?;
@@ -937,12 +1042,12 @@ fn spawn_gateway_runtime(
     control_dir: &Path,
     registry_path: &Path,
     log_dir: &Path,
-    resolved: (PathBuf, Vec<String>),
+    resolved: &ResolvedRuntime,
     runtime_state_root: &Path,
     server_name: &str,
 ) -> Result<ManagedChild, String> {
     let (profile, gateway_config) = gateway;
-    let (program, prefix) = resolved;
+    let (program, prefix) = &resolved.command;
     let mut command = Command::new(program);
     command
         .args(prefix)
@@ -969,7 +1074,8 @@ fn spawn_gateway_runtime(
     }
     command
         .current_dir(control_dir)
-        .env("PATH", effective_path());
+        .env("PATH", effective_path())
+        .env("CODING_TOOLS_MCP_RUNTIME_BUILD_ID", &resolved.build_id);
     if let Some(ssh_auth_sock) = effective_ssh_auth_sock() {
         command.env("SSH_AUTH_SOCK", ssh_auth_sock);
     }
@@ -1022,7 +1128,7 @@ fn start_gateway_session(
     gateway: (&WorkspaceProfile, &GatewayConfig),
     registry_path: &Path,
     log_dir: &Path,
-    resolved: (PathBuf, Vec<String>),
+    resolved: ResolvedRuntime,
     data_dir: &Path,
     cancelled: &AtomicBool,
 ) -> Result<ManagedGatewaySession, String> {
@@ -1048,7 +1154,8 @@ fn start_gateway_session(
         match spawn_project_runtime(
             profile,
             &project_log_dir,
-            resolved.clone(),
+            resolved.command.clone(),
+            &resolved.build_id,
             &data_dir.join("state"),
             gateway_profile.runtime.local_port,
         ) {
@@ -1079,7 +1186,7 @@ fn start_gateway_session(
         &control_dir,
         registry_path,
         log_dir,
-        resolved.clone(),
+        &resolved,
         &data_dir.join("state"),
         &server_name,
     ) {
@@ -1162,6 +1269,7 @@ fn start_session(
     profile: &WorkspaceProfile,
     log_dir: &Path,
     resolved: (PathBuf, Vec<String>),
+    runtime_build_id: &str,
     data_dir: &Path,
     cancelled: &AtomicBool,
 ) -> Result<ManagedSession, String> {
@@ -1180,6 +1288,7 @@ fn start_session(
         profile,
         log_dir,
         resolved,
+        runtime_build_id,
         &data_dir.join("state"),
         &server_name,
     )?;
@@ -1318,6 +1427,7 @@ fn spawn_runtime(
     profile: &WorkspaceProfile,
     log_dir: &Path,
     resolved: (PathBuf, Vec<String>),
+    runtime_build_id: &str,
     runtime_state_root: &Path,
     server_name: &str,
 ) -> Result<ManagedChild, String> {
@@ -1351,7 +1461,8 @@ fn spawn_runtime(
     }
     command
         .current_dir(&profile.path)
-        .env("PATH", effective_path());
+        .env("PATH", effective_path())
+        .env("CODING_TOOLS_MCP_RUNTIME_BUILD_ID", runtime_build_id);
     if let Some(ssh_auth_sock) = effective_ssh_auth_sock() {
         command.env("SSH_AUTH_SOCK", ssh_auth_sock);
     }
@@ -1861,6 +1972,7 @@ while True:
                     which::which("python3").unwrap(),
                     vec![script.to_string_lossy().into_owned()],
                 ),
+                "test-build",
                 temporary.path(),
                 "test-server",
             )
@@ -1983,6 +2095,7 @@ while True:
                     which::which("python3").unwrap(),
                     vec![script.to_string_lossy().into_owned()],
                 ),
+                "test-build",
                 temporary.path(),
                 &AtomicBool::new(false),
             )
@@ -2011,6 +2124,56 @@ while True:
                 thread::sleep(Duration::from_millis(25));
             }
         }
+    }
+
+    #[test]
+    fn gateway_projects_expand_a_non_git_container_into_stable_direct_git_projects() {
+        let temporary = tempfile::tempdir().unwrap();
+        let container = temporary.path().join("ii-research");
+        let alpha = container.join("alpha");
+        let beta = container.join("beta");
+        let plain = container.join("plain");
+        fs::create_dir_all(alpha.join(".git")).unwrap();
+        fs::create_dir_all(beta.join(".git")).unwrap();
+        fs::create_dir_all(&plain).unwrap();
+        let profile =
+            WorkspaceProfile::new(container.to_string_lossy().into_owned(), 28766).unwrap();
+
+        let first = gateway_project_profiles(std::slice::from_ref(&profile)).unwrap();
+        let second = gateway_project_profiles(std::slice::from_ref(&profile)).unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(
+            first
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "beta"]
+        );
+        assert_eq!(
+            first.iter().map(|item| item.id.clone()).collect::<Vec<_>>(),
+            second
+                .iter()
+                .map(|item| item.id.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(first
+            .iter()
+            .all(|item| item.id.len() == 32 && item.id.chars().all(|ch| ch.is_ascii_hexdigit())));
+        assert!(first.iter().all(|item| Path::new(&item.path) != container));
+
+        let mut explicit_beta =
+            WorkspaceProfile::new(beta.to_string_lossy().into_owned(), 28766).unwrap();
+        explicit_beta.name = "beta-explicit".into();
+        explicit_beta.runtime.permission_mode = "host".into();
+        let with_explicit = gateway_project_profiles(&[profile.clone(), explicit_beta.clone()]).unwrap();
+        assert_eq!(with_explicit.len(), 2);
+        let beta_project = with_explicit
+            .iter()
+            .find(|item| Path::new(&item.path) == beta)
+            .unwrap();
+        assert_eq!(beta_project.id, explicit_beta.id);
+        assert_eq!(beta_project.name, "beta-explicit");
+        assert_eq!(beta_project.runtime.permission_mode, "host");
     }
 
     #[test]
@@ -2060,10 +2223,13 @@ while True:
             (&first, &GatewayConfig::from_workspace_profile(&first)),
             &registry_path,
             &temporary.path().join("gateway-logs"),
-            (
-                which::which("python3").unwrap(),
-                vec![script.to_string_lossy().into_owned()],
-            ),
+            ResolvedRuntime {
+                command: (
+                    which::which("python3").unwrap(),
+                    vec![script.to_string_lossy().into_owned()],
+                ),
+                build_id: "test-build".into(),
+            },
             &data,
             &AtomicBool::new(false),
         )
@@ -2080,6 +2246,12 @@ while True:
         let registry: serde_json::Value =
             serde_json::from_slice(&fs::read(&registry_path).unwrap()).unwrap();
         assert_eq!(registry["projects"].as_array().unwrap().len(), 2);
+        assert!(registry["default_project_id"].is_null());
+        assert!(registry["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["runtime_build_id"] == "test-build"));
         assert!(registry["projects"]
             .as_array()
             .unwrap()

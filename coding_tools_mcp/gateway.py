@@ -35,6 +35,16 @@ RETRYABLE_READ_TOOLS = frozenset({
 })
 
 
+class ProjectRuntimeBuildMismatch(RuntimeError):
+    def __init__(self, project_id: str, expected: str, actual: str | None) -> None:
+        self.project_id = project_id
+        self.expected = expected
+        self.actual = actual
+        super().__init__(
+            f"Project runtime build mismatch for {project_id}: expected {expected}, got {actual or 'missing'}"
+        )
+
+
 def _loopback_endpoint(raw: str) -> str:
     parsed = urllib.parse.urlparse(raw)
     if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
@@ -59,6 +69,7 @@ class HTTPProjectRuntime:
         self._counter = 0
         self._lock = threading.Lock()
         self._state = "configured"
+        self._build_validated = False
 
     @property
     def state(self) -> str:
@@ -133,6 +144,26 @@ class HTTPProjectRuntime:
     ) -> dict[str, Any]:
         del context
         tool_arguments = arguments or {}
+        try:
+            self._validate_runtime_build()
+        except ProjectRuntimeBuildMismatch as exc:
+            self._set_state("unreachable")
+            payload = {
+                "ok": False,
+                "error": {
+                    "code": "PROJECT_RUNTIME_VERSION_MISMATCH",
+                    "message": str(exc),
+                    "category": "runtime",
+                    "retryable": True,
+                    "details": {
+                        "project_id": self.definition.id,
+                        "endpoint": self.endpoint,
+                        "expected_runtime_build_id": exc.expected,
+                        "actual_runtime_build_id": exc.actual,
+                    },
+                },
+            }
+            return make_tool_result(name, payload, is_error=True)
         retry_safe = (
             name in RETRYABLE_READ_TOOLS
             or (name == "exec_command" and bool(tool_arguments.get("operation_id")))
@@ -170,6 +201,18 @@ class HTTPProjectRuntime:
         }
         return make_tool_result(name, payload, is_error=True)
 
+    def _validate_runtime_build(self) -> None:
+        expected = self.definition.runtime_build_id
+        if not expected or self._build_validated:
+            return
+        result = self._rpc("tools/call", {"name": "server_info", "arguments": {}})
+        structured = result.get("structuredContent")
+        actual = structured.get("runtime_build_id") if isinstance(structured, dict) else None
+        actual_value = str(actual).strip() if actual is not None else None
+        if actual_value != expected:
+            raise ProjectRuntimeBuildMismatch(self.definition.id, expected, actual_value)
+        self._build_validated = True
+
     def close(self) -> None:
         return
 
@@ -180,6 +223,7 @@ class ProjectDefinition:
     name: str
     path: Path
     endpoint: str | None = None
+    runtime_build_id: str | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "ProjectDefinition":
@@ -187,6 +231,7 @@ class ProjectDefinition:
         raw_name = str(value.get("name") or "").strip()
         raw_path = str(value.get("path") or "").strip()
         raw_endpoint = str(value.get("endpoint") or "").strip()
+        raw_runtime_build_id = str(value.get("runtime_build_id") or "").strip()
         if not raw_id:
             raise ValueError("project id is required")
         if len(raw_id) > 200:
@@ -202,6 +247,7 @@ class ProjectDefinition:
             name=raw_name or path.name or raw_id,
             path=path,
             endpoint=endpoint,
+            runtime_build_id=raw_runtime_build_id or None,
         )
 
     def payload(self, *, runtime_state: str) -> dict[str, Any]:
@@ -210,6 +256,7 @@ class ProjectDefinition:
             "name": self.name,
             "root": str(self.path),
             "runtime_state": runtime_state,
+            "runtime_build_id": self.runtime_build_id,
         }
 
 
@@ -400,6 +447,7 @@ class ProjectRegistry:
                 and (
                     self._definitions[project_id].path != definition.path
                     or self._definitions[project_id].endpoint != definition.endpoint
+                    or self._definitions[project_id].runtime_build_id != definition.runtime_build_id
                 )
             }
             invalidated = removed | changed

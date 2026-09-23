@@ -338,6 +338,36 @@ class GatewayUnitTests(unittest.TestCase):
         self.assertEqual(opened.call_count, 1)
         self.assertEqual(runtime.state, "unreachable")
 
+    def test_project_proxy_blocks_runtime_build_mismatch_before_tool_execution(self) -> None:
+        definition = ProjectDefinition(
+            "project",
+            "Project",
+            Path("/tmp/project"),
+            "http://127.0.0.1:12345/mcp",
+            "new-build",
+        )
+        runtime = HTTPProjectRuntime(definition)
+        response = _FakeHTTPResponse(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "content": [],
+                    "structuredContent": {"ok": True, "runtime_build_id": "old-build"},
+                    "isError": False,
+                },
+            }
+        )
+        with mock.patch(
+            "coding_tools_mcp.gateway.urllib.request.urlopen",
+            return_value=response,
+        ) as opened:
+            result = runtime.call_tool("read_file", {"path": "README.md"})
+        self.assertTrue(result["isError"])
+        self.assertEqual(result["structuredContent"]["error"]["code"], "PROJECT_RUNTIME_VERSION_MISMATCH")
+        self.assertEqual(opened.call_count, 1)
+        self.assertEqual(runtime.state, "unreachable")
+
     def test_sessions_keep_project_selection_isolated_and_runtimes_are_lazy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
