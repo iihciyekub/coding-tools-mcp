@@ -518,16 +518,22 @@ pub fn reconcile_gateway_projects(
     for profile in &profiles {
         profile.validate()?;
     }
-    let (resolved, data, registry_path, current_ids, current_fingerprints) = {
-        let state = manager
+    let (resolved, data, registry_path, current_ids, current_fingerprints, dead_ids) = {
+        let mut state = manager
             .lock()
             .map_err(|_| "Runtime manager is unavailable")?;
-        let Some(session) = state.gateway.as_ref() else {
+        let data = state.data_dir.clone();
+        let Some(session) = state.gateway.as_mut() else {
             return Ok(());
         };
+        let dead_ids = session
+            .projects
+            .iter_mut()
+            .filter_map(|(id, project)| (!project.runtime.is_running()).then(|| id.clone()))
+            .collect::<std::collections::HashSet<_>>();
         (
             session.resolved_runtime.clone(),
-            state.data_dir.clone(),
+            data,
             session.registry_path.clone(),
             session.projects.keys().cloned().collect::<Vec<_>>(),
             session
@@ -535,6 +541,7 @@ pub fn reconcile_gateway_projects(
                 .iter()
                 .map(|(id, project)| (id.clone(), project.fingerprint.clone()))
                 .collect::<HashMap<_, _>>(),
+            dead_ids,
         )
     };
     let desired = profiles
@@ -549,9 +556,10 @@ pub fn reconcile_gateway_projects(
     let restart = profiles
         .iter()
         .filter(|profile| {
-            current_fingerprints
-                .get(&profile.id)
-                .is_some_and(|fingerprint| fingerprint != &desired[&profile.id])
+            dead_ids.contains(&profile.id)
+                || current_fingerprints
+                    .get(&profile.id)
+                    .is_some_and(|fingerprint| fingerprint != &desired[&profile.id])
         })
         .map(|profile| profile.id.clone())
         .collect::<Vec<_>>();
@@ -2265,6 +2273,117 @@ while True:
         assert!(!port_is_listening(gateway_port));
         assert!(!port_is_listening(first_port));
         assert!(!port_is_listening(second_port));
+    }
+
+    #[test]
+    fn reconcile_restarts_a_dead_project_runtime_and_rewrites_registry() {
+        let temporary = tempfile::tempdir().unwrap();
+        let first_root = temporary.path().join("first");
+        let second_root = temporary.path().join("second");
+        fs::create_dir_all(&first_root).unwrap();
+        fs::create_dir_all(&second_root).unwrap();
+        let script = temporary.path().join("listener.py");
+        fs::write(
+            &script,
+            r#"
+import argparse, socket
+parser = argparse.ArgumentParser()
+parser.add_argument('--port', type=int, required=True)
+args, _ = parser.parse_known_args()
+listener = socket.socket()
+listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+listener.bind(('127.0.0.1', args.port))
+listener.listen(64)
+while True:
+    connection, _ = listener.accept()
+    connection.close()
+"#,
+        )
+        .unwrap();
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let gateway_port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let mut first =
+            WorkspaceProfile::new(first_root.to_string_lossy().into_owned(), gateway_port).unwrap();
+        let mut second =
+            WorkspaceProfile::new(second_root.to_string_lossy().into_owned(), gateway_port)
+                .unwrap();
+        for profile in [&mut first, &mut second] {
+            profile.tunnel.r#type = "frp".into();
+            profile.tunnel.frp_server = "example.test".into();
+            profile.tunnel.frp_subdomain = "gateway".into();
+        }
+        let profiles = vec![first.clone(), second.clone()];
+        let registry_path = temporary.path().join("project-registry.json");
+        let data = temporary.path().join("data");
+        fs::create_dir_all(&data).unwrap();
+        let session = start_gateway_session(
+            &profiles,
+            (&first, &GatewayConfig::from_workspace_profile(&first)),
+            &registry_path,
+            &temporary.path().join("gateway-logs"),
+            ResolvedRuntime {
+                command: (
+                    which::which("python3").unwrap(),
+                    vec![script.to_string_lossy().into_owned()],
+                ),
+                build_id: "test-build".into(),
+            },
+            &data,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let manager = Arc::new(Mutex::new(RuntimeManager::new()));
+        {
+            let mut state = manager.lock().unwrap();
+            state.configure_environment(temporary.path().to_path_buf(), data.clone());
+            state.gateway = Some(session);
+        }
+        let old_pid = {
+            let mut state = manager.lock().unwrap();
+            let project = state
+                .gateway
+                .as_mut()
+                .unwrap()
+                .projects
+                .get_mut(&first.id)
+                .unwrap();
+            let pid = project.runtime.child.id();
+            project.runtime.terminate();
+            pid
+        };
+
+        reconcile_gateway_projects(&manager, &profiles).unwrap();
+
+        let (new_pid, new_port) = {
+            let mut state = manager.lock().unwrap();
+            let project = state
+                .gateway
+                .as_mut()
+                .unwrap()
+                .projects
+                .get_mut(&first.id)
+                .unwrap();
+            assert!(project.runtime.is_running());
+            (project.runtime.child.id(), project.port)
+        };
+        assert_ne!(old_pid, new_pid);
+        assert!(port_is_listening(new_port));
+        let registry: serde_json::Value =
+            serde_json::from_slice(&fs::read(&registry_path).unwrap()).unwrap();
+        let entry = registry["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == first.id)
+            .unwrap();
+        assert_eq!(entry["runtime_build_id"], "test-build");
+        assert_eq!(
+            entry["endpoint"],
+            format!("http://127.0.0.1:{new_port}{MCP_ENDPOINT_PATH}")
+        );
+        let mut session = manager.lock().unwrap().gateway.take().unwrap();
+        terminate_gateway_session(&mut session);
     }
 
     #[test]

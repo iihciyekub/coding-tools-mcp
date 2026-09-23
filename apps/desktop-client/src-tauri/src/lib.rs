@@ -58,6 +58,7 @@ struct DesktopSnapshot {
 
 #[tauri::command]
 fn desktop_snapshot(state: tauri::State<'_, DesktopState>) -> Result<DesktopSnapshot, String> {
+    reconcile_project_runtimes(state.inner())?;
     let (profiles, gateway, migration_warning, language) = {
         let store = state
             .store

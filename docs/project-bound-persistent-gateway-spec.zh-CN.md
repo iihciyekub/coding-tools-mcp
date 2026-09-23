@@ -74,6 +74,10 @@ Registry 是某个 Desktop App instance / runtime build 的运行时状态，必
 代理某 Project Runtime 前必须通过 `server_info.runtime_build_id` 校验实际执行器；不一致时
 返回 `PROJECT_RUNTIME_VERSION_MISMATCH`，不得继续把业务 Tool 调用发送给旧 Runtime。
 
+Desktop 的现有 snapshot reconcile 同时承担轻量自愈：如果某个 Project Runtime 子进程
+已经退出，则用当前 bundle 的同一 `runtime_build_id` 重新启动该 Project Runtime，并原子
+更新 registry endpoint；不额外创建常驻 health-monitor 服务。
+
 Registry 删除 Project 时：
 
 1. 停止接收该 Project 的新路由；
