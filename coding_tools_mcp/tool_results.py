@@ -35,31 +35,16 @@ def make_tool_result(
 
 
 def _compact_structured_content(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
-    """Keep model-visible large text in MCP content instead of mirroring it twice."""
-    structured = dict(payload)
-    heavy_fields = {
-        "read_file": ("content",),
-        "read_output": ("content",),
-        "git_diff": ("diff",),
-        "git_show": ("content",),
-        "exec_command": ("stdout", "stderr", "preview"),
-        "write_stdin": ("stdout", "stderr", "preview"),
-    }
-    for key in heavy_fields.get(tool_name, ()):
-        structured.pop(key, None)
-    if tool_name == "read_files" and isinstance(structured.get("files"), list):
-        structured["files"] = [
-            {key: value for key, value in item.items() if key != "content"}
-            if isinstance(item, dict) else item
-            for item in structured["files"]
-        ]
-    if tool_name == "search_text" and isinstance(structured.get("matches"), list):
-        structured["matches"] = [
-            {key: value for key, value in item.items() if key not in {"preview", "before", "after"}}
-            if isinstance(item, dict) else item
-            for item in structured["matches"]
-        ]
-    return structured
+    """Preserve the complete typed result for structured MCP clients.
+
+    ChatGPT's typed connector consumes ``structuredContent`` directly. Large
+    text fields therefore must remain present here even when the same text is
+    also rendered into MCP ``content`` for clients that primarily consume text
+    blocks. Correctness and cross-client compatibility take precedence over
+    wire-level de-duplication.
+    """
+    del tool_name
+    return dict(payload)
 
 
 def render_tool_text(tool_name: str, payload: dict[str, Any], *, is_error: bool) -> str:

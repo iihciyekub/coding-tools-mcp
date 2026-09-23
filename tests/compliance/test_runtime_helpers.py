@@ -1289,13 +1289,13 @@ Maven home: /usr/share/maven
             self.assertEqual(payload["processed_count"], 1)
             self.assertEqual(payload["remaining_request_count"], 1)
             self.assertIs(payload["truncated"], True)
-            self.assertNotIn("content", payload["files"][0])
+            self.assertEqual(payload["files"][0]["content"], "aaaaa")
             self.assertIn("aaaaa", self.agent_text(first))
             action = payload["next_action"]
             self.assertEqual(action["tool"], "read_files")
             self.assertEqual(action["arguments"]["requests"], [{"path": "second.txt"}])
             second = runtime.call_tool(action["tool"], action["arguments"])
-            self.assertNotIn("content", second["structuredContent"]["files"][0])
+            self.assertEqual(second["structuredContent"]["files"][0]["content"], "bbbbb")
             self.assertIn("bbbbb", self.agent_text(second))
             self.assertIn("### first.txt", self.agent_text(first))
             runtime.close()
@@ -1318,7 +1318,7 @@ Maven home: /usr/share/maven
                 for item in result["content"]
                 if item.get("type") == "text"
             )
-            self.assertNotIn("content", payload)
+            self.assertEqual(payload["content"], content)
             self.assertEqual(model_text, content)
             self.assertNotIn("preview truncated", model_text)
 

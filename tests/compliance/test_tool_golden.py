@@ -35,7 +35,7 @@ class ReadFileGoldenTests(ComplianceTestCase):
         unchanged_payload = self.assert_tool_success(unchanged)
         self.assertIs(unchanged_payload.get("unchanged"), True)
         self.assertEqual(unchanged_payload.get("bytes_read"), 0)
-        self.assertNotIn("content", unchanged_payload)
+        self.assertEqual(unchanged_payload.get("content"), "")
         model_text = "\n".join(
             item["text"]
             for item in unchanged.get("content", [])
@@ -360,7 +360,7 @@ def assert_search_entries_have_shape(testcase: ComplianceTestCase, payload: dict
     first = entries[0]
     testcase.assertIsInstance(first.get("path"), str)
     testcase.assertIsInstance(first.get("line"), int)
-    testcase.assertNotIn("preview", first)
+    testcase.assertIsInstance(first.get("preview"), str)
 
 
 def json_dump(payload: dict[str, Any]) -> str:
