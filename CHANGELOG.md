@@ -1,27 +1,36 @@
 # Changelog
 
-## Unreleased - macOS Runtime Simplification
+## Desktop 0.5.2
+
+- Bound Desktop to the exact bundled Runtime build instead of reusing a system
+  installation that merely reports the same semantic version.
+- Isolated Gateway registries by Runtime build and rejected Gateway/Project
+  Runtime version skew before forwarding tool calls.
+- Expanded non-Git project containers into stable direct Git projects without
+  forcing users to re-create Desktop profiles.
+- Added lightweight Project Runtime recovery and avoided no-op registry rewrites
+  when project endpoints and Runtime build identities are unchanged.
+
+## 0.4.3 - 2026-09-23
 
 - Reframed Coding Tools MCP as a macOS-first primitive coding runtime rather
-  than a second agent/workflow engine.
-- Reduced the registered MCP surface to 31 tools: 22 direct tools in a normal
-  project runtime, 8 deferred helpers, plus gateway-only `project_context`.
-- Removed persistent Task/Plan, Review, Checkpoint/Context Checkpoint,
-  `checks_run`/`checks_result`, Protocol Tasks, workspace Skills, local-agent
-  discovery, Repo Map/change-impact analysis, semantic rename preview, shell
-  snapshot, and the lightweight exec-environment tool.
-- Removed Git branch/stage/commit/worktree wrapper tools. Git writes and
-  worktree workflows now use native `git` through `exec_command`, while the MCP
-  keeps high-value read-only Git evidence (`status`, `diff`, `log`, `show`,
-  `blame`).
-- Removed the optional Playwright/browser-check helper and its dependency;
-  browser automation is outside this coding runtime.
-- Kept Project Gateway session isolation and made Project Root the default
-  context boundary while permission scope remains the maximum authority.
-- Tightened the CI tool-surface budget to 32 registered tools, 16,000 bytes of
-  total input schemas, and 2,048 bytes per schema.
-- Replaced legacy runtime/migration/archive documentation with the single live
-  macOS-first contract and specification.
+  than a second agent/workflow engine and reduced the default Project Runtime
+  surface to 22 model-facing tools.
+- Standardized Project Root semantics across file, Git, command, diagnostics,
+  overview, and code-navigation tools while keeping permission scope separate
+  from the default project boundary.
+- Added stateless Gateway routing with an optional `project=<name/path/id>`
+  selector so ChatGPT Web remains reliable even when consecutive tool calls use
+  different MCP transport sessions.
+- Added `read_file.if_revision` and `get_command(wait_ms)` so repeated reads and
+  long-running command recovery avoid unnecessary payloads and polling misuse.
+- Preserved full typed `structuredContent` for ChatGPT connectors while keeping
+  MCP text content for clients that primarily consume text blocks.
+- Simplified the Agent-facing catalog by hiding low-value helper wrappers from
+  the default surface and relying on native Git/CLI commands where wrappers do
+  not add Agent value.
+- Kept Project Gateway selection explicit and human-readable while validating
+  Project Runtime build identity before forwarding requests.
 
 ## Desktop 0.4.2
 

@@ -59,7 +59,7 @@ Registry 是可热更新的非敏感路由表：
       "name": "wosaide",
       "path": "/Users/.../wosaide",
       "endpoint": "http://127.0.0.1:54321/mcp",
-      "runtime_build_id": "0.4.2-0123456789abcdefabcd"
+      "runtime_build_id": "0.4.3-0123456789abcdefabcd"
     }
   ]
 }
