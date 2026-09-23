@@ -171,7 +171,7 @@ class MultiProjectTests(unittest.TestCase):
         self.assertTrue(first["scan_complete"])
         (self.b / "src/same.py").write_text("unrelated change", encoding="utf-8")
         self.assertEqual(first["fingerprint"], workspace_fingerprint(self.workspace, self.a, max_files=3)["fingerprint"])
-        overview = self.call("workspace_overview", {"path": "project-a", "max_files": 3})
+        overview = self.call("project_overview", {"path": "project-a", "max_files": 3})
         self.assertTrue(overview["scan_complete"])
         self.assertEqual(overview["path"], "project-a")
         self.assertNotIn("project-b", str(overview["manifests"]))

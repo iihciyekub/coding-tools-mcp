@@ -1213,7 +1213,7 @@ Maven home: /usr/share/maven
             self.assertNotIn("git_blame", names)
             self.assertNotIn("checks_discover", names)
             self.assertNotIn("code_symbols", names)
-            self.assertIn("workspace_overview", names)
+            self.assertIn("project_overview", names)
             self.assertNotIn("tool_search", names)
             self.assertNotIn("tool_invoke", names)
             self.assertFalse(any(name.startswith("browser_") for name in names))

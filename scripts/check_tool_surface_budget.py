@@ -17,7 +17,8 @@ def measure() -> dict[str, Any]:
     default_names = {
         name
         for name, spec in TOOL_REGISTRY.items()
-        if name not in DEFAULT_HIDDEN_TOOLS and spec.gated_by is None
+        if name not in DEFAULT_HIDDEN_TOOLS
+        and spec.gated_by not in {"enable_project_gateway", "enable_local_capabilities"}
     }
     rows: list[dict[str, Any]] = []
     for name in sorted(default_names):

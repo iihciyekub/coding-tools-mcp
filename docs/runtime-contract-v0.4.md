@@ -105,7 +105,7 @@ Annotations: `{"title":"Runtime doctor","readOnlyHint":true,"destructiveHint":fa
 
 Exposure: **direct**.
 
-Read a UTF-8 text file slice inside the configured file scope. Relative paths are workspace-relative; host mode also accepts host absolute and ~/... paths.
+Read a UTF-8 text file slice inside the configured file scope. Relative paths are Project-relative; host mode also accepts host absolute and ~/... paths.
 
 Inputs: `"path"`, `"if_revision"`, `"start_line"`, `"end_line"`, `"max_lines"`, `"max_bytes"`, `"encoding"`.
 
@@ -318,21 +318,21 @@ Required: `"tool_name"`, `"permission"`, `"reason"`, `"arguments"`.
 
 Annotations: `{"title":"Request permissions","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
 
-### workspace_overview
+### project_overview
 
 Exposure: **direct**.
 
-Summarize project manifests, languages, entry points, top-level areas, and instruction files. Detected Apple projects also include bounded read-only Xcode, Swift, SDK, and SourceKit-LSP metadata.
+Summarize the bound Project's manifests, languages, entry points, top-level areas, applicable instructions, and recommended checks. Detected Apple projects also include bounded read-only Xcode, Swift, SDK, and SourceKit-LSP metadata.
 
 Inputs: `"path"`, `"max_files"`.
 
-Annotations: `{"title":"Workspace overview","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+Annotations: `{"title":"Project overview","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
 ### project_instructions
 
 Exposure: **direct**.
 
-Resolve root and nested project instruction files that apply to one workspace path.
+Resolve root and nested project instruction files that apply to one Project-relative path.
 
 Inputs: `"path"`.
 
@@ -352,7 +352,7 @@ Annotations: `{"title":"Discover checks","readOnlyHint":true,"destructiveHint":f
 
 Exposure: **direct**; gated by `enable_view_image`.
 
-Return a workspace image as MCP image content.
+Return a Project image as MCP image content.
 
 Inputs: `"path"`, `"max_bytes"`, `"max_width"`, `"max_height"`, `"auto_resize"`.
 

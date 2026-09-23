@@ -24,7 +24,7 @@ _GROUPS: dict[str, tuple[tuple[str, str], ...]] = {
         ("list_files", "Find paths by filename or glob; use search_text for file contents."),
         ("search_text", "Find literal text, an error message, or a regex; this is not semantic reference resolution."),
         ("apply_patch", "Make explicit source edits using unique context; inspect affected files before patching."),
-        ("view_image", "Inspect a known workspace image when visual evidence is needed."),
+        ("view_image", "Inspect a known image in the bound project when visual evidence is needed."),
     ),
     "commands": (
         ("exec_command", "Run a known command or test; retain command_id and use operation_id for recoverable retries."),
@@ -49,7 +49,7 @@ _GROUPS: dict[str, tuple[tuple[str, str], ...]] = {
     ),
     "project": (
         ("project_context", "List projects, inspect the session-bound project, or switch it using a project name/path/id selector."),
-        ("workspace_overview", "Orient in an unfamiliar project, including instructions, recommended checks, and bounded Apple/Xcode/Swift metadata."),
+        ("project_overview", "Orient in the bound project, including instructions, recommended checks, and bounded Apple/Xcode/Swift metadata."),
         ("project_instructions", "Read root and nested instructions applicable to the path you will edit."),
     ),
     "local capabilities": (
@@ -64,7 +64,7 @@ _GROUPS: dict[str, tuple[tuple[str, str], ...]] = {
         ("request_permissions", "Request the exact operation reported as needing permission; never broad implicit access."),
     ),
     "runtime": (
-        ("server_info", "Inspect workspace, policy, and runtime metadata when configuration matters."),
+        ("server_info", "Inspect project-root, policy, runtime, and integration metadata when configuration matters."),
         ("runtime_doctor", "Diagnose macOS/Xcode/Swift/SourceKit/toolchain environment problems."),
     ),
 }
@@ -81,7 +81,7 @@ TOOL_USAGE_INSTRUCTIONS = (
     "Use the listed tools directly; there is no secondary tool-discovery workflow. "
     "Read several known files with read_files and continue commands using their command_id. "
     "Use exec_command for native macOS developer tools and ordinary Git writes instead of looking for wrapper tools. "
-    "When the workspace contains multiple Git repositories, pass repo_path to Git tools for the intended repository; file paths remain workspace-relative. "
+    "When the bound project contains multiple Git repositories, pass repo_path to Git tools for the intended repository; file paths remain project-relative. "
     "Use the model/client conversation for planning, review, and task state; this runtime only exposes coding primitives and bounded project helpers. "
     "Follow applicable project instructions before editing."
 )

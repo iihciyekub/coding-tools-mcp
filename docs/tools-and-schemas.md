@@ -19,13 +19,13 @@ roots are configured, three read-only catalog tools. There is no workflow-tool m
 - `local_capabilities_search`: **optional gateway-only read-only** — Search Skill and plugin metadata in explicitly authorized directories.
 - `local_skill_read`: **optional gateway-only read-only** — Read a selected `SKILL.md` and bounded text references; it does not execute the Skill.
 - `local_plugin_inspect`: **optional gateway-only read-only** — Inspect public plugin metadata; it does not activate plugin actions or hooks.
-- `server_info`: **direct** — Return server, workspace, project-context, auth, policy, and fixed-tool metadata.
+- `server_info`: **direct** — Return server, project-root, auth, policy, and runtime metadata when configuration or environment details matter.
 - `runtime_doctor`: **implemented diagnostic helper; hidden from the default model surface** — Run a non-destructive runtime health check covering common toolchain commands, workspace access, shell snapshot, LSP availability, sandbox status, network policy, and macOS Apple toolchain metadata including Xcode, Swift, SourceKit-LSP, codesign, notarytool, xcresulttool, and Homebrew.
-- `read_file`: **direct** — Read a UTF-8 text file slice inside the configured file scope. Relative paths are workspace-relative; host mode also accepts host absolute and ~/... paths.
+- `read_file`: **direct** — Read a UTF-8 text file slice inside the configured file scope. Relative paths are Project-relative; host mode also accepts host absolute and ~/... paths.
 - `read_files`: **direct** — Read bounded UTF-8 slices from multiple files in the configured file scope.
 - `list_dir`: **direct** — List directory entries inside the configured file scope.
-- `list_files`: **direct** — List files using `include_globs` / `exclude_globs`. An omitted `path` uses the configured default search folder; an explicit relative path uses the project workspace.
-- `search_text`: **direct** — Search UTF-8 files for text or regex matches. An omitted `path` uses the configured default search folder; an explicit relative path uses the project workspace.
+- `list_files`: **direct** — List files using `include_globs` / `exclude_globs`. An omitted `path` uses the configured default search folder; an explicit relative path uses the bound Project root.
+- `search_text`: **direct** — Search UTF-8 files for text or regex matches. An omitted `path` uses the configured default search folder; an explicit relative path uses the bound Project root.
 - `apply_patch`: **direct** — Stage, validate, and atomically apply a patch envelope. Example: *** Begin Patch *** Update File: app.py @@ -old +new *** End Patch
 - `exec_command`: **direct** — Run a bounded command under runtime policy. Pass workdir explicitly for reconnect-safe paths. A still-running command returns command_id. Example: {"cmd":"pytest -q","workdir":".","yield_time_ms":30000}. Retained output is bounded per stream; for very large output redirect to a file (cmd > out.log 2>&1) and page it with read_file or search_text.
 - `get_command`: **direct** — Read or wait for command status without consuming output cursors. Resolve by command_id or operation_id and use `wait_ms` to wait for completion; returned output_refs can be paged with read_output.
@@ -40,10 +40,10 @@ roots are configured, three read-only catalog tools. There is no workflow-tool m
 - `git_blame`: **implemented helper; hidden from the default model surface** — Native `git blame` through `exec_command` is the default agent path.
 - `code_diagnostics`: **direct** — Open or refresh a source file and return bounded published language-server diagnostics.
 - `request_permissions`: **direct** — Create an exact, expiring operator approval request without silently granting operations.
-- `workspace_overview`: **direct** — Summarize project manifests, languages, entry points, top-level areas, and instruction files. Detected Apple projects also include bounded read-only Xcode, Swift, SDK, and SourceKit-LSP metadata.
-- `project_instructions`: **direct** — Resolve root and nested project instruction files that apply to one workspace path.
-- `checks_discover`: **implemented helper; hidden from the default model surface** — Check discovery and recommendations are included in `workspace_overview` so project orientation does not require another tool call.
-- `view_image`: **direct when image content is enabled** — Return a workspace image as MCP image content.
+- `project_overview`: **direct** — Summarize the bound Project's manifests, languages, entry points, top-level areas, applicable instructions, and recommended checks. Detected Apple projects also include bounded read-only Xcode, Swift, SDK, and SourceKit-LSP metadata.
+- `project_instructions`: **direct** — Resolve root and nested project instruction files that apply to one Project-relative path.
+- `checks_discover`: **implemented helper; hidden from the default model surface** — Check discovery and recommendations are included in `project_overview` so project orientation does not require another tool call.
+- `view_image`: **direct when image content is enabled** — Return an image from the bound Project as MCP image content.
 - `code_symbols`: **implemented helper; hidden from the default model surface** — Definition/reference tools and text search cover the normal agent path; the lightweight symbol scanner remains available internally as a fallback primitive.
 - `code_definition`: **direct** — Find language-aware definitions for a symbol under a workspace path. When a file path plus line/column is supplied, line/column are one-based and semantic LSP is preferred; the runtime converts the column to UTF-16 and falls back to the bounded symbol scan if the LSP runtime is unavailable.
 - `code_references`: **direct** — Find references for a symbol under a workspace path. When a file path plus line/column is supplied, prefer semantic LSP references using one-based public positions converted internally to UTF-16; fall back to the bounded exact-identifier scan if the LSP runtime is unavailable.
@@ -128,12 +128,12 @@ original result instead of applying the same patch twice.
 
 ## Model-ready examples
 
-One service can operate multiple repositories below its workspace without a
-mutable current-project setting. Select a Git worktree explicitly with `repo_path`
-or infer it from unambiguous `path` / `paths`. All input file paths remain
-workspace-relative, for example `{"repo_path":"project-a","paths":["project-a/src/app.py"]}`.
+One bound Project can contain multiple Git repositories. Select a Git worktree
+explicitly with `repo_path` or infer it from unambiguous `path` / `paths`. All
+input file paths remain Project-relative, for example
+`{"repo_path":"packages/app","paths":["packages/app/src/app.py"]}`.
 Git results identify `repo_root` and their output `path_base`; do not feed a
-repo-relative filename back as a workspace-relative input without its prefix.
+repo-relative filename back as a Project-relative input without its prefix.
 See the [multi-project specification](multi-project-agent-spec.md) for scope,
 concurrency, command ownership, and visual-verification acceptance.
 
@@ -173,7 +173,7 @@ targets a subdirectory. In safe/trusted/dangerous modes direct file paths remain
 inside the workspace plus explicitly configured file-access roots. In `host`
 mode ordinary file tools and `apply_patch` may also use host absolute and
 home-relative paths; project-scoped Git/LSP/check/context behavior remains
-anchored to the configured workspace.
+anchored to the bound Project root.
 
 ## Command and output behavior
 

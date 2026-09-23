@@ -105,7 +105,7 @@ class ProjectContext:
 
     def server_instructions(self) -> str:
         sections = [
-            "Keep project, Git, LSP, workflow, and project-instruction operations anchored to the configured workspace.",
+            "Keep Git, LSP, workflow, and project-instruction operations anchored to the bound project root.",
             "Use apply_patch for local file modifications within the configured file scope; do not use exec_command as a substitute for local patching.",
         ]
         for item in self.root_files:

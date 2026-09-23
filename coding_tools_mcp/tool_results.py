@@ -640,10 +640,10 @@ def _render_image(payload: dict[str, Any]) -> str:
     return f"Image: {payload.get('path', '')} ({payload.get('mime_type', 'unknown')}{dimensions})"
 
 
-def _render_workspace_overview(payload: dict[str, Any]) -> str:
-    lines = [str(payload.get("summary") or "Workspace overview.")]
+def _render_project_overview(payload: dict[str, Any]) -> str:
+    lines = [str(payload.get("summary") or "Project overview.")]
     if "path" in payload:
-        lines.append(f"Scope: {payload['path']} (workspace-relative paths).")
+        lines.append(f"Scope: {payload['path']} (project-relative paths).")
     for key in ("manifests", "languages", "top_level", "entrypoints"):
         value = payload.get(key)
         if isinstance(value, list) and value:
@@ -657,8 +657,11 @@ def _render_workspace_overview(payload: dict[str, Any]) -> str:
         lines.append(f"Current applicable rules: {_bounded_json(rules, 8000)}")
         lines.append("Read: " + _render_tool_call("project_instructions", {"path": payload.get("path", ".")}))
         lines.extend(f"Warning: {warning}" for warning in applicable.get("warnings", []))
+    checks = payload.get("checks")
+    if isinstance(checks, list) and checks:
+        lines.append("Project checks:\n" + _render_checks(payload))
     if payload.get("truncated"):
-        lines.append("… workspace scan truncated; raise max_files for broader coverage.")
+        lines.append("… project scan truncated; raise max_files for broader coverage.")
     return "\n".join(lines)
 
 
@@ -756,7 +759,7 @@ _RENDERERS = {
     "git_blame": _render_git_blame,
     "code_diagnostics": _render_lsp,
     "request_permissions": lambda payload: f"Permission request: {payload.get('status', 'completed')}.",
-    "workspace_overview": _render_workspace_overview,
+    "project_overview": _render_project_overview,
     "project_instructions": _render_project_instructions,
     "checks_discover": _render_checks,
     "view_image": _render_image,

@@ -95,7 +95,7 @@ class ExtendedToolTests(unittest.TestCase):
         )
         runtime = self.runtime()
         try:
-            overview = self.payload(runtime, "workspace_overview", {})
+            overview = self.payload(runtime, "project_overview", {})
             self.assertIn("Python", [item["language"] for item in overview["languages"]])
             instructions = self.payload(runtime, "project_instructions", {"path": "src/app.py"})
             self.assertEqual([item["path"] for item in instructions["instructions"]], ["AGENTS.md", "src/AGENTS.md"])
@@ -136,7 +136,7 @@ class ExtendedToolTests(unittest.TestCase):
                     else None
                 ),
             ):
-                overview = self.payload(runtime, "workspace_overview", {})
+                overview = self.payload(runtime, "project_overview", {})
             self.assertTrue(overview["apple"]["detected"])
             self.assertEqual(overview["apple"]["xcodeproj"], ["Demo.xcodeproj"])
             self.assertEqual(overview["apple"]["swift_packages"], ["Package.swift"])
@@ -150,7 +150,7 @@ class ExtendedToolTests(unittest.TestCase):
         finally:
             runtime.close()
 
-    def test_workspace_overview_recommends_existing_checks_from_git_changes(self) -> None:
+    def test_project_overview_recommends_existing_checks_from_git_changes(self) -> None:
         (self.workspace / "pyproject.toml").write_text(
             "[tool.pytest.ini_options]\naddopts = '-q'\n[tool.ruff]\nline-length = 100\n[tool.mypy]\npython_version = '3.11'\n",
             encoding="utf-8",
@@ -172,7 +172,7 @@ class ExtendedToolTests(unittest.TestCase):
                 "def answer():\n    return 43\n",
                 encoding="utf-8",
             )
-            discovered = self.payload(runtime, "workspace_overview", {})
+            discovered = self.payload(runtime, "project_overview", {})
             self.assertEqual(discovered["check_recommendation_source"], "git_status")
             self.assertEqual(
                 discovered["recommended_check_ids"],
@@ -183,10 +183,15 @@ class ExtendedToolTests(unittest.TestCase):
             self.assertEqual(checks_by_id["python:mypy"]["priority"], "medium")
             self.assertFalse(checks_by_id["npm:test"]["recommended"])
             self.assertTrue(checks_by_id["python:mypy"]["recommendation_reasons"])
+            overview_text = self.text(runtime, "project_overview", {})
+            self.assertIn("Project checks:", overview_text)
+            self.assertIn("python:mypy", overview_text)
+            self.assertIn("python:ruff", overview_text)
+            self.assertIn("python:pytest", overview_text)
 
             subprocess.run(["git", "checkout", "--", "src/app.py"], cwd=self.workspace, check=True)
             (self.workspace / "README.md").write_text("# Fixture\nDocs only.\n", encoding="utf-8")
-            docs_only = self.payload(runtime, "workspace_overview", {})
+            docs_only = self.payload(runtime, "project_overview", {})
             self.assertEqual(docs_only["recommended_check_ids"], [])
         finally:
             runtime.close()

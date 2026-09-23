@@ -30,7 +30,7 @@ DEFAULT_SESSION_TTL_SECONDS = 24 * 60 * 60
 RETRYABLE_READ_TOOLS = frozenset({
     "server_info", "read_file", "read_files", "list_dir", "list_files", "search_text",
     "get_command", "list_commands", "read_output", "git_status", "git_diff",
-    "code_diagnostics", "workspace_overview", "project_instructions", "view_image",
+    "code_diagnostics", "project_overview", "project_instructions", "view_image",
     "code_symbols", "code_definition", "code_references",
 })
 

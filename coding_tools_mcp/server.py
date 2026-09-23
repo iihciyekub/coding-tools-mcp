@@ -753,7 +753,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "read_file": ToolSpec(
         title="Read file",
-        description="Read a UTF-8 text file slice inside the configured file scope. Relative paths are workspace-relative; host mode also accepts host absolute and ~/... paths.",
+        description="Read a UTF-8 text file slice inside the configured file scope. Relative paths are project-relative; host mode also accepts host absolute and ~/... paths.",
         read_only=True,
         idempotent=True,
     ),
@@ -771,13 +771,13 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "list_files": ToolSpec(
         title="List files",
-        description="List authorized files using glob filters. Omit path to use the configured default search folder; explicit relative paths use the project workspace.",
+        description="List authorized files using glob filters. Omit path to use the configured default search folder; explicit relative paths use the bound project root.",
         read_only=True,
         idempotent=True,
     ),
     "search_text": ToolSpec(
         title="Search text",
-        description="Search authorized UTF-8 files for text or regex matches. Omit path to use the configured default search folder; explicit relative paths use the project workspace.",
+        description="Search authorized UTF-8 files for text or regex matches. Omit path to use the configured default search folder; explicit relative paths use the bound project root.",
         read_only=True,
         idempotent=True,
     ),
@@ -888,8 +888,8 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         description="Create an exact, expiring operator approval request without silently granting operations.",
         destructive=True,
     ),
-    "workspace_overview": ToolSpec(
-        title="Workspace overview",
+    "project_overview": ToolSpec(
+        title="Project overview",
         description=(
             "Summarize project manifests, languages, entry points, top-level areas, and instruction files. "
             "Detected Apple projects also include bounded read-only Xcode, Swift, SDK, and SourceKit-LSP metadata."
@@ -899,7 +899,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "project_instructions": ToolSpec(
         title="Project instructions",
-        description="Resolve root and nested project instruction files that apply to one workspace path.",
+        description="Resolve root and nested project instruction files that apply to one project-relative path.",
         read_only=True,
         idempotent=True,
     ),
@@ -914,7 +914,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "view_image": ToolSpec(
         title="View image",
-        description="Return a workspace image as MCP image content.",
+        description="Return an image from the bound project as MCP image content.",
         read_only=True,
         idempotent=True,
         content_builder=_image_content,
@@ -922,14 +922,14 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "code_symbols": ToolSpec(
         title="Code symbols",
-        description="List bounded language-aware symbol definitions under a workspace path.",
+        description="List bounded language-aware symbol definitions under a project-relative path.",
         read_only=True,
         idempotent=True,
     ),
     "code_definition": ToolSpec(
         title="Code definition",
         description=(
-            "Find language-aware definitions for a symbol under a workspace path. When a file path plus line/column "
+            "Find language-aware definitions for a symbol under a project-relative path. When a file path plus line/column "
             "is supplied, line/column are one-based and semantic LSP is preferred; the runtime converts the column "
             "to UTF-16 and falls back to the bounded symbol scan if the LSP runtime is unavailable."
         ),
@@ -939,7 +939,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "code_references": ToolSpec(
         title="Code references",
         description=(
-            "Find references for a symbol under a workspace path. When a file path plus line/column is supplied, prefer semantic LSP references "
+            "Find references for a symbol under a project-relative path. When a file path plus line/column is supplied, prefer semantic LSP references "
             "using one-based public positions converted internally to UTF-16; fall back to the bounded exact-identifier scan if the LSP runtime is unavailable."
         ),
         read_only=True,
@@ -2062,7 +2062,7 @@ class Runtime:
     def tool_usage_instructions(self) -> str:
         guidance = TOOL_USAGE_INSTRUCTIONS
         default_search = (
-            "the project workspace"
+            "the bound project root"
             if self.default_search_path == "."
             else self.default_search_path
         )
@@ -2073,17 +2073,17 @@ class Runtime:
         if self.capabilities.host_environment:
             scope_guidance = (
                 " Full Access is enabled: ordinary file tools and apply_patch may access the host filesystem, "
-                "while relative paths remain workspace-relative so project context stays stable. exec_command may "
+                "while relative paths remain project-relative so project context stays stable. exec_command may "
                 "use the host environment, SSH, SCP, rsync, Git over SSH, installed developer tools, and paths "
-                "outside the workspace. Do not claim a host tool is unavailable without checking the execution "
+                "outside the project root. Do not claim a host tool is unavailable without checking the execution "
                 "environment or attempting the requested non-interactive command. Git, LSP, check discovery, and "
-                "project instructions remain anchored to the configured workspace unless their tool contract says otherwise."
+                "project instructions remain anchored to the bound project root unless their tool contract says otherwise."
             )
         else:
             file_scope = [str(self.workspace.root), *[str(path) for path in self.file_access.roots]]
             scope_guidance = (
-                " Ordinary file tools and apply_patch may access the workspace plus these explicitly allowed "
-                f"folders: {file_scope}. Relative paths stay workspace-relative; absolute paths are allowed only "
+                " Ordinary file tools and apply_patch may access the project root plus these explicitly allowed "
+                f"folders: {file_scope}. Relative paths stay project-relative; absolute paths are allowed only "
                 "inside those folders."
             )
         return f"{guidance}{scope_guidance}\n\n{self.project_context_data.server_instructions()}"
@@ -5178,10 +5178,10 @@ class Runtime:
 
 
 
-    def workspace_overview(self, args: dict[str, Any]) -> dict[str, Any]:
+    def project_overview(self, args: dict[str, Any]) -> dict[str, Any]:
         target = self.resolve_existing(str(args.get("path", "."))).path
         if not target.is_dir():
-            raise ToolFailure("NOT_A_DIRECTORY", "workspace_overview path must be a directory.", category="validation")
+            raise ToolFailure("NOT_A_DIRECTORY", "project_overview path must be a directory.", category="validation")
         result = workspace_insight.workspace_overview(
             self.workspace.root,
             self.project_context_data,
@@ -6827,7 +6827,7 @@ def tool_definition(name: str, *, fake_readonly: bool = False) -> dict[str, Any]
         "description": (
             f"[{TOOL_GUIDES[name].category}] {TOOL_REGISTRY[name].description} "
             f"Selection: {TOOL_GUIDES[name].use_when}"
-            + (" Select a worktree with repo_path; all input path/paths remain workspace-relative. Check repo_root/path_base in results."
+            + (" Select a worktree with repo_path; all input path/paths remain project-relative. Check repo_root/path_base in results."
                if name.startswith("git_") else "")
         ),
         "inputSchema": schemas[name],
@@ -6956,7 +6956,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         ),
         "list_files": object_schema(
             {
-                "path": {**string, "description": "Omit for the configured default search folder; '.' explicitly means the project workspace."},
+                "path": {**string, "description": "Omit for the configured default search folder; '.' explicitly means the bound project root."},
                 "include_globs": string_array,
                 "exclude_globs": string_array,
                 "include_hidden": {**boolean, "default": False},
@@ -6968,7 +6968,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         "search_text": object_schema(
             {
                 "query": {**string, "minLength": 1},
-                "path": {**string, "description": "Omit for the configured default search folder; '.' explicitly means the project workspace."},
+                "path": {**string, "description": "Omit for the configured default search folder; '.' explicitly means the bound project root."},
                 "regex": {**boolean, "default": False},
                 "case_sensitive": {**boolean, "default": False},
                 "include_globs": string_array,
@@ -7140,7 +7140,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             },
             ["tool_name", "permission", "reason", "arguments"],
         ),
-        "workspace_overview": object_schema(
+        "project_overview": object_schema(
             {"path": {**string, "default": "."}, "max_files": {**integer, "minimum": 1, "maximum": 50000, "default": 20000}}
         ),
         "project_instructions": object_schema({"path": {**string, "default": "."}}),
@@ -7204,7 +7204,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
     for name in ("git_status", "git_diff", "git_log", "git_show", "git_blame"):
         schemas[name]["properties"]["repo_path"] = {
             "type": "string", "minLength": 1,
-            "description": "Select one Git worktree inside the workspace. Other path/paths arguments stay workspace-relative, not repo-relative.",
+            "description": "Select one Git worktree inside the bound project. Other path/paths arguments stay project-relative, not repo-relative.",
         }
     schemas["list_commands"]["properties"]["workdir"] = {
         "type": "string", "minLength": 1, "description": "Filter by exact canonical working directory; relative paths use the workspace.",
