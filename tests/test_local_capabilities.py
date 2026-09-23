@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-
-import pytest
+import tempfile
+import unittest
 
 from coding_tools_mcp.local_capabilities import LocalCapabilityCatalog
 
@@ -22,51 +22,68 @@ def _skill(root: Path, name: str = "paper-review") -> Path:
     return skill
 
 
-def test_catalog_finds_and_reads_only_authorized_content(tmp_path: Path) -> None:
-    root = tmp_path / ".codex" / "skills"
-    root.mkdir(parents=True)
-    skill = _skill(root)
-    outside = tmp_path / "private.txt"
-    outside.write_text("private material", encoding="utf-8")
-    (skill / "references" / "outside.txt").symlink_to(outside)
-    catalog = LocalCapabilityCatalog([root])
+class LocalCapabilityCatalogTests(unittest.TestCase):
+    def test_catalog_finds_and_reads_only_authorized_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / ".codex" / "skills"
+            root.mkdir(parents=True)
+            skill = _skill(root)
+            outside = tmp_path / "private.txt"
+            outside.write_text("private material", encoding="utf-8")
+            (skill / "references" / "outside.txt").symlink_to(outside)
+            catalog = LocalCapabilityCatalog([root])
 
-    found = catalog.search({"query": "paper", "kind": "skill"})
-    assert found["ok"] and found["count"] == 1
-    item = found["items"][0]
-    assert item["source"] == "codex"
-    assert str(root) not in found["summary"]
+            found = catalog.search({"query": "paper", "kind": "skill"})
+            self.assertTrue(found["ok"])
+            self.assertEqual(found["count"], 1)
+            item = found["items"][0]
+            self.assertEqual(item["source"], "codex")
+            self.assertNotIn(str(root), found["summary"])
 
-    read = catalog.read_skill({"id": item["id"], "resources": ["references/checklist.md"]})
-    assert read["ok"] and "Check citations." in read["summary"]
-    assert "private material" not in read["summary"]
-    assert catalog.read_skill({"id": item["id"], "resources": ["references/outside.txt"]})["ok"] is False
-    assert catalog.read_skill({"id": item["id"], "resources": ["../private.txt"]})["ok"] is False
+            read = catalog.read_skill({"id": item["id"], "resources": ["references/checklist.md"]})
+            self.assertTrue(read["ok"])
+            self.assertIn("Check citations.", read["summary"])
+            self.assertNotIn("private material", read["summary"])
+            self.assertFalse(catalog.read_skill({"id": item["id"], "resources": ["references/outside.txt"]})["ok"])
+            self.assertFalse(catalog.read_skill({"id": item["id"], "resources": ["../private.txt"]})["ok"])
+
+    def test_plugin_metadata_does_not_claim_actions_are_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / ".codex" / "plugins" / "cache"
+            plugin = root / "example" / ".codex-plugin"
+            plugin.mkdir(parents=True)
+            (plugin / "plugin.json").write_text(
+                json.dumps(
+                    {
+                        "name": "example",
+                        "description": "Local workflow",
+                        "mcpServers": {"secret": "https://private.example"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            catalog = LocalCapabilityCatalog([root])
+            found = catalog.search({"query": "example", "kind": "plugin"})
+            self.assertEqual(found["count"], 1)
+            inspected = catalog.inspect_plugin({"id": found["items"][0]["id"]})
+            self.assertEqual(inspected["local_status"], "metadata_only")
+            self.assertNotIn("https://private.example", inspected["summary"])
+
+    def test_catalog_rejects_home_and_does_not_follow_skill_symlink(self) -> None:
+        with self.assertRaises(ValueError):
+            LocalCapabilityCatalog([Path.home()])
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "skills"
+            root.mkdir()
+            hidden = tmp_path / "hidden"
+            hidden.mkdir()
+            _skill(hidden)
+            (root / "linked").symlink_to(hidden, target_is_directory=True)
+            self.assertEqual(LocalCapabilityCatalog([root]).search({"query": "paper"})["count"], 0)
 
 
-def test_plugin_metadata_does_not_claim_actions_are_available(tmp_path: Path) -> None:
-    root = tmp_path / ".codex" / "plugins" / "cache"
-    plugin = root / "example" / ".codex-plugin"
-    plugin.mkdir(parents=True)
-    (plugin / "plugin.json").write_text(
-        json.dumps({"name": "example", "description": "Local workflow", "mcpServers": {"secret": "https://private.example"}}),
-        encoding="utf-8",
-    )
-    catalog = LocalCapabilityCatalog([root])
-    found = catalog.search({"query": "example", "kind": "plugin"})
-    assert found["count"] == 1
-    inspected = catalog.inspect_plugin({"id": found["items"][0]["id"]})
-    assert inspected["local_status"] == "metadata_only"
-    assert "https://private.example" not in inspected["summary"]
-
-
-def test_catalog_rejects_home_and_does_not_follow_skill_symlink(tmp_path: Path) -> None:
-    with pytest.raises(ValueError):
-        LocalCapabilityCatalog([Path.home()])
-    root = tmp_path / "skills"
-    root.mkdir()
-    hidden = tmp_path / "hidden"
-    hidden.mkdir()
-    _skill(hidden)
-    (root / "linked").symlink_to(hidden, target_is_directory=True)
-    assert LocalCapabilityCatalog([root]).search({"query": "paper"})["count"] == 0
+if __name__ == "__main__":
+    unittest.main()

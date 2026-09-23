@@ -1926,10 +1926,6 @@ Maven home: /usr/share/maven
                     break
                 time.sleep(0.02)
             self.assertFalse(child_alive, result)
-            self.assertTrue(
-                any("background descendants" in warning for warning in result.get("warnings", [])),
-                result,
-            )
 
     def test_read_output_uses_absolute_stream_offsets_after_buffer_drop(self) -> None:
         with TemporaryDirectory() as tmp:

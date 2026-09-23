@@ -2824,9 +2824,9 @@ class Runtime:
 
         paths: dict[str, tuple[Path, str]] = {}
         for pattern in patterns:
-            effective = pattern
+            effective = "*" if pattern == "**/*" else pattern
             args = list(args_base)
-            if "/" in pattern:
+            if "/" in effective:
                 args.append("--full-path")
                 if not pattern.startswith("/") and not pattern.startswith("**/") and pattern != "**":
                     effective = f"**/{pattern}"
