@@ -1108,7 +1108,15 @@ def normalize_rel_display(path: Path, root: Path) -> str:
 
 
 def matches_any_glob(rel: str, patterns: list[str]) -> bool:
-    return any(fnmatch.fnmatch(rel, pattern) or PurePosixPath(rel).match(pattern) for pattern in patterns)
+    path = PurePosixPath(rel)
+    for pattern in patterns:
+        if fnmatch.fnmatch(rel, pattern) or path.match(pattern):
+            return True
+        if pattern.startswith("**/"):
+            root_pattern = pattern[3:]
+            if fnmatch.fnmatch(rel, root_pattern) or path.match(root_pattern):
+                return True
+    return False
 
 
 def file_entry(path: Path, rel: str, path_stat: os.stat_result) -> dict[str, Any]:
@@ -2796,6 +2804,8 @@ class Runtime:
         max_results: int,
         sort_key: str,
     ) -> dict[str, Any] | None:
+        if resolved.scope == "external":
+            return None
         file_workspace = self.file_access.workspace_for_resolved(resolved)
         fd = cached_which("fd", "fdfind")
         if not fd or not resolved.path.is_dir():
