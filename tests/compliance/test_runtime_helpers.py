@@ -1226,9 +1226,11 @@ Maven home: /usr/share/maven
             try:
                 schemas = server_module.input_schemas()
                 available = set(runtime.exposed_tool_names())
-                expected = set(TOOL_GUIDES) - {"project_context"}
+                expected = set(TOOL_GUIDES) - {
+                    "project_context", "local_capabilities_search", "local_skill_read", "local_plugin_inspect"
+                }
                 self.assertEqual(available, expected)
-                self.assertEqual(available, set(schemas) - {"project_context"})
+                self.assertEqual(set(schemas), set(TOOL_GUIDES))
                 guidance = runtime.tool_usage_instructions()
                 self.assertIn("there is no secondary tool-discovery workflow", guidance)
                 self.assertIn("ordinary Git writes", guidance)
@@ -1679,6 +1681,22 @@ Maven home: /usr/share/maven
                 )
             self.assertEqual(conflict.exception.code, "OPERATION_CONFLICT")
             self.assertEqual((workspace / "side-effect.txt").read_text(encoding="utf-8"), "x")
+
+    def test_exec_operation_outcome_distinguishes_process_failure_from_tool_success(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp), permission_mode="trusted")
+            self.addCleanup(runtime.close)
+            result = runtime.exec_command(
+                {"cmd": "false", "timeout_ms": 5000, "yield_time_ms": 5000}
+            )
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["exit_code"], 1)
+            self.assertEqual(result["operation_outcome"], "exited_nonzero")
+            recovered = runtime.get_command({"command_id": result["command_id"]})
+            self.assertEqual(recovered["operation_outcome"], "exited_nonzero")
+            listed = runtime.list_commands({"max_results": 10})
+            item = next(entry for entry in listed["commands"] if entry["command_id"] == result["command_id"])
+            self.assertEqual(item["operation_outcome"], "exited_nonzero")
 
     def test_command_activity_reports_long_silence_without_killing_process(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -2187,6 +2205,94 @@ class PatchLineFidelityTests(unittest.TestCase):
             (workspace / name).write_bytes(original)
             Runtime(workspace, permission_mode="dangerous").apply_patch({"patch": patch})
             return (workspace / name).read_bytes()
+
+    def test_scope_eof_and_trailing_whitespace_locators_are_preserved(self) -> None:
+        scoped = parse_patch(
+            "*** Begin Patch\n"
+            "*** Update File: a.py\n"
+            "@@ def second():\n"
+            "-    return 1\n"
+            "+    return 2\n"
+            "*** End Patch"
+        )[0]
+        self.assertEqual(
+            apply_update_hunks(
+                "def first():\n    return 1\n\ndef second():\n    return 1\n",
+                scoped.hunks,
+                "a.py",
+            ),
+            "def first():\n    return 1\n\ndef second():\n    return 2\n",
+        )
+
+        eof = parse_patch(
+            "*** Begin Patch\n"
+            "*** Update File: a.py\n"
+            "@@\n"
+            "-b\n"
+            "+c\n"
+            "*** End of File\n"
+            "*** End Patch"
+        )[0]
+        self.assertEqual(apply_update_hunks("a\nb", eof.hunks, "a.py"), "a\nc")
+
+        whitespace = parse_patch(
+            "*** Begin Patch\n"
+            "*** Update File: a.py\n"
+            "@@\n"
+            "-x = 1\n"
+            "+x = 2\n"
+            "*** End Patch"
+        )[0]
+        self.assertEqual(
+            apply_update_hunks("x = 1   \n", whitespace.hunks, "a.py"),
+            "x = 2\n",
+        )
+
+    def test_apply_patch_revision_precondition_and_idempotency_replay(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            path = workspace / "a.txt"
+            path.write_text("old\n", encoding="utf-8")
+            runtime = Runtime(workspace, permission_mode="dangerous")
+            self.addCleanup(runtime.close)
+
+            revision = runtime.read_file({"path": "a.txt"})["revision"]
+            args = {
+                "patch": (
+                    "*** Begin Patch\n"
+                    "*** Update File: a.txt\n"
+                    "@@\n"
+                    "-old\n"
+                    "+new\n"
+                    "*** End Patch"
+                ),
+                "idempotency_key": "patch-once",
+                "expected_revisions": {"a.txt": revision},
+            }
+            first = runtime.apply_patch(args)
+            replay = runtime.apply_patch(args)
+            self.assertEqual(path.read_text(encoding="utf-8"), "new\n")
+            self.assertTrue(replay["deduplicated"])
+            self.assertEqual(
+                replay["affected_files"][0]["revision"],
+                first["affected_files"][0]["revision"],
+            )
+            self.assertEqual(first["revision_algorithm"], "sha256")
+
+            stale = {
+                "patch": (
+                    "*** Begin Patch\n"
+                    "*** Update File: a.txt\n"
+                    "@@\n"
+                    "-new\n"
+                    "+newer\n"
+                    "*** End Patch"
+                ),
+                "expected_revisions": {"a.txt": revision},
+            }
+            with self.assertRaises(ToolFailure) as raised:
+                runtime.apply_patch(stale)
+            self.assertEqual(raised.exception.code, "PATCH_CONFLICT")
 
     def test_hunks_can_express_any_number_of_trailing_newlines(self) -> None:
         for source_newlines in range(3):

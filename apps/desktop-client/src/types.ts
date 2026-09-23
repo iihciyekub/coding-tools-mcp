@@ -27,6 +27,7 @@ export interface RuntimeConfig {
   permission_mode: PermissionMode;
   file_access_scope: "workspace";
   allowed_paths: string[];
+  default_search_path: string;
   environment_variables: EnvironmentVariable[];
 }
 
@@ -35,6 +36,7 @@ export interface GatewayConfig {
   local_port: number;
   tunnel: TunnelConfig;
   auth: AuthConfig;
+  local_capability_roots: string[];
 }
 
 export interface ProjectProfile {
@@ -73,6 +75,7 @@ export interface RuntimeStatus {
 
 export interface DesktopSnapshot {
   language: "en" | "zh-CN";
+  home_directory: string | null;
   gateway: GatewayConfig;
   projects: ProjectProfile[];
   migration_warning: string | null;

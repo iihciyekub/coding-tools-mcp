@@ -330,7 +330,8 @@ impl ProfileStore {
     pub fn update(&mut self, mut profile: WorkspaceProfile) -> Result<WorkspaceProfile, String> {
         profile.validate()?;
         validate_profile_uniqueness(&self.profiles, &profile)?;
-        let gateway = GatewayConfig::from_workspace_profile(&profile);
+        let mut gateway = GatewayConfig::from_workspace_profile(&profile);
+        gateway.local_capability_roots = self.gateway.local_capability_roots.clone();
         save_gateway_secrets(&gateway)?;
         self.gateway = gateway;
         self.gateway.apply_to_workspace_profile(&mut profile);
@@ -343,6 +344,15 @@ impl ProfileStore {
         *target = profile.clone();
         self.persist()?;
         Ok(profile)
+    }
+
+    pub fn set_local_capability_roots(
+        &mut self,
+        roots: Vec<String>,
+    ) -> Result<GatewayConfig, String> {
+        self.gateway.local_capability_roots = roots;
+        self.persist()?;
+        Ok(self.gateway.clone())
     }
 
     pub fn remove(&mut self, id: &str) -> Result<(), String> {

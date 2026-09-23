@@ -47,6 +47,7 @@ from .gateway import (
     SessionRegistry,
 )
 from .landlock_exec import libc_syscall
+from .local_capabilities import LocalCapabilityCatalog
 from .oauth import (
     OAUTH_CODE_TTL_SECONDS,
     OAUTH_GRANT_TYPE_AUTHORIZATION_CODE,
@@ -65,8 +66,10 @@ from .oauth import (
 from .patching import (
     AtomicPatchCommitter,
     FileBaseline,
+    REVISION_ALGORITHM,
     StagedFile,
-    apply_update_hunks,
+    apply_update_hunks_detailed,
+    content_revision,
     parse_patch,
     read_text_preserve_newlines,
 )
@@ -74,7 +77,9 @@ from .processes import (
     HARD_KILL_SIGNAL,
     COMMAND_BUFFER_BYTES,
     COMMAND_HEAD_BUFFER_DIVISOR,
+    COMMAND_OUTCOMES,
     CommandRun,
+    command_outcome,
     process_group_alive,
     spawn_process,
     start_reader_threads,
@@ -264,6 +269,7 @@ MAX_HTTP_CONCURRENT_REQUESTS = 32
 EXEC_PREVIEW_BYTES = 4096
 MAX_ACTIVE_COMMANDS = 16
 MAX_RETAINED_OUTPUT_COMMANDS = 32
+MAX_UNTRACKED_DIFF_FILES = 100
 # Long web/plugin sessions frequently reconnect after several minutes. Keep a
 # completed task recoverable for 30 minutes so command_id/operation_id recovery
 # does not turn a transient tunnel loss into a repeated side effect.
@@ -708,6 +714,27 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         idempotent=False,
         gated_by="enable_project_gateway",
     ),
+    "local_capabilities_search": ToolSpec(
+        title="Search local capabilities",
+        description="Search names and descriptions of Skills and plugins in directories explicitly shared by the gateway owner.",
+        read_only=True,
+        idempotent=True,
+        gated_by="enable_local_capabilities",
+    ),
+    "local_skill_read": ToolSpec(
+        title="Read local Skill",
+        description="Read one selected local SKILL.md and optional bounded text references; instructions alone do not install or execute tools.",
+        read_only=True,
+        idempotent=True,
+        gated_by="enable_local_capabilities",
+    ),
+    "local_plugin_inspect": ToolSpec(
+        title="Inspect local plugin",
+        description="Read public plugin manifest metadata; local installation does not make its actions available in this ChatGPT session.",
+        read_only=True,
+        idempotent=True,
+        gated_by="enable_local_capabilities",
+    ),
     "server_info": ToolSpec(
         title="Server info",
         description="Return server, workspace, project-context, auth, policy, and fixed-tool metadata.",
@@ -744,13 +771,13 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "list_files": ToolSpec(
         title="List files",
-        description="List files in the configured file scope using glob filters.",
+        description="List authorized files using glob filters. Omit path to use the configured default search folder; explicit relative paths use the project workspace.",
         read_only=True,
         idempotent=True,
     ),
     "search_text": ToolSpec(
         title="Search text",
-        description="Search UTF-8 files in the configured file scope for text or regex matches.",
+        description="Search authorized UTF-8 files for text or regex matches. Omit path to use the configured default search folder; explicit relative paths use the project workspace.",
         read_only=True,
         idempotent=True,
     ),
@@ -1728,6 +1755,7 @@ class Runtime:
         *,
         file_access_root: Path | None = None,
         file_access_roots: Sequence[Path] = (),
+        default_search_path: str = ".",
         enable_view_image: bool = True,
         state_root: Path | None = None,
         permission_mode: str = "safe",
@@ -1749,11 +1777,17 @@ class Runtime:
             file_access_roots,
             host_filesystem=permission_mode == "host",
         )
+        configured_search_path = default_search_path.strip() or "."
+        search_root = self.file_access.resolve_existing(configured_search_path)
+        if not search_root.path.is_dir():
+            raise ToolFailure("NOT_A_DIRECTORY", "Default search path must be a directory.", category="validation")
+        self.default_search_path = "." if configured_search_path == "." else str(search_root.path)
         self.enable_view_image = enable_view_image
         # A normal workspace Runtime never exposes gateway-only project routing.
         # GatewayRuntime adds this capability at the transport boundary instead
         # of making Runtime.workspace mutable.
         self.enable_project_gateway = False
+        self.enable_local_capabilities = False
         self.runtime_state = RuntimeStateStore(self.workspace.root, state_root=state_root)
         self._available_tool_names = [
             name
@@ -1845,6 +1879,7 @@ class Runtime:
         self.patch_baselines: dict[str, str | None] = {}
         self.patch_lock = threading.Lock()
         self.patch_committer = AtomicPatchCommitter()
+        self.patch_replays: dict[str, tuple[str, dict[str, Any]]] = {}
         # ProjectContext is frozen and derived only from the workspace tree, so
         # an embedder that builds several runtimes over one workspace can reuse
         # the discovery (git ls-files / directory walk) result.
@@ -2015,6 +2050,15 @@ class Runtime:
 
     def tool_usage_instructions(self) -> str:
         guidance = TOOL_USAGE_INSTRUCTIONS
+        default_search = (
+            "the project workspace"
+            if self.default_search_path == "."
+            else self.default_search_path
+        )
+        guidance += (
+            f" list_files and search_text search {default_search} when path is omitted. "
+            "An explicit relative path is project-relative; the default search folder does not change file or command permissions."
+        )
         if self.capabilities.host_environment:
             scope_guidance = (
                 " Full Access is enabled: ordinary file tools and apply_patch may access the host filesystem, "
@@ -2114,6 +2158,7 @@ class Runtime:
             "workspace": str(self.workspace.root),
             "file_access_root": str(self.file_access.root),
             "file_access_roots": [str(path) for path in self.file_access.roots],
+            "default_search_path": str(self.workspace.root) if self.default_search_path == "." else self.default_search_path,
             "file_access_scope": (
                 "host"
                 if self.file_access.host_filesystem
@@ -2285,6 +2330,15 @@ class Runtime:
             category="validation",
         )
 
+    def local_capabilities_search(self, args: dict[str, Any]) -> dict[str, Any]:
+        raise ToolFailure("GATEWAY_REQUIRED", "Local capabilities require an authorized HTTP project gateway.", category="validation")
+
+    def local_skill_read(self, args: dict[str, Any]) -> dict[str, Any]:
+        raise ToolFailure("GATEWAY_REQUIRED", "Local capabilities require an authorized HTTP project gateway.", category="validation")
+
+    def local_plugin_inspect(self, args: dict[str, Any]) -> dict[str, Any]:
+        raise ToolFailure("GATEWAY_REQUIRED", "Local capabilities require an authorized HTTP project gateway.", category="validation")
+
     def server_info(self, args: dict[str, Any]) -> dict[str, Any]:
         return self.server_info_payload()
 
@@ -2408,6 +2462,11 @@ class Runtime:
             error_code=error.get("code"),
             duration_ms=duration_ms,
             truncated=bool(payload.get("truncated")),
+            operation_outcome=(
+                str(payload["operation_outcome"])
+                if isinstance(payload.get("operation_outcome"), str)
+                else None
+            ),
             context=context,
         )
         if os.environ.get(f"{ENV_PREFIX}_TRACE") != "1":
@@ -2418,6 +2477,7 @@ class Runtime:
             "tool": name,
             "ok": bool(payload.get("ok", False)),
             "status": payload.get("status"),
+            "operation_outcome": payload.get("operation_outcome"),
             "error_code": error.get("code"),
             "duration_ms": duration_ms,
             "command_id": payload.get("command_id"),
@@ -2445,6 +2505,7 @@ class Runtime:
         if encoding != "utf-8":
             raise ToolFailure("UNSUPPORTED_ENCODING", "Only utf-8 is supported.", category="validation")
         total_bytes = resolved.path.stat().st_size
+        digest = hashlib.sha256()
         with resolved.path.open("rb") as raw_handle:
             if b"\x00" in raw_handle.read(4096):
                 raise ToolFailure("BINARY_FILE", "Binary file read blocked for text tool.", category="validation")
@@ -2458,6 +2519,7 @@ class Runtime:
         try:
             with resolved.path.open("r", encoding="utf-8", errors="strict", newline="") as handle:
                 for total_lines, line in enumerate(handle, start=1):
+                    digest.update(line.encode("utf-8"))
                     if total_lines < start_line:
                         continue
                     if requested_end is not None and total_lines > requested_end:
@@ -2490,6 +2552,8 @@ class Runtime:
             "path": resolved.display,
             "content": selected,
             "encoding": "utf-8",
+            "revision": digest.hexdigest(),
+            "revision_algorithm": REVISION_ALGORITHM,
             "max_bytes": max_bytes,
             "start_line": start_line,
             "end_line": actual_end,
@@ -2611,7 +2675,7 @@ class Runtime:
         }
 
     def list_files(self, args: dict[str, Any]) -> dict[str, Any]:
-        resolved = self.resolve_file_existing(str(args.get("path", ".")))
+        resolved = self.resolve_file_existing(str(args.get("path") or self.default_search_path))
         if not resolved.path.is_dir():
             raise ToolFailure("NOT_A_DIRECTORY", "Path is not a directory.", category="validation")
         file_workspace = self.file_access.workspace_for_resolved(resolved)
@@ -2640,7 +2704,12 @@ class Runtime:
             return fast_result
         files: list[dict[str, Any]] = []
         truncated = False
+        deadline = time.monotonic() + 10 if self.default_search_path != "." and not args.get("path") else None
+        timed_out = False
         for batch in path_batches(walk_files(resolved.path), 256):
+            if deadline is not None and time.monotonic() >= deadline:
+                timed_out = True
+                break
             # Filter by glob first so git check-ignore only sees candidates.
             candidates = [
                 (path, rel)
@@ -2649,6 +2718,9 @@ class Runtime:
             ]
             ignored = set() if include_ignored else file_workspace.git_ignored_paths([rel for _, rel in candidates])
             for path, rel in candidates:
+                if deadline is not None and time.monotonic() >= deadline:
+                    timed_out = True
+                    break
                 if path.is_symlink() and not file_workspace.is_safe_existing_path(path):
                     continue
                 if file_workspace.is_ignored_path(
@@ -2663,14 +2735,14 @@ class Runtime:
                 if len(files) >= max_results:
                     truncated = True
                     break
-            if truncated:
+            if truncated or timed_out:
                 break
         files.sort(key=lambda item: item["modified"] if args.get("sort") == "modified" else item["path"])
         return {
             "path": resolved.display,
             "files": files,
-            "truncated": truncated,
-            "warnings": ["result limit reached"] if truncated else [],
+            "truncated": truncated or timed_out,
+            "warnings": ["default search time limit reached"] if timed_out else ["result limit reached"] if truncated else [],
         }
 
     def _list_files_with_fd(
@@ -2777,7 +2849,7 @@ class Runtime:
         query = str(args.get("query", ""))
         if not query:
             raise ToolFailure("INVALID_ARGUMENT", "query is required.", category="validation")
-        resolved = self.resolve_file_existing(str(args.get("path", ".")))
+        resolved = self.resolve_file_existing(str(args.get("path") or self.default_search_path))
         file_workspace = self.file_access.workspace_for_resolved(resolved)
         regex = bool(args.get("regex", False))
         case_sensitive = bool(args.get("case_sensitive", False))
@@ -2803,6 +2875,8 @@ class Runtime:
             return fast_result
         matches: list[dict[str, Any]] = []
         total = 0
+        deadline = time.monotonic() + 10 if self.default_search_path != "." and not args.get("path") else None
+        timed_out = False
         flags = 0 if case_sensitive else re.IGNORECASE
         try:
             compiled = re.compile(query, flags) if regex else None
@@ -2812,6 +2886,9 @@ class Runtime:
 
         roots: Iterator[Path] = iter([resolved.path]) if resolved.path.is_file() else walk_files(resolved.path)
         for batch in path_batches(roots, 256):
+            if deadline is not None and time.monotonic() >= deadline:
+                timed_out = True
+                break
             # Filter by glob first so git check-ignore runs once per batch of
             # candidates instead of once per walked file.
             candidates = []
@@ -2828,6 +2905,9 @@ class Runtime:
                 candidates.append((path, rel))
             ignored = file_workspace.git_ignored_paths([rel for _, rel in candidates])
             for path, rel in candidates:
+                if deadline is not None and time.monotonic() >= deadline:
+                    timed_out = True
+                    break
                 if file_workspace.is_ignored_path(path, git_ignored=ignored):
                     continue
                 try:
@@ -2858,12 +2938,14 @@ class Runtime:
                     after = lines[index + 1 : index + 1 + context_lines]
                     display_rel = self.file_access.display_path(path, resolved)
                     matches.append(search_match_item(display_rel, index + 1, column, line, before, after, max_preview_bytes))
+            if timed_out:
+                break
         return {
             "query": query,
             "matches": matches,
             "total_matches": total,
-            "truncated": total > len(matches),
-            "warnings": ["result limit reached"] if total > len(matches) else [],
+            "truncated": timed_out or total > len(matches),
+            "warnings": ["default search time limit reached; total_matches is partial"] if timed_out else ["result limit reached"] if total > len(matches) else [],
         }
 
     def _search_text_with_rg(
@@ -2989,11 +3071,40 @@ class Runtime:
     def apply_patch(self, args: dict[str, Any]) -> dict[str, Any]:
         patch = str(args.get("patch", ""))
         dry_run = bool(args.get("dry_run", False))
+        idempotency_key = str(args.get("idempotency_key") or "").strip() or None
+        request_digest = hashlib.sha256(
+            json_response_payload(
+                {
+                    "patch": patch,
+                    "dry_run": dry_run,
+                    "expected_revisions": args.get("expected_revisions", {}),
+                }
+            )
+        ).hexdigest()
+        expected_revisions = args.get("expected_revisions")
+        if not isinstance(expected_revisions, dict):
+            expected_revisions = {}
         with self.patch_lock:
+            if idempotency_key is not None:
+                replay = self.patch_replays.get(idempotency_key)
+                if replay is not None:
+                    previous_digest, previous_result = replay
+                    if previous_digest != request_digest:
+                        raise ToolFailure(
+                            "IDEMPOTENCY_CONFLICT",
+                            "idempotency_key was already used with different patch arguments.",
+                            category="validation",
+                            details={"idempotency_key": idempotency_key},
+                        )
+                    result = dict(previous_result)
+                    result["deduplicated"] = True
+                    result["message"] = "Existing patch result returned for this idempotency_key; no files were written."
+                    return result
             operations = parse_patch(patch)
             staged: dict[str, StagedFile] = {}
             summaries: list[str] = []
-            affected: list[dict[str, str]] = []
+            affected: list[dict[str, Any]] = []
+            warnings: list[str] = []
             additions = 0
             removals = 0
             for op in operations:
@@ -3008,6 +3119,7 @@ class Runtime:
                     if target.existed:
                         raise ToolFailure("PATCH_FAILED", "Cannot add file that already exists.", category="validation")
                     baseline = FileBaseline.capture(target.path)
+                    self._check_patch_expected_revision(expected_revisions, op.path, target.display, baseline)
                     staged[target.display] = StagedFile(
                         target.display,
                         target.path,
@@ -3015,17 +3127,36 @@ class Runtime:
                         baseline,
                         None,
                     )
-                    affected.append({"path": target.display, "operation": "add"})
+                    added_text = op.add_content or ""
+                    affected.append({
+                        "path": target.display,
+                        "operation": "add",
+                        "revision": content_revision(added_text),
+                        "changed_ranges": [{
+                            "start_line": 1,
+                            "end_line": len(added_text.splitlines()),
+                            "added_lines": len(added_text.splitlines()),
+                            "removed_lines": 0,
+                        }],
+                        "match_quality": "exact",
+                    })
                     summaries.append(f"A {target.display}")
-                    additions += len((op.add_content or "").splitlines())
+                    additions += len(added_text.splitlines())
                 elif op.kind == "delete":
                     target = self.resolve_file_existing(op.path)
                     if target.path.is_dir():
                         raise ToolFailure("PATCH_FAILED", "Cannot delete a directory.", category="validation")
                     prior = staged.get(target.display)
                     baseline = prior.baseline if prior is not None else FileBaseline.capture(target.path)
+                    self._check_patch_expected_revision(expected_revisions, op.path, target.display, baseline)
                     staged[target.display] = StagedFile(target.display, target.path, None, baseline, baseline.mode)
-                    affected.append({"path": target.display, "operation": "delete"})
+                    affected.append({
+                        "path": target.display,
+                        "operation": "delete",
+                        "revision": None,
+                        "changed_ranges": [],
+                        "match_quality": "exact",
+                    })
                     summaries.append(f"D {target.display}")
                     removals += len((baseline.data or b"").splitlines())
                 elif op.kind == "update":
@@ -3036,11 +3167,14 @@ class Runtime:
                     if prior is not None and prior.content is None:
                         raise ToolFailure("PATCH_FAILED", "Cannot update a deleted file.", category="validation")
                     baseline = prior.baseline if prior is not None else FileBaseline.capture(source.path)
+                    self._check_patch_expected_revision(expected_revisions, op.path, source.display, baseline)
                     content = prior.content if prior is not None else baseline.text(source.display)
                     assert content is not None
-                    updated = apply_update_hunks(content, op.hunks, op.path)
+                    outcome = apply_update_hunks_detailed(content, op.hunks, op.path)
+                    updated = outcome.content
+                    warnings.extend(f"{source.display}: {warning}" for warning in outcome.warnings)
                     for hunk in op.hunks:
-                        for line in hunk:
+                        for line in hunk.lines:
                             additions += line.startswith("+")
                             removals += line.startswith("-")
                     source_mode = prior.mode if prior is not None else baseline.mode
@@ -3063,7 +3197,14 @@ class Runtime:
                             dest_baseline,
                             source_mode,
                         )
-                        affected.append({"path": dest.display, "old_path": source.display, "operation": "move"})
+                        affected.append({
+                            "path": dest.display,
+                            "old_path": source.display,
+                            "operation": "move",
+                            "revision": content_revision(updated),
+                            "changed_ranges": outcome.changed_ranges,
+                            "match_quality": outcome.match_quality,
+                        })
                         summaries.append(f"R {source.display} -> {dest.display}")
                     else:
                         staged[source.display] = StagedFile(
@@ -3073,27 +3214,64 @@ class Runtime:
                             baseline,
                             source_mode,
                         )
-                        affected.append({"path": source.display, "operation": "update"})
+                        affected.append({
+                            "path": source.display,
+                            "operation": "update",
+                            "revision": content_revision(updated),
+                            "changed_ranges": outcome.changed_ranges,
+                            "match_quality": outcome.match_quality,
+                        })
                         summaries.append(f"M {source.display}")
             if not affected:
                 raise ToolFailure("PATCH_FAILED", "No files were modified.", category="validation")
             if not dry_run:
                 self._commit_staged_files(list(staged.values()))
-        return {
-            "dry_run": dry_run,
-            "clean": True,
-            "summary": "\n".join(summaries),
-            "affected_files": affected,
-            "additions": additions,
-            "removals": removals,
-            "warnings": [],
-        }
+            result = {
+                "dry_run": dry_run,
+                "clean": True,
+                "revision_algorithm": REVISION_ALGORITHM,
+                "summary": "\n".join(summaries),
+                "affected_files": affected,
+                "additions": additions,
+                "removals": removals,
+                "warnings": warnings,
+            }
+            if idempotency_key is not None and not dry_run:
+                self.patch_replays[idempotency_key] = (request_digest, dict(result))
+            return result
 
     def _validate_patch_path(self, raw_path: str, *, require_existing: bool) -> None:
         if require_existing:
             self.resolve_file_existing(raw_path)
         else:
             self.resolve_file_for_write(raw_path)
+
+    @staticmethod
+    def _check_patch_expected_revision(
+        expected_revisions: dict[str, Any],
+        requested_path: str,
+        display_path: str,
+        baseline: FileBaseline,
+    ) -> None:
+        raw_expected = expected_revisions.get(requested_path, expected_revisions.get(display_path))
+        if raw_expected is None:
+            return
+        expected = str(raw_expected)
+        actual = baseline.digest
+        if actual != expected:
+            raise ToolFailure(
+                "PATCH_CONFLICT",
+                f"File changed since the expected revision: {display_path}",
+                category="conflict",
+                retryable=True,
+                details={
+                    "path": display_path,
+                    "expected_revision": expected,
+                    "current_revision": actual,
+                    "revision_algorithm": REVISION_ALGORITHM,
+                    "retry_hint": "Read the current file and retry with its new revision.",
+                },
+            )
 
     def _commit_staged_files(self, staged: list[StagedFile]) -> None:
         self.patch_committer.commit(staged)
@@ -3146,6 +3324,12 @@ class Runtime:
             "operation_id": command.operation_id,
             "workdir": command.workdir,
             "status": command.status_name(),
+            "operation_outcome": command_outcome(
+                command.status_name(),
+                command.exit_code,
+                command.signal_name,
+                command.timed_out,
+            ),
             "exit_code": command.exit_code,
             "signal": command.signal_name,
             "timed_out": command.timed_out,
@@ -3208,6 +3392,44 @@ class Runtime:
         payload["message"] = "Existing execution returned for this operation_id; no new process was started."
         return payload
 
+    def _existing_operation_replay(
+        self,
+        operation_id: str,
+        operation_digest: str,
+    ) -> dict[str, Any] | None:
+        """Return an already accepted execution before consuming approvals."""
+
+        with self.commands_lock:
+            existing_record = self.command_manager.operations.get(operation_id)
+            if existing_record is None:
+                return None
+            if existing_record.digest != operation_digest:
+                raise ToolFailure(
+                    "OPERATION_CONFLICT",
+                    "operation_id was already used with different execution parameters.",
+                    category="validation",
+                    details={"operation_id": operation_id},
+                )
+            if existing_record.command_id is None:
+                raise ToolFailure(
+                    "OPERATION_PENDING",
+                    "The same operation_id is already being accepted; retry this operation_id shortly instead of starting a new command.",
+                    category="runtime",
+                    retryable=True,
+                    details={
+                        "operation_id": operation_id,
+                        "retry_hint": "Retry exec_command with the same operation_id and identical execution parameters, or use list_commands to discover the command after it is registered.",
+                    },
+                )
+            command = (
+                self.commands.get(existing_record.command_id)
+                or self.output_commands.get(existing_record.command_id)
+            )
+            if command is None:
+                self.command_manager.operations.pop(operation_id, None)
+                return None
+        return self._operation_replay_payload(command)
+
     def exec_command(self, args: dict[str, Any]) -> dict[str, Any]:
         self._prune_commands()
         cmd = str(args.get("cmd", ""))
@@ -3223,13 +3445,11 @@ class Runtime:
         )
         if not workdir.path.is_dir():
             raise ToolFailure("NOT_A_DIRECTORY", "workdir is not a directory.", category="validation")
-        self._check_command_policy(cmd, args)
-        timeout_ms = int(args.get("timeout_ms", 30000))
+        timeout_ms = int(args.get("timeout_ms", 300000))
         yield_ms = int(args.get("yield_time_ms", 10000))
         max_output_bytes = int(args.get("max_output_bytes", 65536))
         tty = bool(args.get("tty", False))
         stdin_text = str(args.get("stdin", ""))
-        env = self._command_env(args.get("env", {}))
         operation_id = str(args.get("operation_id") or "").strip() or None
         operation_digest = (
             self._exec_operation_digest(
@@ -3243,6 +3463,12 @@ class Runtime:
             if operation_id is not None
             else None
         )
+        if operation_id is not None and operation_digest is not None:
+            replay = self._existing_operation_replay(operation_id, operation_digest)
+            if replay is not None:
+                return replay
+        self._check_command_policy(cmd, args)
+        env = self._command_env(args.get("env", {}))
         start = time.time()
         deadline = start + (timeout_ms / 1000.0)
         landlock_fd: int | None = None
@@ -3964,6 +4190,12 @@ class Runtime:
                     "operation_id": command.operation_id,
                     "workdir": command.workdir,
                     "status": command.status_name(),
+                    "operation_outcome": command_outcome(
+                        command.status_name(),
+                        command.exit_code,
+                        command.signal_name,
+                        command.timed_out,
+                    ),
                     "exit_code": command.exit_code,
                     "timed_out": command.timed_out,
                     "started_at": command.started_at,
@@ -4208,6 +4440,13 @@ class Runtime:
         if omitted_bytes:
             self.command_manager.record_omitted_read("read_output")
         result = {
+            "command_id": command.command_id,
+            "operation_outcome": command_outcome(
+                command.status_name(),
+                command.exit_code,
+                command.signal_name,
+                command.timed_out,
+            ),
             "output_ref": output_ref,
             "stream_output_ref": f"command:{command.command_id}:{stream}",
             "stream": stream,
@@ -4395,6 +4634,7 @@ class Runtime:
         git_env = self._git_env()
         staged = bool(args.get("staged", False))
         unstaged = bool(args.get("unstaged", True))
+        include_untracked = bool(args.get("include_untracked", True))
         context = int(args.get("context_lines", 3))
         max_bytes = int(args.get("max_bytes", 262144))
         path_filters = self._git_path_filters(args, repo)
@@ -4405,6 +4645,18 @@ class Runtime:
             chunks.append(self._run_git_diff(git, context, path_filters, cached=False, env=git_env, repo=repo))
         if staged:
             chunks.append(self._run_git_diff(git, context, path_filters, cached=True, env=git_env, repo=repo))
+        warnings: list[str] = []
+        if include_untracked and unstaged:
+            untracked_chunks, untracked_warnings = self._untracked_diffs(
+                git,
+                context,
+                path_filters,
+                max_bytes,
+                env=git_env,
+                repo=repo,
+            )
+            chunks.extend(untracked_chunks)
+            warnings.extend(untracked_warnings)
         combined = b""
         for chunk in chunks:
             if combined and chunk and not combined.endswith(b"\n"):
@@ -4413,15 +4665,83 @@ class Runtime:
         diff_truncation = truncate_text_head(combined.decode("utf-8", errors="replace"), max_lines=DEFAULT_MAX_LINES, max_bytes=max_bytes)
         diff_text = diff_truncation.content
         truncated = diff_truncation.truncated
+        if truncated:
+            warnings.append("diff truncated")
         return {
             "is_repo": True,
             "diff_source": "git",
             **repo.metadata(),
             "diff": diff_text,
             "files": parse_diff_files(diff_text),
+            "include_untracked": include_untracked and unstaged,
             **truncation_fields(diff_truncation),
-            "warnings": ["diff truncated"] if truncated else [],
+            "warnings": warnings,
         }
+
+    def _untracked_diffs(
+        self,
+        git: str,
+        context: int,
+        path_filters: list[str],
+        max_bytes: int,
+        *,
+        env: dict[str, str] | None = None,
+        repo: RepositoryContext,
+    ) -> tuple[list[bytes], list[str]]:
+        listing = [
+            git,
+            "-C",
+            str(repo.root),
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ]
+        if path_filters:
+            listing.append("--")
+            listing.extend(path_filters)
+        completed = self._run_git_bytes(listing, timeout=10, env=env)
+        if completed.returncode != 0:
+            return [], ["untracked files could not be listed"]
+        paths = [
+            entry
+            for entry in completed.stdout.decode("utf-8", errors="replace").split("\0")
+            if entry
+        ]
+        chunks: list[bytes] = []
+        warnings: list[str] = []
+        if len(paths) > MAX_UNTRACKED_DIFF_FILES:
+            warnings.append(
+                f"only the first {MAX_UNTRACKED_DIFF_FILES} of {len(paths)} untracked files are diffed"
+            )
+            paths = paths[:MAX_UNTRACKED_DIFF_FILES]
+        spent = 0
+        for rel in paths:
+            if spent >= max_bytes:
+                warnings.append("untracked diff truncated")
+                break
+            chunk = self._run_git_bytes(
+                [
+                    git,
+                    "-C",
+                    str(repo.root),
+                    "diff",
+                    "--no-index",
+                    "--no-ext-diff",
+                    f"--unified={context}",
+                    "--",
+                    os.devnull,
+                    rel,
+                ],
+                timeout=10,
+                env=env,
+            )
+            if chunk.returncode not in {0, 1}:
+                warnings.append(f"untracked file could not be diffed: {rel}")
+                continue
+            chunks.append(chunk.stdout)
+            spent += len(chunk.stdout)
+        return chunks, warnings
 
     def _run_git_diff(
         self, git: str, context: int, path_filters: list[str], *, cached: bool, env: dict[str, str] | None = None,
@@ -4764,7 +5084,11 @@ class Runtime:
 
 
     def request_permissions(self, args: dict[str, Any]) -> dict[str, Any]:
-        if self.dangerously_skip_all_permissions:
+        permission = str(args["permission"])
+        network_policy_requires_approval = (
+            permission == "network" and self.network_policy != "unrestricted"
+        )
+        if self.dangerously_skip_all_permissions and not network_policy_requires_approval:
             grant_mode = "host" if self.capabilities.host_environment else "dangerously_skip_all_permissions"
             warning = (
                 "host mode is enabled; permission-gated operations are auto-granted with host-user authority"
@@ -4793,7 +5117,7 @@ class Runtime:
         arguments = cast(dict[str, Any], args["arguments"])
         approval = self._runtime_state().create_approval(
             tool_name=tool_name,
-            permission=str(args["permission"]),
+            permission=permission,
             reason=str(args["reason"]),
             arguments_hash=approval_arguments_hash(tool_name, arguments),
             displayed_arguments=cast(dict[str, Any], redact_for_trace(arguments)),
@@ -6201,8 +6525,8 @@ def object_schema(properties: dict[str, Any] | None = None, required: list[str] 
     }
 
 
-def tool_output_schema() -> dict[str, Any]:
-    return {
+def tool_output_schema(name: str | None = None) -> dict[str, Any]:
+    schema = {
         "type": "object",
         "properties": {
             "ok": {"type": "boolean"},
@@ -6221,6 +6545,128 @@ def tool_output_schema() -> dict[str, Any]:
         },
         "required": ["ok"],
         "additionalProperties": True,
+    }
+    if name is not None:
+        properties = cast(dict[str, Any], schema["properties"])
+        schema["properties"] = {
+            **properties,
+            **tool_output_properties().get(name, {}),
+        }
+    return schema
+
+
+@functools.cache
+def tool_output_properties() -> dict[str, dict[str, Any]]:
+    string = {"type": "string"}
+    nullable_string = {"type": ["string", "null"]}
+    integer = {"type": "integer"}
+    nullable_integer = {"type": ["integer", "null"]}
+    boolean = {"type": "boolean"}
+    string_array = {"type": "array", "items": {"type": "string"}}
+    object_array = {
+        "type": "array",
+        "items": {"type": "object", "additionalProperties": True},
+    }
+    command = {
+        "command_id": string,
+        "operation_id": nullable_string,
+        "workdir": string,
+        "status": string,
+        "operation_outcome": {**string, "enum": list(COMMAND_OUTCOMES)},
+        "exit_code": nullable_integer,
+        "signal": nullable_string,
+        "timed_out": boolean,
+        "output_ref": nullable_string,
+        "output_refs": {
+            "type": "object",
+            "additionalProperties": {"type": "string"},
+        },
+        "summary": string,
+        "preview": string,
+        "truncated": boolean,
+        "warnings": string_array,
+    }
+    return {
+        "read_file": {
+            "path": string,
+            "content": string,
+            "revision": string,
+            "revision_algorithm": {**string, "enum": [REVISION_ALGORITHM]},
+            "start_line": integer,
+            "end_line": integer,
+            "total_lines": integer,
+            "total_bytes": integer,
+            "bytes_read": integer,
+            "truncated": boolean,
+            "warnings": string_array,
+        },
+        "apply_patch": {
+            "dry_run": boolean,
+            "clean": boolean,
+            "deduplicated": boolean,
+            "revision_algorithm": {**string, "enum": [REVISION_ALGORITHM]},
+            "summary": string,
+            "affected_files": object_array,
+            "additions": integer,
+            "removals": integer,
+            "warnings": string_array,
+        },
+        "exec_command": {**command, "elapsed_ms": integer},
+        "get_command": command,
+        "write_stdin": command,
+        "kill_command": {**command, "killed": boolean},
+        "list_commands": {
+            "commands": object_array,
+            "count": integer,
+            "truncated": boolean,
+        },
+        "read_output": {
+            "command_id": string,
+            "operation_outcome": {**string, "enum": list(COMMAND_OUTCOMES)},
+            "output_ref": string,
+            "stream": string,
+            "content": string,
+            "offset": integer,
+            "next_offset": nullable_integer,
+            "total_stream_bytes": integer,
+            "truncated": boolean,
+            "warnings": string_array,
+        },
+        "git_status": {
+            "is_repo": boolean,
+            "branch": nullable_string,
+            "entries": object_array,
+            "truncated": boolean,
+        },
+        "git_diff": {
+            "is_repo": boolean,
+            "diff": string,
+            "files": object_array,
+            "include_untracked": boolean,
+            "truncated": boolean,
+            "warnings": string_array,
+        },
+        "git_log": {
+            "is_repo": boolean,
+            "commits": object_array,
+            "truncated": boolean,
+        },
+        "git_show": {
+            "content": string,
+            "files": object_array,
+            "truncated": boolean,
+        },
+        "git_blame": {
+            "path": string,
+            "lines": object_array,
+            "truncated": boolean,
+        },
+        "request_permissions": {
+            "status": string,
+            "approval_id": string,
+            "grant_id": string,
+            "warnings": string_array,
+        },
     }
 
 
@@ -6322,7 +6768,7 @@ def tool_definition(name: str, *, fake_readonly: bool = False) -> dict[str, Any]
                if name.startswith("git_") else "")
         ),
         "inputSchema": schemas[name],
-        "outputSchema": tool_output_schema(),
+        "outputSchema": tool_output_schema(name),
         "annotations": annotations,
     }
 
@@ -6374,6 +6820,19 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "project_id": {**string, "minLength": 1, "maxLength": 200},
             }
         ),
+        "local_capabilities_search": object_schema({
+            "query": {**string, "maxLength": 200},
+            "kind": {**string, "enum": ["skill", "plugin"]},
+            "limit": {**integer, "minimum": 1, "maximum": 25},
+            "cursor": {**string, "maxLength": 8},
+        }),
+        "local_skill_read": object_schema({
+            "id": {**string, "minLength": 1, "maxLength": 64},
+            "resources": {**string_array, "maxItems": 3},
+        }, ["id"]),
+        "local_plugin_inspect": object_schema({
+            "id": {**string, "minLength": 1, "maxLength": 64},
+        }, ["id"]),
         "server_info": object_schema(),
         "runtime_doctor": object_schema(),
         "read_file": object_schema(
@@ -6424,7 +6883,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         ),
         "list_files": object_schema(
             {
-                "path": {**string, "default": "."},
+                "path": {**string, "description": "Omit for the configured default search folder; '.' explicitly means the project workspace."},
                 "patterns": string_array,
                 "glob": string,
                 "exclude_patterns": string_array,
@@ -6437,7 +6896,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         "search_text": object_schema(
             {
                 "query": {**string, "minLength": 1},
-                "path": {**string, "default": "."},
+                "path": {**string, "description": "Omit for the configured default search folder; '.' explicitly means the project workspace."},
                 "regex": {**boolean, "default": False},
                 "case_sensitive": {**boolean, "default": False},
                 "include_globs": string_array,
@@ -6449,7 +6908,22 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             },
             ["query"],
         ),
-        "apply_patch": object_schema({"patch": {**string, "minLength": 1}, "dry_run": {**boolean, "default": False}}, ["patch"]),
+        "apply_patch": object_schema(
+            {
+                "patch": {**string, "minLength": 1},
+                "dry_run": {**boolean, "default": False},
+                "idempotency_key": {**string, "minLength": 1, "maxLength": 200},
+                "expected_revisions": {
+                    "type": "object",
+                    "additionalProperties": {**string, "minLength": 1},
+                    "default": {},
+                    "description": (
+                        "Optional path-to-revision preconditions using the sha256 revision returned by read_file."
+                    ),
+                },
+            },
+            ["patch"],
+        ),
         "exec_command": object_schema(
             {
                 "cmd": {**string, "minLength": 1},
@@ -6457,7 +6931,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "operation_id": {**string, "minLength": 1, "maxLength": 200},
                 "workdir": {**string, "default": "."},
                 "cwd": {**string},
-                "timeout_ms": {**integer, "minimum": 1, "maximum": 600000, "default": 30000},
+                "timeout_ms": {**integer, "minimum": 1, "maximum": 600000, "default": 300000},
                 "yield_time_ms": {**integer, "minimum": 0, "maximum": 30000, "default": 10000},
                 "max_output_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 65536},
                 "verbosity": {**string, "enum": ["summary", "preview", "full"]},
@@ -6525,6 +6999,13 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "paths": string_array,
                 "staged": {**boolean, "default": False},
                 "unstaged": {**boolean, "default": True},
+                "include_untracked": {
+                    **boolean,
+                    "default": True,
+                    "description": (
+                        "Diff untracked files against an empty file so newly created files appear as additions."
+                    ),
+                },
                 "context_lines": {**integer, "minimum": 0, "maximum": 20, "default": 3},
                 "max_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 262144},
             }
@@ -7615,6 +8096,7 @@ def build_runtime(
         workspace,
         file_access_root=file_access_root,
         file_access_roots=file_access_roots,
+        default_search_path=str(getattr(args, "default_search_path", ".") or "."),
         enable_view_image=args.enable_view_image,
         state_root=Path(args.state_root).expanduser() if getattr(args, "state_root", None) else None,
         permission_mode=runtime_policy.permission_mode,
@@ -7835,6 +8317,11 @@ def run_http(args: argparse.Namespace) -> int:
         getattr(args, "project_gateway", False)
         or getattr(args, "project_registry_file", None)
     )
+    local_roots = getattr(args, "local_capability_root", None) or []
+    if local_roots and not gateway_enabled:
+        print("ERROR: --local-capability-root requires --project-gateway.", file=sys.stderr)
+        control_runtime.close()
+        return 2
     if getattr(args, "project_registry_only", False) and not getattr(
         args, "project_registry_file", None
     ):
@@ -7884,6 +8371,13 @@ def run_http(args: argparse.Namespace) -> int:
         session_registry = SessionRegistry(
             ttl_seconds=int(getattr(args, "gateway_session_ttl", DEFAULT_GATEWAY_SESSION_TTL_SECONDS))
         )
+        try:
+            local_capabilities = LocalCapabilityCatalog(local_roots) if local_roots else None
+        except (OSError, ValueError) as exc:
+            print(f"ERROR: Invalid local capability root: {exc}", file=sys.stderr)
+            project_registry.close()
+            control_runtime.close()
+            return 2
         runtime = GatewayRuntime(
             control_runtime,
             project_registry,
@@ -7892,6 +8386,8 @@ def run_http(args: argparse.Namespace) -> int:
                 "project_context",
                 fake_readonly=control_runtime.fake_readonly_annotations,
             ),
+            local_capabilities=local_capabilities,
+            local_tool_definition=lambda name: tool_definition(name),
         )
     else:
         runtime = control_runtime
@@ -7958,6 +8454,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--local-capability-root",
+        action="append",
+        default=None,
+        help=(
+            "explicit directory of local Agent Skills and plugin manifests to expose as read-only "
+            "gateway catalog metadata; repeat for multiple directories. Requires --project-gateway. "
+            "Does not grant file tools access or execute plugin actions"
+        ),
+    )
+    parser.add_argument(
         "--project-id",
         default=os.environ.get(f"{ENV_PREFIX}_PROJECT_ID"),
         help="stable id for the bootstrap workspace project; defaults to a deterministic path hash",
@@ -7990,6 +8496,11 @@ def build_parser() -> argparse.ArgumentParser:
             "addresses the first configured root. Defaults to CODING_TOOLS_MCP_FILE_ACCESS_ROOT "
             "or the path-separated CODING_TOOLS_MCP_FILE_ACCESS_ROOTS when set"
         ),
+    )
+    parser.add_argument(
+        "--default-search-path",
+        default=".",
+        help="default directory for list_files and search_text when path is omitted; must be inside the file access scope. Explicit paths remain project-relative or absolute",
     )
     parser.add_argument(
         "--host",

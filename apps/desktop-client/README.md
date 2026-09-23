@@ -21,6 +21,10 @@ API.
   and host commands can use the host filesystem; relative paths still resolve from
   the workspace. Git evidence, LSP, check discovery, project instructions, and project
   context stay anchored to the selected workspace rather than following arbitrary host paths.
+- Workspace settings expose a separate default search folder for `list_files` and
+  `search_text` when no path is supplied. It can be the project, an allowed folder,
+  or (in Full Access) the user's home or a chosen folder; it never changes the
+  underlying MCP access permissions. Whole-Mac searches require an explicit path.
 - **Full Access** launches host mode with SSH/Git credentials and compatibility
   annotations enabled for clients that otherwise refuse command tools. On macOS,
   the launcher also recovers `SSH_AUTH_SOCK` from the GUI environment, login shell,
@@ -35,6 +39,9 @@ API.
 - Desktop-launched runtimes expose the same small direct primitive catalog as
   other clients, plus gateway-scoped `project_context`. Planning, review, task,
   checkpoint, and Git-write workflows stay with the calling model and native CLIs.
+- Optionally share specific local Agent Skill or plugin directories with the shared
+  Gateway. ChatGPT can search their metadata and read `SKILL.md` files; local plugin
+  actions and hooks do not become callable without separate MCP tools.
 - The compact panel surfaces pending approval decisions only when user action is
   required. Runtime and installation logs remain directly accessible in the same panel.
 
@@ -70,8 +77,8 @@ locations.
 pipeline. For a new version, push a version-matched tag such as:
 
 ```bash
-git tag desktop-v0.4.2
-git push origin desktop-v0.4.2
+git tag desktop-v0.5.0
+git push origin desktop-v0.5.0
 ```
 
 Pushing the tag automatically starts the complete release workflow. To release
@@ -81,7 +88,7 @@ or retry an **existing** tag, use the standard maintainer/agent command:
 gh workflow run desktop-release.yml \
   -R iihciyekub/coding-tools-mcp \
   --ref iiaide \
-  -f tag=desktop-v0.4.2 \
+  -f tag=desktop-v0.5.0 \
   -f mode=release
 ```
 
@@ -96,7 +103,7 @@ signs and notarizes both the app and final DMG, builds the Windows x64 portable
 ZIP when selected by `releasePlatforms` in `package.json`, publishes immutable GitHub Release assets and checksums, then updates the
 Homebrew Tap.
 
-Version 0.4.2 selects macOS only. Existing Windows releases remain available.
+Version 0.5.0 selects macOS only. Existing Windows releases remain available.
 
 The macOS release job uses the protected `production-release` GitHub
 Environment, matching the production signing model used by WOS Aide. Configure
@@ -162,6 +169,12 @@ Build the native application bundle/installer:
 make desktop-build
 ```
 
+For an isolated macOS development app that keeps separate settings and keychain
+items from the stable installation, run `npm run build:dev-app`. It produces
+`coding-tools-mcp-dev.app` with a separate bundle identifier. Sign and install
+the local app using a valid developer certificate; this is not a public desktop
+release or a replacement for the signed/notarized release workflow.
+
 Release bundles contain only this project's pure-Python wheel and a production
 requirements file exported from `uv.lock`, including dependency hashes. They do
 not contain Python or Node runtimes. Old generated PyInstaller resources are
@@ -223,6 +236,12 @@ Server URL to the clipboard automatically.
 
 The temporary hostname changes whenever the workspace tunnel restarts. Update
 the custom MCP app address in ChatGPT after starting a new tunnel.
+
+To use installed local Skills, stop the shared Gateway, open Workspace settings,
+and add only the specific Skill or plugin folders to **Local Skills and plugins**.
+After restarting, refresh the MCP connection metadata in ChatGPT developer mode
+and start a new conversation. The optional catalog tools let ChatGPT search and
+read those files; they do not activate Codex-only plugin scripts or hooks.
 
 ## Security model
 

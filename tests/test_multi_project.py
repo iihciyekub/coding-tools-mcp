@@ -121,6 +121,9 @@ class MultiProjectTests(unittest.TestCase):
 
 
     def test_non_git_fallback_is_explicit_and_explicit_repo_never_falls_back(self) -> None:
+        self.assertFalse(self.call("git_status")["is_repo"])
+        self.assertEqual(self.call("git_status", {"repo_path": "project-a"})["repo_root"], str(self.a))
+        self.assertEqual(self.call("git_status", {"repo_path": "project-b"})["repo_root"], str(self.b))
         self.assertEqual(self.call("git_diff")["diff_source"], "patch_baseline")
         self.assertFalse(self.call("git_diff")["is_repo"])
         (self.workspace / "not-a-repo").mkdir()
@@ -173,6 +176,20 @@ class MultiProjectTests(unittest.TestCase):
         self.assertIn("A change", diff["diff"])
         self.assertNotIn("B change", diff["diff"])
         self.assertNotIn("project-b", str(rules["instructions"]))
+
+    def test_git_diff_includes_untracked_files_by_default_and_can_exclude_them(self) -> None:
+        new_file = self.a / "src/new.py"
+        new_file.write_text("NEW_FILE_MARKER = True\n", encoding="utf-8")
+        included = self.call("git_diff", {"repo_path": "project-a"})
+        self.assertTrue(included["include_untracked"])
+        self.assertIn("+NEW_FILE_MARKER = True", included["diff"])
+
+        excluded = self.call(
+            "git_diff",
+            {"repo_path": "project-a", "include_untracked": False},
+        )
+        self.assertFalse(excluded["include_untracked"])
+        self.assertNotIn("NEW_FILE_MARKER", excluded["diff"])
 
     def test_commands_keep_workdirs_and_filter_recovery(self) -> None:
         runs = []

@@ -1,6 +1,6 @@
 mod environment;
 
-use crate::models::{LogBundle, RuntimeStatus, WorkspaceProfile, MCP_ENDPOINT_PATH};
+use crate::models::{GatewayConfig, LogBundle, RuntimeStatus, WorkspaceProfile, MCP_ENDPOINT_PATH};
 use crate::resource_installer;
 use chrono::Local;
 use rand::distr::{Alphanumeric, SampleString};
@@ -365,6 +365,7 @@ impl RuntimeManager {
 pub fn start_gateway(
     manager: &Arc<Mutex<RuntimeManager>>,
     profiles: &[WorkspaceProfile],
+    gateway_config: &GatewayConfig,
     registry_path: &Path,
 ) -> Result<RuntimeStatus, String> {
     let gateway_profile = profiles
@@ -406,7 +407,7 @@ pub fn start_gateway(
         }
         start_gateway_session(
             profiles,
-            &gateway_profile,
+            (&gateway_profile, gateway_config),
             registry_path,
             &log_dir,
             resolved,
@@ -775,6 +776,7 @@ fn project_runtime_fingerprint(profile: &WorkspaceProfile) -> String {
     profile.runtime.permission_mode.hash(&mut hasher);
     profile.runtime.file_access_scope.hash(&mut hasher);
     profile.runtime.allowed_paths.hash(&mut hasher);
+    profile.runtime.default_search_path.hash(&mut hasher);
     for variable in &profile.runtime.environment_variables {
         variable.name.hash(&mut hasher);
         variable.value.hash(&mut hasher);
@@ -827,6 +829,11 @@ fn spawn_project_runtime(
         .arg(runtime_state_root);
     for root in file_access_roots(profile) {
         command.arg("--file-access-root").arg(root);
+    }
+    if !profile.runtime.default_search_path.is_empty() {
+        command
+            .arg("--default-search-path")
+            .arg(&profile.runtime.default_search_path);
     }
     command
         .current_dir(&profile.path)
@@ -918,7 +925,7 @@ fn write_gateway_registry(
 }
 
 fn spawn_gateway_runtime(
-    profile: &WorkspaceProfile,
+    gateway: (&WorkspaceProfile, &GatewayConfig),
     control_dir: &Path,
     registry_path: &Path,
     log_dir: &Path,
@@ -926,6 +933,7 @@ fn spawn_gateway_runtime(
     runtime_state_root: &Path,
     server_name: &str,
 ) -> Result<ManagedChild, String> {
+    let (profile, gateway_config) = gateway;
     let (program, prefix) = resolved;
     let mut command = Command::new(program);
     command
@@ -948,6 +956,9 @@ fn spawn_gateway_runtime(
         ])
         .arg("--state-root")
         .arg(runtime_state_root);
+    for root in &gateway_config.local_capability_roots {
+        command.arg("--local-capability-root").arg(root);
+    }
     command
         .current_dir(control_dir)
         .env("PATH", effective_path());
@@ -1000,13 +1011,14 @@ fn spawn_gateway_runtime(
 
 fn start_gateway_session(
     profiles: &[WorkspaceProfile],
-    gateway_profile: &WorkspaceProfile,
+    gateway: (&WorkspaceProfile, &GatewayConfig),
     registry_path: &Path,
     log_dir: &Path,
     resolved: (PathBuf, Vec<String>),
     data_dir: &Path,
     cancelled: &AtomicBool,
 ) -> Result<ManagedGatewaySession, String> {
+    let (gateway_profile, gateway_config) = gateway;
     if cancelled.load(Ordering::Relaxed) {
         return Err("Gateway startup was cancelled.".into());
     }
@@ -1055,7 +1067,7 @@ fn start_gateway_session(
     fs::create_dir_all(log_dir).map_err(|error| error.to_string())?;
     let server_name = new_server_name(&gateway_profile.runtime.server_name_prefix);
     let mut runtime = match spawn_gateway_runtime(
-        gateway_profile,
+        (gateway_profile, gateway_config),
         &control_dir,
         registry_path,
         log_dir,
@@ -1321,6 +1333,11 @@ fn spawn_runtime(
         .arg(runtime_state_root);
     for root in file_access_roots(profile) {
         command.arg("--file-access-root").arg(root);
+    }
+    if !profile.runtime.default_search_path.is_empty() {
+        command
+            .arg("--default-search-path")
+            .arg(&profile.runtime.default_search_path);
     }
     if profile.runtime.permission_mode == "host" {
         command.arg("--dangerously-fake-readonly-annotations");
@@ -2030,7 +2047,7 @@ while True:
         fs::create_dir_all(&data).unwrap();
         let mut session = start_gateway_session(
             &profiles,
-            &first,
+            (&first, &GatewayConfig::from_workspace_profile(&first)),
             &registry_path,
             &temporary.path().join("gateway-logs"),
             (

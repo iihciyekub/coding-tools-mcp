@@ -232,6 +232,21 @@ class MCPContractTests(ComplianceTestCase):
                 self.assert_schema_object(output_schema)
                 self.assertIn("ok", output_schema.get("required", []))
 
+    def test_core_tool_output_schemas_publish_recovery_and_evidence_fields(self) -> None:
+        tools = {str(tool["name"]): tool for tool in self.client.list_tools()}
+        exec_properties = tools["exec_command"]["outputSchema"]["properties"]
+        self.assertIn("command_id", exec_properties)
+        self.assertIn("operation_outcome", exec_properties)
+        self.assertIn("exit_code", exec_properties)
+
+        patch_properties = tools["apply_patch"]["outputSchema"]["properties"]
+        self.assertIn("revision_algorithm", patch_properties)
+        self.assertIn("affected_files", patch_properties)
+
+        diff_properties = tools["git_diff"]["outputSchema"]["properties"]
+        self.assertIn("include_untracked", diff_properties)
+        self.assertIn("files", diff_properties)
+
     def test_tool_annotations_match_mcp_sdk_hint_shape(self) -> None:
         for tool in self.client.list_tools():
             name = str(tool.get("name"))
@@ -1536,7 +1551,9 @@ class MCPContractTests(ComplianceTestCase):
             self.assertIsInstance(tools, list)
             names = {tool.get("name") for tool in tools}
             self.assertTrue(names >= set(REQUIRED_TOOLS))
-            self.assertEqual(names, set(TOOL_REGISTRY) - {"project_context"})
+            self.assertEqual(names, set(TOOL_REGISTRY) - {
+                "project_context", "local_capabilities_search", "local_skill_read", "local_plugin_inspect"
+            })
             for tool in tools:
                 # The cache hints describe the catalog, not the entries in it;
                 # a tool definition is a schema clients validate against.
@@ -1707,6 +1724,7 @@ class MCPContractTests(ComplianceTestCase):
             self.assertTrue(instructions)
             self.assertIn("Relative paths stay workspace-relative", instructions)
             self.assertIn("anchored to the configured workspace", instructions)
+            self.assertIn("pass repo_path to Git tools", instructions)
             self.assertIn(instructions_file, instructions)
             self.assertEqual(result.get("ttlMs"), 0)
             self.assertEqual(result.get("cacheScope"), "private")

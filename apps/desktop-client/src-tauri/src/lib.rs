@@ -45,6 +45,7 @@ struct DesktopState {
 #[derive(Serialize)]
 struct DesktopSnapshot {
     language: String,
+    home_directory: Option<String>,
     gateway: GatewayConfig,
     projects: Vec<ProjectProfile>,
     migration_warning: Option<String>,
@@ -93,6 +94,8 @@ fn desktop_snapshot(state: tauri::State<'_, DesktopState>) -> Result<DesktopSnap
         .collect();
     Ok(DesktopSnapshot {
         language,
+        home_directory: models::user_home_directory()
+            .map(|path| path.to_string_lossy().into_owned()),
         gateway,
         projects,
         migration_warning,
@@ -198,12 +201,13 @@ fn save_profile(
     state: tauri::State<'_, DesktopState>,
 ) -> Result<WorkspaceProfile, String> {
     normalize_allowed_paths(&mut profile)?;
-    let requested_gateway = GatewayConfig::from_workspace_profile(&profile);
+    let mut requested_gateway = GatewayConfig::from_workspace_profile(&profile);
     let current_gateway = state
         .store
         .lock()
         .map_err(|_| "Profile store is unavailable.")?
         .gateway();
+    requested_gateway.local_capability_roots = current_gateway.local_capability_roots.clone();
     let gateway_active = state
         .runtime
         .lock()
@@ -219,6 +223,39 @@ fn save_profile(
         .update(profile)?;
     reconcile_project_runtimes(state.inner())?;
     Ok(saved)
+}
+
+#[tauri::command]
+fn save_local_capability_roots(
+    roots: Vec<String>,
+    state: tauri::State<'_, DesktopState>,
+) -> Result<GatewayConfig, String> {
+    if state
+        .runtime
+        .lock()
+        .map_err(|_| "Runtime manager is unavailable.")?
+        .gateway_is_active()
+    {
+        return Err("Stop the shared Gateway before changing local Skill folders.".into());
+    }
+    let home = models::user_home_directory();
+    let mut normalized = Vec::new();
+    for raw in roots {
+        let path = std::fs::canonicalize(&raw)
+            .map_err(|error| format!("Could not resolve Skill folder {raw}: {error}"))?;
+        if !path.is_dir() || path.parent().is_none() || home.as_ref() == Some(&path) {
+            return Err(format!("Choose a specific Skill or plugin folder: {raw}"));
+        }
+        let value = path.to_string_lossy().into_owned();
+        if !normalized.contains(&value) {
+            normalized.push(value);
+        }
+    }
+    state
+        .store
+        .lock()
+        .map_err(|_| "Profile store is unavailable.")?
+        .set_local_capability_roots(normalized)
 }
 
 fn reconcile_project_runtimes(state: &DesktopState) -> Result<(), String> {
@@ -273,12 +310,16 @@ async fn start_profile(
     let store = Arc::clone(&state.store);
     let runtime = Arc::clone(&state.runtime);
     tauri::async_runtime::spawn_blocking(move || {
-        let (profiles, registry_path) = {
+        let (profiles, gateway_config, registry_path) = {
             let mut store = store.lock().map_err(|_| "Profile store is unavailable.")?;
             store.prepare_for_start(&profile_id)?;
-            (store.profiles(), store.project_registry_path())
+            (
+                store.profiles(),
+                store.gateway(),
+                store.project_registry_path(),
+            )
         };
-        start_gateway(&runtime, &profiles, &registry_path)
+        start_gateway(&runtime, &profiles, &gateway_config, &registry_path)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -387,8 +428,8 @@ fn open_project_window(
     let url = format!("index.html?project={}", profile.id);
     WebviewWindowBuilder::new(&app, label, WebviewUrl::App(url.into()))
         .title(format!("Coding Tools MCP — {}", profile.name))
-        .inner_size(360.0, 520.0)
-        .min_inner_size(320.0, 300.0)
+        .inner_size(420.0, 520.0)
+        .min_inner_size(420.0, 300.0)
         .resizable(true)
         .decorations(true)
         .always_on_top(false)
@@ -1363,7 +1404,7 @@ fn start_workspace_from_menu(app: AppHandle, profile_id: String) {
     tauri::async_runtime::spawn_blocking(move || {
         let result = (|| {
             let state = app.state::<DesktopState>();
-            let (profiles, registry_path) = {
+            let (profiles, gateway_config, registry_path) = {
                 let mut store = state
                     .store
                     .lock()
@@ -1373,9 +1414,13 @@ fn start_workspace_from_menu(app: AppHandle, profile_id: String) {
                     .ok_or_else(|| "Workspace profile was not found.".to_string())?;
                 let profile = store.update(quick_tunnel_profile(profile))?;
                 store.prepare_for_start(&profile.id)?;
-                (store.profiles(), store.project_registry_path())
+                (
+                    store.profiles(),
+                    store.gateway(),
+                    store.project_registry_path(),
+                )
             };
-            start_gateway(&state.runtime, &profiles, &registry_path)?;
+            start_gateway(&state.runtime, &profiles, &gateway_config, &registry_path)?;
             Ok::<(), String>(())
         })();
         if let Err(error) = result {
@@ -1772,7 +1817,7 @@ pub fn run() {
             let panel =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                     .title("Coding Tools MCP")
-                    .inner_size(320.0, 374.0)
+                    .inner_size(420.0, 374.0)
                     .minimizable(false)
                     .maximizable(false)
                     .closable(false)
@@ -1828,6 +1873,7 @@ pub fn run() {
             create_profile,
             create_full_access_profile,
             save_profile,
+            save_local_capability_roots,
             delete_profile,
             start_profile,
             stop_profile,

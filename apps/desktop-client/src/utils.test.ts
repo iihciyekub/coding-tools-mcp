@@ -16,7 +16,7 @@ const profile: WorkspaceProfile = {
     cloudflare_token: "",
   },
   auth: { type: "oauth", oauth_password: "pw", oauth_token_secret: "secret", bearer_token: "token" },
-  runtime: { server_name_prefix: "www", local_port: 28767, permission_mode: "trusted", file_access_scope: "workspace", allowed_paths: [], environment_variables: [] },
+  runtime: { server_name_prefix: "www", local_port: 28767, permission_mode: "trusted", file_access_scope: "workspace", allowed_paths: [], default_search_path: "", environment_variables: [] },
 };
 
 describe("desktop URL helpers", () => {

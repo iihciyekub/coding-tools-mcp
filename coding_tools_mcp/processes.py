@@ -13,6 +13,7 @@ from .textutils import DEFAULT_MAX_LINES, TextTruncation, truncate_text_tail
 
 
 COMMAND_BUFFER_BYTES = 524_288
+COMMAND_OUTCOMES = ("exited_0", "exited_nonzero", "timeout", "signal", "running")
 # Fraction of the per-stream budget frozen as the head segment. The head keeps
 # the earliest output (command echo, first error) that a tail-only rolling
 # buffer would lose first, mirroring the head+tail retention used by other
@@ -280,6 +281,12 @@ class CommandRun:
             "command_id": self.command_id,
             "operation_id": self.operation_id,
             "status": status,
+            "operation_outcome": command_outcome(
+                status,
+                self.exit_code,
+                self.signal_name,
+                self.timed_out,
+            ),
             "exit_code": self.exit_code,
             "signal": self.signal_name,
             "timed_out": self.timed_out,
@@ -400,6 +407,23 @@ class CommandRun:
                     self.stderr_dropped_bytes,
                 )
         raise ValueError(f"Unknown output stream: {stream}")
+
+
+def command_outcome(
+    status: str,
+    exit_code: int | None,
+    signal_name: str | None,
+    timed_out: bool,
+) -> str:
+    """Classify process execution separately from tool-call success."""
+
+    if timed_out or status == "timeout":
+        return "timeout"
+    if status == "running":
+        return "running"
+    if signal_name is not None or status == "terminated":
+        return "signal"
+    return "exited_0" if exit_code == 0 else "exited_nonzero"
 
 
 def start_reader_threads(command: CommandRun) -> None:

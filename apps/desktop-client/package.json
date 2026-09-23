@@ -1,13 +1,14 @@
 {
   "name": "coding-tools-mcp-desktop",
   "private": true,
-  "version": "0.4.2",
+  "version": "0.5.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "build:runtime": "node ./build-bundled-runtime.mjs",
     "build:bundle": "npm run build:runtime && npm run build",
+    "build:dev-app": "CODING_TOOLS_MCP_BUILD_CHANNEL=preview npm run tauri -- build --config tauri.dev.conf.json --bundles app --no-sign",
     "build:dmg": "bash ./create-dmg.sh",
     "test": "vitest run",
     "check": "tsc --noEmit && vitest run",

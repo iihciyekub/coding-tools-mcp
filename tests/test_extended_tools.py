@@ -48,6 +48,41 @@ class ExtendedToolTests(unittest.TestCase):
         self.assertFalse(result["isError"], result)
         return "\n".join(item.get("text", "") for item in result["content"] if item.get("type") == "text")
 
+    def test_default_search_folder_changes_only_omitted_search_paths(self) -> None:
+        external = Path(self.temp.name) / "shared"
+        external.mkdir()
+        (external / "outside.txt").write_text("external-marker\n", encoding="utf-8")
+        runtime = Runtime(
+            self.workspace,
+            state_root=self.state_root,
+            permission_mode="trusted",
+            file_access_roots=(external,),
+            default_search_path=str(external),
+        )
+        try:
+            listed = self.payload(runtime, "list_files", {})
+            self.assertEqual([Path(item["path"]).name for item in listed["files"]], ["outside.txt"])
+            found = self.payload(runtime, "search_text", {"query": "external-marker"})
+            self.assertEqual(len(found["matches"]), 1)
+            project = self.payload(runtime, "search_text", {"query": "def answer", "path": "."})
+            self.assertEqual(len(project["matches"]), 1)
+            not_in_project = self.payload(runtime, "search_text", {"query": "external-marker", "path": "."})
+            self.assertEqual(not_in_project["matches"], [])
+            with mock.patch.object(runtime, "_list_files_with_fd", return_value=None), mock.patch(
+                "coding_tools_mcp.server.time.monotonic", side_effect=[100, 111]
+            ):
+                timed_out = runtime.list_files({})
+            self.assertTrue(timed_out["truncated"])
+            self.assertIn("time limit", timed_out["warnings"][0])
+            with mock.patch.object(runtime, "_search_text_with_rg", return_value=None), mock.patch(
+                "coding_tools_mcp.server.time.monotonic", side_effect=[100, 111]
+            ):
+                timed_out_search = runtime.search_text({"query": "external-marker"})
+            self.assertTrue(timed_out_search["truncated"])
+            self.assertIn("time limit", timed_out_search["warnings"][0])
+        finally:
+            runtime.close()
+
 
 
 
@@ -236,6 +271,74 @@ class ExtendedToolTests(unittest.TestCase):
             )
             self.assertTrue(rejected["isError"])
             self.assertEqual(rejected["structuredContent"]["error"]["code"], "APPROVAL_SCOPE_MISMATCH")
+        finally:
+            runtime.close()
+
+    def test_approved_operation_id_replay_does_not_reconsume_approval(self) -> None:
+        runtime = self.runtime()
+        command_args = {
+            "cmd": "echo $(pwd)",
+            "operation_id": "approved-operation-replay",
+        }
+        try:
+            requested = self.payload(
+                runtime,
+                "request_permissions",
+                {
+                    "tool_name": "exec_command",
+                    "permission": "shell_expansion",
+                    "reason": "Exercise recoverable approved execution.",
+                    "arguments": command_args,
+                },
+            )
+            approval_id = str(requested["approval_id"])
+            database = sqlite3.connect(runtime.runtime_state.db_path)
+            try:
+                database.execute(
+                    "UPDATE approvals SET status='approved', decided_at=strftime('%s','now') WHERE approval_id=?",
+                    (approval_id,),
+                )
+                database.commit()
+            finally:
+                database.close()
+
+            first = self.payload(
+                runtime,
+                "exec_command",
+                {**command_args, "approval_ids": [approval_id]},
+            )
+            replay = self.payload(
+                runtime,
+                "exec_command",
+                {**command_args, "approval_ids": [approval_id]},
+            )
+            self.assertEqual(replay["command_id"], first["command_id"])
+            self.assertTrue(replay["deduplicated"])
+            self.assertEqual(runtime.runtime_state.get_approval(approval_id)["status"], "consumed")
+        finally:
+            runtime.close()
+
+    def test_host_network_deny_requests_operator_approval_instead_of_false_grant(self) -> None:
+        runtime = Runtime(
+            self.workspace,
+            state_root=self.state_root,
+            permission_mode="host",
+            network_policy="deny",
+        )
+        try:
+            requested = self.payload(
+                runtime,
+                "request_permissions",
+                {
+                    "tool_name": "exec_command",
+                    "permission": "network",
+                    "reason": "Access a network target under deny-by-default policy.",
+                    "arguments": {"cmd": "curl https://example.com"},
+                },
+            )
+            self.assertEqual(requested["status"], "pending")
+            self.assertIsInstance(requested.get("approval_id"), str)
+            self.assertNotIn("grant_id", requested)
         finally:
             runtime.close()
 

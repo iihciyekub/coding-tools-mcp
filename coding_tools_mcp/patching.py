@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import stat
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -12,6 +14,20 @@ from .errors import ToolFailure
 
 PATCH_TEMP_PREFIX = ".coding-tools-patch-"
 PATCH_BACKUP_PREFIX = ".coding-tools-backup-"
+END_OF_FILE_MARKER = "*** End of File"
+REVISION_ALGORITHM = "sha256"
+MATCH_GRADES = ("exact", "trailing_ws")
+_UNIFIED_HEADER = re.compile(r"^-\d+(,\d+)?\s+\+\d+(,\d+)?\s*(@@.*)?$")
+
+
+def content_revision(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class PatchHunk:
+    lines: list[str]
+    scope: str | None = None
 
 
 @dataclass
@@ -19,7 +35,7 @@ class PatchOperation:
     kind: str
     path: str
     add_content: str | None = None
-    hunks: list[list[str]] = field(default_factory=list)
+    hunks: list[PatchHunk] = field(default_factory=list)
     move_to: str | None = None
 
 
@@ -27,6 +43,9 @@ class PatchOperation:
 class ParsedHunk:
     old: list[str]
     new: list[str]
+    new_sources: list[int | None] = field(default_factory=list)
+    scope: str | None = None
+    eof_anchor: bool = False
 
 
 @dataclass(frozen=True)
@@ -35,6 +54,18 @@ class MatchedHunk:
     start: int
     end: int
     new: list[str]
+    quality: str = "exact"
+    scope_used: bool = False
+    old: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class UpdateOutcome:
+    content: str
+    changed_ranges: list[dict[str, int]]
+    match_quality: str
+    warnings: list[str]
+    applied_hunks: int
 
 
 @dataclass(frozen=True)
@@ -313,27 +344,53 @@ def parse_patch(patch: str) -> list[PatchOperation]:
             if i < len(lines) - 1 and lines[i].startswith("*** Move to: "):
                 move_to = lines[i].removeprefix("*** Move to: ").strip()
                 i += 1
-            hunks: list[list[str]] = []
+            hunks: list[PatchHunk] = []
             current: list[str] = []
-            while i < len(lines) - 1 and not lines[i].startswith("*** "):
+            current_scope: str | None = None
+            while i < len(lines) - 1 and (
+                not lines[i].startswith("*** ") or lines[i].rstrip() == END_OF_FILE_MARKER
+            ):
                 if lines[i].startswith("@@"):
                     if current:
-                        hunks.append(current)
+                        hunks.append(PatchHunk(current, current_scope))
                     current = []
+                    current_scope = _header_scope(lines[i])
+                elif lines[i].rstrip() == END_OF_FILE_MARKER:
+                    current.append(END_OF_FILE_MARKER)
                 else:
                     current.append(lines[i])
                 i += 1
             if current:
-                hunks.append(current)
+                hunks.append(PatchHunk(current, current_scope))
             operations.append(PatchOperation("update", path, hunks=hunks, move_to=move_to))
             continue
         raise ToolFailure("PATCH_FAILED", f"Unrecognized patch line: {line}", category="validation")
     return operations
 
 
-def apply_update_hunks(content: str, hunks: list[list[str]], path: str = "<patch>") -> str:
+def _header_scope(line: str) -> str | None:
+    text = line[2:].strip()
+    if text.endswith("@@"):
+        text = text[:-2].strip()
+    if not text or _UNIFIED_HEADER.match(text):
+        return None
+    return text
+
+
+HunkInput = Sequence[PatchHunk | list[str]]
+
+
+def apply_update_hunks(content: str, hunks: HunkInput, path: str = "<patch>") -> str:
+    return apply_update_hunks_detailed(content, hunks, path).content
+
+
+def apply_update_hunks_detailed(
+    content: str,
+    hunks: HunkInput,
+    path: str = "<patch>",
+) -> UpdateOutcome:
     if not hunks:
-        return content
+        return UpdateOutcome(content, [], "exact", [], 0)
     bom, text = strip_bom(content)
     line_ending = detect_line_ending(text)
     normalized = normalize_to_lf(text)
@@ -345,36 +402,16 @@ def apply_update_hunks(content: str, hunks: list[list[str]], path: str = "<patch
     lines = normalized.split("\n")
     parsed = [parse_update_hunk(hunk) for hunk in hunks]
     matched: list[MatchedHunk] = []
+    warnings: list[str] = []
     for index, hunk in enumerate(parsed):
-        matches = [0] if not hunk.old else find_subsequence_all(lines, hunk.old)
-        if not matches:
-            raise ToolFailure(
-                "PATCH_CONTEXT_NOT_FOUND",
-                f"Patch context did not match in {path}.",
-                category="validation",
-                retryable=True,
-                details={
-                    "path": path,
-                    "hunk_index": index,
-                    "match_count": 0,
-                    "retry_hint": "Read the current file and regenerate this hunk with current context.",
-                },
+        placement = _locate_hunk(lines, hunk, index, path)
+        matched.append(placement)
+        if placement.quality == "trailing_ws":
+            warnings.append(
+                f"hunk {index}: context matched only after ignoring trailing whitespace"
             )
-        if len(matches) > 1:
-            raise ToolFailure(
-                "PATCH_CONTEXT_AMBIGUOUS",
-                f"Patch context matched {len(matches)} locations in {path}; add more context.",
-                category="validation",
-                retryable=True,
-                details={
-                    "path": path,
-                    "hunk_index": index,
-                    "match_count": len(matches),
-                    "retry_hint": "Include additional unchanged context lines to make this hunk unique.",
-                },
-            )
-        start = matches[0]
-        matched.append(MatchedHunk(index, start, start + len(hunk.old), hunk.new))
+        if placement.scope_used:
+            warnings.append(f"hunk {index}: located using the @@ scope anchor")
 
     matched.sort(key=lambda item: item.start)
     for previous, current in zip(matched, matched[1:]):
@@ -390,49 +427,254 @@ def apply_update_hunks(content: str, hunks: list[list[str]], path: str = "<patch
                 },
             )
 
+    application_order = sorted(matched, key=lambda item: item.start, reverse=True)
     updated_lines = list(lines)
-    for matched_hunk in sorted(matched, key=lambda item: item.start, reverse=True):
+    for matched_hunk in application_order:
         updated_lines = updated_lines[: matched_hunk.start] + matched_hunk.new + updated_lines[matched_hunk.end :]
     updated = "\n".join(updated_lines)
-    return bom + restore_line_endings(updated, line_ending)
+    quality = "trailing_ws" if any(item.quality == "trailing_ws" for item in matched) else "exact"
+    return UpdateOutcome(
+        content=bom + restore_line_endings(updated, line_ending),
+        changed_ranges=changed_ranges(list(reversed(application_order))),
+        match_quality=quality,
+        warnings=warnings,
+        applied_hunks=len(matched),
+    )
 
 
-def parse_update_hunk(hunk: list[str]) -> ParsedHunk:
+def changed_ranges(matched: Sequence[MatchedHunk]) -> list[dict[str, int]]:
+    ranges: list[dict[str, int]] = []
+    delta = 0
+    for item in matched:
+        removed = item.end - item.start
+        added = len(item.new)
+        prefix = 0
+        limit = min(len(item.old), len(item.new))
+        while prefix < limit and item.old[prefix] == item.new[prefix]:
+            prefix += 1
+        suffix = 0
+        while (
+            suffix < limit - prefix
+            and item.old[len(item.old) - 1 - suffix] == item.new[len(item.new) - 1 - suffix]
+        ):
+            suffix += 1
+        start = item.start + prefix + delta
+        ranges.append(
+            {
+                "start_line": start + 1,
+                "end_line": start + added - prefix - suffix,
+                "added_lines": added - prefix - suffix,
+                "removed_lines": removed - prefix - suffix,
+            }
+        )
+        delta += added - removed
+    return ranges
+
+
+def _locate_hunk(lines: list[str], hunk: ParsedHunk, index: int, path: str) -> MatchedHunk:
+    if not hunk.old:
+        start = _eof_insert_index(lines) if hunk.eof_anchor else 0
+        return MatchedHunk(index, start, start, list(hunk.new), "exact", False, [])
+    for grade in MATCH_GRADES:
+        candidates = find_subsequence_all(lines, hunk.old, grade=grade)
+        if not candidates:
+            continue
+        scoped, scope_used = _filter_by_scope(lines, candidates, hunk.scope)
+        selected = _filter_by_eof(lines, scoped, hunk) if hunk.eof_anchor else scoped
+        if len(selected) == 1:
+            start = selected[0]
+            return MatchedHunk(
+                index,
+                start,
+                start + len(hunk.old),
+                _rebuild_new_lines(lines, start, hunk),
+                grade,
+                scope_used,
+                lines[start : start + len(hunk.old)],
+            )
+        if len(selected) > 1:
+            hint = "Include additional unchanged context lines to make this hunk unique."
+            if hunk.scope is None:
+                hint += " A @@ <enclosing scope> header can also narrow the search."
+            raise ToolFailure(
+                "PATCH_CONTEXT_AMBIGUOUS",
+                f"Patch context matched {len(selected)} locations in {path}; add more context.",
+                category="validation",
+                retryable=True,
+                details={
+                    "path": path,
+                    "hunk_index": index,
+                    "match_count": len(selected),
+                    "match_quality": grade,
+                    "scope": hunk.scope,
+                    "candidate_lines": [candidate + 1 for candidate in selected[:8]],
+                    "retry_hint": hint,
+                },
+            )
+    raise ToolFailure(
+        "PATCH_CONTEXT_NOT_FOUND",
+        f"Patch context did not match in {path}.",
+        category="validation",
+        retryable=True,
+        details={
+            "path": path,
+            "hunk_index": index,
+            "match_count": 0,
+            "scope": hunk.scope,
+            "retry_hint": "Read the current file and regenerate this hunk with current context.",
+        },
+    )
+
+
+def _eof_insert_index(lines: list[str]) -> int:
+    return len(lines) - 1 if lines and lines[-1] == "" else len(lines)
+
+
+def _filter_by_scope(
+    lines: list[str],
+    candidates: list[int],
+    scope: str | None,
+) -> tuple[list[int], bool]:
+    if scope is None:
+        return candidates, False
+    for anchors in (
+        _scope_anchors(lines, scope, exact=True),
+        _scope_anchors(lines, scope, exact=False),
+    ):
+        if not anchors:
+            continue
+        governed: dict[int, list[int]] = {}
+        for candidate in candidates:
+            containing = [
+                anchor
+                for anchor in anchors
+                if anchor <= candidate < _scope_region_end(lines, anchor)
+            ]
+            if not containing:
+                continue
+            governed.setdefault(max(containing), []).append(candidate)
+        if len(governed) == 1:
+            selected = next(iter(governed.values()))
+            return selected, len(selected) < len(candidates)
+        if governed:
+            selected = sorted(value for group in governed.values() for value in group)
+            return selected, len(selected) < len(candidates)
+    return candidates, False
+
+
+def _scope_region_end(lines: list[str], anchor: int) -> int:
+    anchor_line = lines[anchor]
+    indentation = len(anchor_line) - len(anchor_line.lstrip())
+    for index in range(anchor + 1, len(lines)):
+        line = lines[index]
+        if not line.strip():
+            continue
+        if len(line) - len(line.lstrip()) <= indentation:
+            return index
+    return len(lines)
+
+
+def _scope_anchors(lines: list[str], scope: str, *, exact: bool) -> list[int]:
+    if exact:
+        return [
+            index
+            for index, line in enumerate(lines)
+            if line.strip() == scope or scope in line
+        ]
+    needle = _collapse_whitespace(scope)
+    return [
+        index
+        for index, line in enumerate(lines)
+        if needle and needle in _collapse_whitespace(line)
+    ]
+
+
+def _collapse_whitespace(value: str) -> str:
+    return " ".join(value.split())
+
+
+def _filter_by_eof(
+    lines: list[str],
+    candidates: list[int],
+    hunk: ParsedHunk,
+) -> list[int]:
+    limit = _eof_insert_index(lines)
+    at_eof = [
+        candidate
+        for candidate in candidates
+        if candidate + len(hunk.old) >= limit
+    ]
+    return at_eof or candidates
+
+
+def _rebuild_new_lines(lines: list[str], start: int, hunk: ParsedHunk) -> list[str]:
+    rebuilt: list[str] = []
+    for value, source in zip(hunk.new, hunk.new_sources):
+        rebuilt.append(lines[start + source] if source is not None else value)
+    return rebuilt
+
+
+def parse_update_hunk(hunk: PatchHunk | list[str]) -> ParsedHunk:
+    raw_lines = hunk.lines if isinstance(hunk, PatchHunk) else list(hunk)
+    scope = hunk.scope if isinstance(hunk, PatchHunk) else None
     old: list[str] = []
     new: list[str] = []
-    for raw in hunk:
-        if raw == "*** End of File":
+    new_sources: list[int | None] = []
+    eof_anchor = False
+    for raw in raw_lines:
+        if raw == END_OF_FILE_MARKER:
+            eof_anchor = True
             continue
         if not raw:
             # V4A spells an empty context line as a single space, which model
             # output and intermediate layers routinely strip to "".
+            new_sources.append(len(old))
             old.append("")
             new.append("")
             continue
         marker = raw[0]
         value = raw[1:] if marker in {" ", "-", "+"} else raw
         if marker == " ":
+            new_sources.append(len(old))
             old.append(value)
             new.append(value)
         elif marker == "-":
             old.append(value)
         elif marker == "+":
+            new_sources.append(None)
             new.append(value)
         else:
             raise ToolFailure("PATCH_FAILED", "Update lines must start with space, '-' or '+'.", category="validation")
-    return ParsedHunk(old=old, new=new)
+    return ParsedHunk(
+        old=old,
+        new=new,
+        new_sources=new_sources,
+        scope=scope,
+        eof_anchor=eof_anchor,
+    )
 
 
-def find_subsequence_all(lines: list[str], needle: list[str]) -> list[int]:
+def find_subsequence_all(
+    lines: list[str],
+    needle: list[str],
+    *,
+    grade: str = "exact",
+) -> list[int]:
     if not needle:
         return [0]
     limit = len(lines) - len(needle) + 1
-    first = needle[0]
-    return [
-        index
-        for index in range(max(0, limit))
-        if lines[index] == first and lines[index : index + len(needle)] == needle
-    ]
+    matches: list[int] = []
+    for index in range(max(0, limit)):
+        window = lines[index : index + len(needle)]
+        if grade == "exact":
+            equal = window == needle
+        elif grade == "trailing_ws":
+            equal = [line.rstrip() for line in window] == [line.rstrip() for line in needle]
+        else:
+            raise ValueError(f"unknown patch match grade: {grade}")
+        if equal:
+            matches.append(index)
+    return matches
 
 
 def strip_bom(text: str) -> tuple[str, str]:

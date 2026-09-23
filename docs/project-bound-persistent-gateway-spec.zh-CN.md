@@ -90,7 +90,7 @@ Project 管理由 Desktop App 负责。
 Project 选定后：
 
 ```text
-无 path       -> Project Root
+无 path       -> Project Root；list_files / search_text 可配置默认检索目录
 相对 path     -> Project Root relative
 绝对 path     -> Project Runtime Permission Scope 校验
 ```
@@ -101,7 +101,8 @@ Project 选定后：
 search_text(query="annotation")
 ```
 
-仍只从 Project Root 搜索；只有显式 absolute path 才可能访问其他 Host 位置。
+默认仍从 Project Root 搜索；桌面端可为这两个检索工具设置另一个默认目录。
+这只改变未传 `path` 时的检索起点，不扩大访问权限。显式传入相对路径仍以 Project Root 为准。
 
 ## 7. Gateway / Project Runtime 分层
 
@@ -291,4 +292,3 @@ Gateway 不增加第二层工具发现或 workflow。除 `project_context` 外�
 - 自动化源码回归已完成；Phase 5 仅剩重新构建/启动新版 Desktop Gateway 后的真实远程 ChatGPT 连接验收。
 
 当前正在连接本对话的 MCP 仍是旧的已启动实例；源码修改不会热替换该进程。真实 ChatGPT 验收必须使用重新构建/启动后的 Gateway，不能把当前旧连接的行为当成新版结果。
-

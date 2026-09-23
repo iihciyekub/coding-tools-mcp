@@ -7,8 +7,8 @@ import { detectLanguage, translator, type Language } from "./i18n";
 import type { DependencyStatus, GatewayConfig, LogBundle, PermissionMode, RuntimeStatus, WorkspaceProfile } from "./types";
 import { publicEndpoint, workspaceHue } from "./utils";
 
-const PANEL_WIDTH = 320;
-const APP_VERSION = "0.4.2";
+const PANEL_WIDTH = 420;
+const APP_VERSION = "0.5.0";
 type Page = "home" | "new-access" | "workspaces" | "environment" | "logs" | "settings" | "approvals" | "more";
 type CopyAction = "server-name" | "server-url" | "credential" | "logs";
 type ConfirmAction = { kind: "stop"; profileId: string } | { kind: "stop-all" } | { kind: "quit" } | null;
@@ -23,6 +23,7 @@ function App() {
   const boundProjectId = useMemo(() => new URLSearchParams(window.location.search).get("project"), []);
   const projectWindow = Boolean(boundProjectId);
   const [language, setLanguage] = useState<Language>(detectLanguage());
+  const [homeDirectory, setHomeDirectory] = useState<string | null>(null);
   const t = useMemo(() => translator(language), [language]);
   const [page, setPage] = useState<Page>("home");
   const [backTarget, setBackTarget] = useState<Page>("home");
@@ -41,6 +42,7 @@ function App() {
   const [copied, setCopied] = useState<CopyAction | null>(null);
   const [revealCredential, setRevealCredential] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
   const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null);
   const [runtimeLogs, setRuntimeLogs] = useState<LogBundle | null>(null);
   const [installLog, setInstallLog] = useState<string[]>([]);
@@ -66,6 +68,8 @@ function App() {
   const credential = gateway?.auth.type === "bearer" ? gateway.auth.bearer_token : gateway?.auth.oauth_password ?? "";
   const selectedRuntimeState = selected ? runtimeState[selected.id] : undefined;
   const allowedFolderCount = selected?.runtime.allowed_paths.length ?? 0;
+  const defaultSearchPath = selected?.runtime.default_search_path ?? "";
+  const localCapabilityRoots = gateway?.local_capability_roots ?? [];
   const environmentReady = dependencies.runtime_ready && dependencies.cloudflared;
   const activeWorkspaceCount = profiles.reduce((count, profile) => {
     const profileStatus = workspaceStatus(profile);
@@ -78,6 +82,7 @@ function App() {
       const snapshot = await api.snapshot();
       if (sequence !== refreshSequenceRef.current) return;
       setLanguage(snapshot.language);
+      setHomeDirectory(snapshot.home_directory);
       setGateway(snapshot.gateway);
       setMigrationWarning(snapshot.migration_warning);
       setProfiles(snapshot.profiles);
@@ -98,14 +103,20 @@ function App() {
   useEffect(() => { selectedIdRef.current = selectedId; setRevealCredential(false); setConfirmDelete(false); setConfirmAction(null); setRuntimeLogs(null); }, [selectedId]);
   useEffect(() => { setMcpNamePrefix(gateway?.server_name_prefix ?? "www"); }, [gateway?.server_name_prefix]);
   useEffect(() => { if (!confirmAction) return; const timer = window.setTimeout(() => setConfirmAction(null), 4000); return () => window.clearTimeout(timer); }, [confirmAction]);
+  useEffect(() => { if (!confirmRemoveId) return; const timer = window.setTimeout(() => setConfirmRemoveId(null), 4000); return () => window.clearTimeout(timer); }, [confirmRemoveId]);
+  useEffect(() => {
+    if (!projectWindow) return;
+    document.documentElement.classList.add("project-window-root");
+    return () => document.documentElement.classList.remove("project-window-root");
+  }, [projectWindow]);
   useEffect(() => {
     const panel = panelRef.current;
-    if (!panel || typeof ResizeObserver === "undefined") return;
+    if (projectWindow || !panel || typeof ResizeObserver === "undefined") return;
     let frame = 0;
     const resize = () => { window.cancelAnimationFrame(frame); frame = window.requestAnimationFrame(() => void getCurrentWindow().setSize(new LogicalSize(PANEL_WIDTH, Math.min(544, Math.max(166, Math.ceil(panel.scrollHeight)))))); };
     const observer = new ResizeObserver(resize); observer.observe(panel); resize();
     return () => { window.cancelAnimationFrame(frame); observer.disconnect(); };
-  }, []);
+  }, [projectWindow]);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") { if (page !== "home") setPage("home"); else void getCurrentWindow().hide(); } };
     window.addEventListener("keydown", onKeyDown); return () => window.removeEventListener("keydown", onKeyDown);
@@ -192,8 +203,28 @@ function App() {
   };
   const savePermission = async (permissionMode: PermissionMode) => {
     if (!selected) return; setBusy("permission");
-    try { const saved = await api.saveProfile({ ...selected, runtime: { ...selected.runtime, permission_mode: permissionMode } }); setProfiles((current) => current.map((profile) => profile.id === saved.id ? saved : profile)); setError(""); }
+    try { const saved = await api.saveProfile({ ...selected, runtime: { ...selected.runtime, permission_mode: permissionMode, default_search_path: permissionMode === "host" ? defaultSearchPath : "" } }); setProfiles((current) => current.map((profile) => profile.id === saved.id ? saved : profile)); setError(""); }
     catch (reason) { setError(String(reason)); } finally { setBusy(null); }
+  };
+  const saveDefaultSearchPath = async (path: string) => {
+    if (!selected) return; setBusy("search-path");
+    try {
+      const saved = await api.saveProfile({ ...selected, runtime: { ...selected.runtime, default_search_path: path } });
+      setProfiles((current) => current.map((profile) => profile.id === saved.id ? saved : profile)); setError("");
+    } catch (reason) { setError(String(reason)); } finally { setBusy(null); }
+  };
+  const chooseDefaultSearchFolder = async () => {
+    if (!selected || selected.runtime.permission_mode !== "host") return;
+    const appWindow = getCurrentWindow(); setBusy("search-path"); setError("");
+    try {
+      await appWindow.hide();
+      let chosen: string | null;
+      try { chosen = await api.pickAllowedFolder(); }
+      finally { await appWindow.show(); await appWindow.setFocus(); }
+      if (!chosen) return;
+      const saved = await api.saveProfile({ ...selected, runtime: { ...selected.runtime, default_search_path: chosen } });
+      setProfiles((current) => current.map((profile) => profile.id === saved.id ? saved : profile));
+    } catch (reason) { setError(String(reason)); } finally { setBusy(null); }
   };
   const saveMcpNamePrefix = async () => {
     if (!selected || activeWorkspaceCount) return;
@@ -226,6 +257,24 @@ function App() {
       setProfiles((current) => current.map((profile) => profile.id === saved.id ? saved : profile));
     } catch (reason) { setError(String(reason)); } finally { setBusy(null); }
   };
+  const addLocalCapabilityFolder = async () => {
+    if (!gateway || activeWorkspaceCount) return;
+    const appWindow = getCurrentWindow(); setBusy("local-capabilities"); setError("");
+    try {
+      await appWindow.hide();
+      let chosen: string | null;
+      try { chosen = await api.pickAllowedFolder(); }
+      finally { await appWindow.show(); await appWindow.setFocus(); }
+      if (!chosen || localCapabilityRoots.includes(chosen)) return;
+      setGateway(await api.saveLocalCapabilityRoots([...localCapabilityRoots, chosen]));
+    } catch (reason) { setError(String(reason)); } finally { setBusy(null); }
+  };
+  const removeLocalCapabilityFolder = async (path: string) => {
+    if (!gateway || activeWorkspaceCount) return;
+    setBusy("local-capabilities"); setError("");
+    try { setGateway(await api.saveLocalCapabilityRoots(localCapabilityRoots.filter((item) => item !== path))); }
+    catch (reason) { setError(String(reason)); } finally { setBusy(null); }
+  };
   const changeWorkspace = async () => {
     if (!selected) return;
     const appWindow = getCurrentWindow(); setBusy("workspace-path"); setError("");
@@ -236,14 +285,14 @@ function App() {
       finally { await appWindow.show(); await appWindow.setFocus(); }
       if (!chosen || chosen === selected.path) return;
       const name = chosen.split(/[\\/]/).filter(Boolean).at(-1) || selected.name;
-      const saved = await api.saveProfile({ ...selected, name, path: chosen });
+      const saved = await api.saveProfile({ ...selected, name, path: chosen, runtime: { ...selected.runtime, default_search_path: "" } });
       setProfiles((current) => current.map((profile) => profile.id === saved.id ? saved : profile));
     } catch (reason) { setError(String(reason)); } finally { setBusy(null); }
   };
   const removeAllowedFolder = async (path: string) => {
     if (!selected) return; setBusy("file-scope");
     try {
-      const saved = await api.saveProfile({ ...selected, runtime: { ...selected.runtime, allowed_paths: selected.runtime.allowed_paths.filter((item) => item !== path) } });
+      const saved = await api.saveProfile({ ...selected, runtime: { ...selected.runtime, allowed_paths: selected.runtime.allowed_paths.filter((item) => item !== path), default_search_path: defaultSearchPath === path ? "" : defaultSearchPath } });
       setProfiles((current) => current.map((profile) => profile.id === saved.id ? saved : profile)); setError("");
     } catch (reason) { setError(String(reason)); } finally { setBusy(null); }
   };
@@ -267,6 +316,14 @@ function App() {
     if (!selected) return; if (!confirmDelete) { setConfirmDelete(true); return; } setBusy("delete");
     try { await api.deleteProfile(selected.id); await refresh(false); setPage("home"); } catch (reason) { setError(String(reason)); } finally { setBusy(null); setConfirmDelete(false); }
   };
+  const removeWorkspaceFromList = async (profileId: string) => {
+    if (busy === "delete") return;
+    if (confirmRemoveId !== profileId) { setConfirmRemoveId(profileId); return; }
+    setConfirmRemoveId(null); setBusy("delete"); setError("");
+    try { await api.deleteProfile(profileId); await refresh(false); }
+    catch (reason) { setError(String(reason)); }
+    finally { setBusy(null); }
+  };
   const changeLanguage = async (next: Language) => {
     setBusy("language");
     try { await api.setLanguage(next); localStorage.setItem("coding-tools-language", next); setLanguage(next); setError(""); } catch (reason) { setError(String(reason)); } finally { setBusy(null); }
@@ -282,9 +339,9 @@ function App() {
   const openSubpage = (next: Page, back: Page) => { setBackTarget(back); setPage(next); };
 
   const pageTitle: Record<Page, string> = { home: "", "new-access": t("Choose access mode"), workspaces: t("Access profiles"), environment: t("Environment & setup"), logs: t("Runtime logs"), settings: t("Workspace settings"), approvals: t("Approvals"), more: t("More") };
-  const backPage = page === "logs" || page === "settings" || page === "approvals" ? backTarget : "home";
+  const backPage = page === "environment" || page === "logs" || page === "settings" || page === "approvals" ? backTarget : "home";
 
-  return <main className="panel" ref={panelRef}>
+  return <main className={`panel${projectWindow ? " project-window" : ""}`} ref={panelRef}>
     {page === "home" ? <Header /> : <header className="subpage-header"><button className="icon-button" type="button" aria-label={t("Back")} onClick={() => setPage(backPage)}><BackIcon /></button><strong>{pageTitle[page]}</strong></header>}
     {error && <div className="error-banner" role="alert"><span>{t(error)}</span><button type="button" onClick={() => setError("")} aria-label={t("Dismiss")}>×</button></div>}
     {migrationWarning && <div className="migration-banner" role="status">{t(migrationWarning)}</div>}
@@ -295,17 +352,23 @@ function App() {
         {selected && <div className="status-row"><span className="status-copy"><i className={`status-dot ${status?.state ?? "stopped"}`} />{profiles.length > 1 && <b className="status-index">[{selectedPosition}/{profiles.length}]</b>}{starting ? t("Preparing runtime dependencies…") : stopping ? t("Stopping…") : status?.state === "running" ? t("Running · public tunnel ready") : status?.state === "error" ? t("Connection error") : t("Workspace stopped")}</span><button className={`power-button ${running && !starting ? "danger" : ""} ${confirmAction?.kind === "stop" && confirmAction.profileId === selected.id ? "confirm" : ""}`} type="button" disabled={stopping} onClick={toggleWorkspace}>{starting || stopping ? <SpinnerIcon /> : null}{stopping ? t("Stopping…") : starting ? t("Cancel startup") : confirmAction?.kind === "stop" && confirmAction.profileId === selected.id ? t("Click again to stop") : t(running ? "Stop" : "Start")}</button></div>}
       </section>
       {selected && <section className="connection-block"><div className="gateway-label"><strong>{t("Shared MCP Gateway")}</strong><small>{t("One connection is shared by all projects.")}</small></div><ValueButton label={t("MCP name")} copyLabel={t("Copy")} value={status?.server_name || t("Start the workspace to create an MCP name")} disabled={!status?.server_name} copied={copied === "server-name"} onClick={() => void copy(status?.server_name ?? "", "server-name")} /><ValueButton label="Server URL" copyLabel={t("Copy")} value={serverUrl || t("Start the workspace to create a public URL")} disabled={!serverUrl} copied={copied === "server-url"} onClick={() => void copy(serverUrl, "server-url")} /><ValueButton label={credentialLabel} copyLabel={t("Copy")} value={revealCredential ? credential : "••••••••••••"} disabled={!credential} copied={copied === "credential"} onClick={() => void copy(credential, "credential")} after={<button className="reveal-button" type="button" aria-label={t(revealCredential ? "Hide authorization passcode" : "Show authorization passcode")} onClick={(event) => { event.stopPropagation(); setRevealCredential((current) => !current); }}>{revealCredential ? <EyeOffIcon /> : <EyeIcon />}</button>} /></section>}
-      <nav className="menu-list" aria-label={t("Manage")}><MenuRow icon={<PackageIcon />} label={t("Environment & setup")} detail={environmentReady ? t("Ready") : t("Setup needed")} onClick={() => setPage("environment")} />{!projectWindow && <MenuRow icon={<SwitchIcon />} label={t("Open project window")} disabled={!selected} onClick={() => { if (selected) void api.openProjectWindow(selected.id); }} />}<MenuRow icon={<LogIcon />} label={t("Runtime logs")} disabled={!selected || busy === "logs"} onClick={() => { setBackTarget("home"); void loadLogs(); }} /><MenuRow icon={<MoreIcon />} label={t("More")} onClick={() => setPage("more")} /></nav>
+      <nav className="menu-list" aria-label={t("Manage")}><MenuRow icon={<MoreIcon />} label={t("More")} onClick={() => setPage("more")} /></nav>
       <footer className="panel-footer"><button type="button" disabled={!selected} onClick={() => openSubpage("settings", "home")}><ShieldIcon /><span>{selected?.runtime.permission_mode === "host" ? t("Full Access") : t("Standard access")}{selected?.runtime.permission_mode !== "host" && allowedFolderCount ? ` · ${allowedFolderCount} ${t("folders")}` : ""}</span></button><button className={`footer-quit-button ${confirmAction?.kind === "quit" ? "confirm" : ""}`} type="button" onClick={() => void quitApp()}><PowerIcon /><span>{confirmAction?.kind === "quit" ? t("Click again to quit") : t("Quit Coding Tools MCP")}</span></button></footer>
     </>}
 
     {page === "new-access" && <section className="subpage-body access-mode-page">
-      <p className="access-mode-intro">{t("Choose access before creating a profile.")}</p>
-      <button className="access-mode-choice" type="button" onClick={() => void addStandardWorkspace()}><span className="access-mode-icon"><FolderIcon /></span><span><strong>{t("Standard")}</strong><small>{t("Choose one workspace. Commands and files stay inside it unless you add specific folders.")}</small></span><ChevronIcon /></button>
-      <button className="access-mode-choice full" type="button" disabled={busy === "full-access-profile"} onClick={() => void addFullAccess()}><span className="access-mode-icon"><ShieldIcon /></span><span><strong>{t("Full Access")}</strong><small>{t("Choose a workspace for project context. File tools and host commands can access this Mac.")}</small></span>{busy === "full-access-profile" ? <SpinnerIcon /> : <ChevronIcon />}</button>
+      <button className="access-mode-choice" type="button" onClick={() => void addStandardWorkspace()}><span className="access-mode-icon"><FolderIcon /></span><span><strong>{t("Standard")}</strong><small>{t("Work in your project and folders you add.")}</small></span><ChevronIcon /></button>
+      <button className="access-mode-choice full" type="button" disabled={busy === "full-access-profile"} onClick={() => void addFullAccess()}><span className="access-mode-icon"><ShieldIcon /></span><span><strong>{t("Full Access")}</strong><small>{t("Use Mac files and commands. Searches still start in your project.")}</small></span>{busy === "full-access-profile" ? <SpinnerIcon /> : <ChevronIcon />}</button>
     </section>}
 
-    {page === "workspaces" && <section className="subpage-body workspace-page"><div className="workspace-list">{profiles.map((profile, index) => { const profileStatus = workspaceStatus(profile); return <button style={{ "--workspace-hue": workspaceHue(index + 1) } as React.CSSProperties} className={`workspace-choice ${profile.id === selectedId ? "selected" : ""}`} type="button" key={profile.id} onClick={() => { setSelectedId(profile.id); setPage("home"); }}><i className={`status-dot ${profileStatus.state}`} /><span><strong>{t(profile.name)}</strong><small>{shortPath(profile.path)}</small></span>{profile.id === selectedId && <CheckIcon />}</button>; })}</div><button className="primary-button" type="button" onClick={() => setPage("new-access")}><PlusIcon />{t("Add access profile")}</button><button className="secondary-button workspace-action-button" type="button" disabled={!selected} onClick={() => openSubpage("settings", "workspaces")}><SettingsIcon />{t("Workspace settings")}</button><button className={`stop-all-button ${confirmAction?.kind === "stop-all" ? "confirm" : ""}`} type="button" disabled={!activeWorkspaceCount || busy === "stop-all"} onClick={() => void stopAllWorkspaces()}>{busy === "stop-all" ? <SpinnerIcon /> : <StopIcon />}{busy === "stop-all" ? t("Stopping all…") : confirmAction?.kind === "stop-all" ? t("Click again to stop all") : t("Stop all")}{activeWorkspaceCount > 1 && busy !== "stop-all" && confirmAction?.kind !== "stop-all" ? <small>{activeWorkspaceCount}</small> : null}</button></section>}
+    {page === "workspaces" && <section className="subpage-body workspace-page">
+      <div className="workspace-list">{profiles.map((profile, index) => { const profileStatus = workspaceStatus(profile); const removing = confirmRemoveId === profile.id; return <div style={{ "--workspace-hue": workspaceHue(index + 1) } as React.CSSProperties} className={`workspace-item ${profile.id === selectedId ? "selected" : ""}`} key={profile.id}>
+        <button className="workspace-choice" type="button" onClick={() => { setConfirmRemoveId(null); setSelectedId(profile.id); setPage("home"); }}><i className={`status-dot ${profileStatus.state}`} /><span><strong>{t(profile.name)}</strong><small title={profile.path}>{shortPath(profile.path)}</small></span></button>
+        <div className="workspace-item-actions"><button className="workspace-item-action" type="button" aria-label={`${t("Workspace settings")}: ${profile.name}`} title={t("Workspace settings")} onClick={() => { setConfirmRemoveId(null); setSelectedId(profile.id); openSubpage("settings", "workspaces"); }}><SettingsIcon /></button><button className={`workspace-item-action remove ${removing ? "confirm" : ""}`} type="button" disabled={busy === "delete"} aria-label={`${t(removing ? "Click again to remove project" : "Remove project")}: ${profile.name}`} title={t(removing ? "Click again to remove project" : "Remove project")} onClick={() => void removeWorkspaceFromList(profile.id)}><TrashIcon />{removing && <small>{t("Confirm")}</small>}</button></div>
+      </div>; })}</div>
+      <button className="primary-button" type="button" onClick={() => setPage("new-access")}><PlusIcon />{t("Add access profile")}</button>
+      <button className={`stop-all-button ${confirmAction?.kind === "stop-all" ? "confirm" : ""}`} type="button" disabled={!activeWorkspaceCount || busy === "stop-all"} onClick={() => void stopAllWorkspaces()}>{busy === "stop-all" ? <SpinnerIcon /> : <StopIcon />}{busy === "stop-all" ? t("Stopping all…") : confirmAction?.kind === "stop-all" ? t("Click again to stop all") : t("Stop all")}{activeWorkspaceCount > 1 && busy !== "stop-all" && confirmAction?.kind !== "stop-all" ? <small>{activeWorkspaceCount}</small> : null}</button>
+    </section>}
 
     {page === "environment" && <section className="subpage-body environment-page">
       <div className="environment-summary"><span><strong>{environmentReady ? t("Runtime environment is ready") : t("Runtime environment needs setup")}</strong><small>{t("Installed in the app's private directory")}</small></span><small>{navigator.platform.includes("Mac") ? "macOS" : navigator.platform}</small></div>
@@ -317,29 +380,49 @@ function App() {
     {page === "logs" && <section className="subpage-body logs-page">{installLog.length > 0 && <LogSection title={t("Installation log")} text={installLog.join("\n")} />}{runtimeLogs && <><LogSection title="stdout" text={runtimeLogs.stdout} /><LogSection title="stderr" text={runtimeLogs.stderr} /><LogSection title="cloudflared" text={runtimeLogs.cloudflared} /></>}{!installLog.length && !runtimeLogs && <p className="empty-copy">{t("No logs yet.")}</p>}<div className="button-row">{selected && <button className="secondary-button" type="button" onClick={() => void api.openLogs(selected.id)}>{t("Open logs folder")}</button>}<button className="secondary-button" type="button" onClick={() => void copy([installLog.join("\n"), runtimeLogs ? `stdout\n${runtimeLogs.stdout}\n\nstderr\n${runtimeLogs.stderr}\n\ncloudflared\n${runtimeLogs.cloudflared}` : ""].filter(Boolean).join("\n\n"), "logs")}>{copied === "logs" ? t("Copied") : t("Copy logs")}</button></div></section>}
 
     {page === "settings" && selected && <section className="subpage-body settings-page">
-      <div className="field-copy"><strong>{t("Access")}</strong><small>{t("Standard uses the workspace and allowed folders. Full Access enables host files, commands, SSH, and installed tools.")}</small></div>
+      <div className="field-copy"><strong>{t("MCP access")}</strong><small>{t(selected.runtime.permission_mode === "host" ? "Mac files and commands available to your account." : "File tools can use this project and extra folders.")}</small></div>
       <div className="segmented-control"><button type="button" className={selected.runtime.permission_mode !== "host" ? "selected" : ""} disabled={busy === "permission"} onClick={() => void savePermission("trusted")}>{t("Standard")}</button><button type="button" className={selected.runtime.permission_mode === "host" ? "selected danger" : ""} disabled={busy === "permission"} onClick={() => void savePermission("host")}>{t("Full Access")}</button></div>
-      <div className="mcp-prefix-setting">
-        <div className="field-copy"><strong>{t("Shared Gateway MCP name prefix")}</strong><small>{t("This Gateway setting is shared by every project.")}</small></div>
-        <div className="mcp-prefix-row"><input aria-label={t("MCP name prefix")} value={mcpNamePrefix} maxLength={24} spellCheck={false} disabled={Boolean(activeWorkspaceCount) || busy === "mcp-prefix"} onChange={(event) => setMcpNamePrefix(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void saveMcpNamePrefix(); }} /><button className="secondary-button" type="button" disabled={Boolean(activeWorkspaceCount) || busy === "mcp-prefix" || !mcpNamePrefix.trim() || mcpNamePrefix.trim() === gateway?.server_name_prefix} onClick={() => void saveMcpNamePrefix()}>{t("Save prefix")}</button></div>
-        <small className="mcp-prefix-format">{t("Format")}: <code>{`${mcpNamePrefix.trim() || "www"}XXYYYYMMDDHHmmss`}</code></small>
-      </div>
-      <div className="field-copy scope-copy"><strong>{t(selected.runtime.permission_mode === "host" ? "Full Access coverage" : "Allowed folders")}</strong><small>{t(selected.runtime.permission_mode === "host" ? "File tools and host commands can access this Mac. The workspace remains the project-context anchor for Git, LSP, check discovery, and project instructions." : "Standard Access includes the workspace. Add only the specific extra folders it needs.")}</small></div>
-      <div className="allowed-folder-list">
-        <div className="allowed-folder-row fixed"><span><small>{t("Workspace")}</small><strong title={selected.path}>{selected.path}</strong></span><em>{t("Project context")}</em></div>
-        {selected.runtime.permission_mode === "host" ? <div className="allowed-folder-row fixed"><span><small>{t("Host filesystem")}</small><strong>{t("Entire Mac")}</strong></span><em>{t("Full Access")}</em></div> : selected.runtime.allowed_paths.map((path) => <div className="allowed-folder-row" key={path}><span><small>{t("Allowed folder")}</small><strong title={path}>{path}</strong></span><button type="button" disabled={busy === "file-scope"} onClick={() => void removeAllowedFolder(path)} aria-label={t("Remove allowed folder")}>×</button></div>)}
-      </div>
-      <button className="secondary-button add-folder-button" type="button" disabled={busy === "workspace-path"} onClick={() => void changeWorkspace()}><FolderIcon />{t("Change project folder")}</button>
-      {selected.runtime.permission_mode !== "host" && <button className="secondary-button add-folder-button" type="button" disabled={busy === "file-scope"} onClick={() => void addAllowedFolder()}><PlusIcon />{t("Add allowed folder")}</button>}
-      {running && <p className="hint-copy">{t("Project changes restart only this Project Runtime; the shared Gateway stays online.")}</p>}
-      <div className="workspace-facts"><span><small>{t("Name")}</small><strong>{t(selected.name)}</strong></span><span><small>{t("Path")}</small><strong>{selected.path}</strong></span><span><small>{t(selected.runtime.permission_mode === "host" ? "File access" : "Extra folders")}</small><strong>{selected.runtime.permission_mode === "host" ? t("Entire Mac") : allowedFolderCount ? String(allowedFolderCount) : t("None")}</strong></span><span><small>{t("Gateway local port")}</small><strong>{selected.runtime.local_port}</strong></span></div>
-      <button className={`secondary-button remove-button ${confirmDelete ? "confirm" : ""}`} type="button" disabled={busy === "delete"} onClick={() => void removeWorkspace()}>{confirmDelete ? t("Click again to remove project") : t("Remove project")}</button><p className="hint-copy">{t("This removes the project from Coding Tools MCP, not the project directory.")}</p>
+      <div className="field-copy scope-copy"><strong>{t("Project folder")}</strong><small>{t("Commands and project rules start here. Git can target a child repository.")}</small></div>
+      <div className="allowed-folder-list"><div className="allowed-folder-row fixed"><span><strong title={selected.path}>{selected.path}</strong></span></div></div>
+      <button className="secondary-button add-folder-button" type="button" disabled={busy === "workspace-path"} onClick={() => void changeWorkspace()}><FolderIcon />{t("Change folder")}</button>
+      <div className="field-copy scope-copy"><strong>{t("Default search folder")}</strong><small>{t("Searches without a path start here. Larger folders are slower; access stays unchanged.")}</small></div>
+      <select className="search-folder-select" aria-label={t("Default search folder")} value={defaultSearchPath} disabled={busy === "search-path"} onChange={(event) => void saveDefaultSearchPath(event.target.value)}>
+        <option value="">{selected.path}</option>
+        {selected.runtime.permission_mode === "host" && homeDirectory && <option value="~">{homeDirectory}</option>}
+        {selected.runtime.allowed_paths.map((path) => <option value={path} key={path}>{path}</option>)}
+        {defaultSearchPath && defaultSearchPath !== "~" && !selected.runtime.allowed_paths.includes(defaultSearchPath) && <option value={defaultSearchPath}>{defaultSearchPath}</option>}
+      </select>
+      {selected.runtime.permission_mode === "host" && <button className="secondary-button add-folder-button" type="button" disabled={busy === "search-path"} onClick={() => void chooseDefaultSearchFolder()}><FolderIcon />{t("Choose search folder")}</button>}
+      {selected.runtime.permission_mode !== "host" && <>
+        <div className="field-copy scope-copy"><strong>{t("Extra folders")}</strong></div>
+        <div className="allowed-folder-list">{selected.runtime.allowed_paths.map((path) => <div className="allowed-folder-row" key={path}><span><strong title={path}>{path}</strong></span><button type="button" disabled={busy === "file-scope"} onClick={() => void removeAllowedFolder(path)} aria-label={t("Remove allowed folder")}>×</button></div>)}</div>
+        <button className="secondary-button add-folder-button" type="button" disabled={busy === "file-scope"} onClick={() => void addAllowedFolder()}><PlusIcon />{t("Add folder")}</button>
+      </>}
+      <details className="advanced-settings"><summary>{t("Advanced settings")}</summary><div className="advanced-settings-body">
+        <div className="field-copy"><strong>{t("MCP name prefix")}</strong><small>{t("Shared by all projects.")}</small></div>
+        <div className="mcp-prefix-row"><input aria-label={t("MCP name prefix")} value={mcpNamePrefix} maxLength={24} spellCheck={false} disabled={Boolean(activeWorkspaceCount) || busy === "mcp-prefix"} onChange={(event) => setMcpNamePrefix(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void saveMcpNamePrefix(); }} /><button className="secondary-button" type="button" disabled={Boolean(activeWorkspaceCount) || busy === "mcp-prefix" || !mcpNamePrefix.trim() || mcpNamePrefix.trim() === gateway?.server_name_prefix} onClick={() => void saveMcpNamePrefix()}>{t("Save")}</button></div>
+        <div className="field-copy scope-copy"><strong>{t("Local Skills and plugins")}</strong><small>{t("Share folders for Skill discovery. Plugin actions need their own tools.")}</small></div>
+        <div className="allowed-folder-list">{localCapabilityRoots.map((path) => <div className="allowed-folder-row" key={path}><span><strong title={path}>{path}</strong></span><button type="button" disabled={Boolean(activeWorkspaceCount) || busy === "local-capabilities"} onClick={() => void removeLocalCapabilityFolder(path)} aria-label={t("Remove capability folder")}>×</button></div>)}</div>
+        <button className="secondary-button add-folder-button" type="button" disabled={Boolean(activeWorkspaceCount) || busy === "local-capabilities"} onClick={() => void addLocalCapabilityFolder()}><PlusIcon />{t("Add folder")}</button>
+        {Boolean(activeWorkspaceCount) && <p className="hint-copy">{t("Stop all projects to change shared settings.")}</p>}
+        <button className={`secondary-button remove-button ${confirmDelete ? "confirm" : ""}`} type="button" disabled={busy === "delete"} onClick={() => void removeWorkspace()}>{confirmDelete ? t("Click again to remove project") : t("Remove project")}</button>
+        <p className="hint-copy">{t("Your project files stay on this Mac.")}</p>
+      </div></details>
     </section>}
 
 
     {page === "approvals" && <section className="subpage-body approvals-page">{!selectedRuntimeState?.available ? <p className="empty-copy">{selectedRuntimeState?.warning || t("No approvals yet.")}</p> : <>{selectedRuntimeState.approvals.filter((item) => item.status === "pending").map((approval) => <div className="approval-item" key={approval.approval_id}><span><strong>{approval.reason}</strong><small>{approval.tool_name} · {approval.permission}</small></span><div><button type="button" disabled={busy === approval.approval_id} onClick={() => void decideApproval(approval.approval_id, false)}>{t("Deny")}</button><button className="approve" type="button" disabled={busy === approval.approval_id} onClick={() => void decideApproval(approval.approval_id, true)}>{t("Approve")}</button></div></div>)}{!selectedRuntimeState.approvals.some((item) => item.status === "pending") && <p className="empty-copy">{t("No approvals yet.")}</p>}</>}</section>}
 
-    {page === "more" && <section className="subpage-body more-page"><div className="menu-list compact"><MenuRow icon={<FolderIcon />} label={t("Workspace settings")} disabled={!selected} onClick={() => openSubpage("settings", "more")} /><MenuRow icon={<ActivityIcon />} label={t("Approvals")} detail={selectedRuntimeState ? `${selectedRuntimeState.approvals.filter((item) => item.status === "pending").length} ${t("approvals")}` : ""} disabled={!selected} onClick={() => openSubpage("approvals", "more")} /><div className="language-row"><span><LanguageIcon />{t("Language")}</span><select aria-label={t("Language")} value={language} disabled={busy === "language"} onChange={(event) => void changeLanguage(event.target.value as Language)}><option value="zh-CN">简体中文</option><option value="en">English</option></select></div><MenuRow icon={<RefreshIcon />} label={t("Refresh status")} onClick={() => void refresh()} /><MenuRow icon={<GithubIcon />} label={t("GitHub source")} onClick={() => void api.openResource("github")} /></div><div className="version-block"><span>Coding Tools MCP <strong>{APP_VERSION}</strong></span><span>MCP Runtime <strong>{dependencies.runtime_version ?? "—"}</strong></span></div><button className={`quit-button ${confirmAction?.kind === "quit" ? "confirm" : ""}`} type="button" onClick={() => void quitApp()}><PowerIcon />{confirmAction?.kind === "quit" ? t("Click again to quit") : t("Quit Coding Tools MCP")}</button></section>}
+    {page === "more" && <section className="subpage-body more-page"><div className="menu-list compact">
+      <MenuRow icon={<FolderIcon />} label={t("Workspace settings")} disabled={!selected} onClick={() => openSubpage("settings", "more")} />
+      <MenuRow icon={<PackageIcon />} label={t("Environment & setup")} detail={environmentReady ? t("Ready") : t("Setup needed")} onClick={() => openSubpage("environment", "more")} />
+      {!projectWindow && <MenuRow icon={<SwitchIcon />} label={t("Open project window")} disabled={!selected} onClick={() => { if (selected) void api.openProjectWindow(selected.id); }} />}
+      <MenuRow icon={<LogIcon />} label={t("Runtime logs")} disabled={!selected || busy === "logs"} onClick={() => { setBackTarget("more"); void loadLogs(); }} />
+      <MenuRow icon={<ActivityIcon />} label={t("Approvals")} detail={selectedRuntimeState ? `${selectedRuntimeState.approvals.filter((item) => item.status === "pending").length} ${t("approvals")}` : ""} disabled={!selected} onClick={() => openSubpage("approvals", "more")} />
+      <div className="language-row"><span><LanguageIcon />{t("Language")}</span><select aria-label={t("Language")} value={language} disabled={busy === "language"} onChange={(event) => void changeLanguage(event.target.value as Language)}><option value="zh-CN">简体中文</option><option value="en">English</option></select></div>
+      <MenuRow icon={<RefreshIcon />} label={t("Refresh status")} onClick={() => void refresh()} />
+      <MenuRow icon={<GithubIcon />} label={t("GitHub source")} onClick={() => void api.openResource("github")} />
+    </div><div className="version-block"><span>Coding Tools MCP <strong>{APP_VERSION}</strong></span><span>MCP Runtime <strong>{dependencies.runtime_version ?? "—"}</strong></span></div><button className={`quit-button ${confirmAction?.kind === "quit" ? "confirm" : ""}`} type="button" onClick={() => void quitApp()}><PowerIcon />{confirmAction?.kind === "quit" ? t("Click again to quit") : t("Quit Coding Tools MCP")}</button></section>}
   </main>;
 }
 
@@ -377,6 +460,7 @@ const LanguageIcon = () => <Icon><circle cx="12" cy="12" r="10" /><path d="M2 12
 const GithubIcon = () => <Icon><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3.3-.4 6.8-1.6 6.8-7A5.4 5.4 0 0 0 19.4 4 5 5 0 0 0 19.3.5S18.2.1 15 2a13.4 13.4 0 0 0-7 0C4.8.1 3.7.5 3.7.5A5 5 0 0 0 3.6 4a5.4 5.4 0 0 0-1.4 3.7c0 5.3 3.5 6.5 6.8 6.9A4.8 4.8 0 0 0 8 18v4M8 19c-3 .9-3-1.5-4-2" /></Icon>;
 const PowerIcon = () => <Icon><path d="M12 2v10M18.4 6.6a9 9 0 1 1-12.8 0" /></Icon>;
 const StopIcon = () => <Icon><rect x="6" y="6" width="12" height="12" rx="2" /></Icon>;
+const TrashIcon = () => <Icon><path d="M4 7h16M10 3h4l1 2H9l1-2ZM6 7l1 13h10l1-13M10 11v5M14 11v5" /></Icon>;
 const ActivityIcon = () => <Icon><path d="M3 12h4l3-8 4 16 3-8h4" /></Icon>;
 const SettingsIcon = () => <Icon><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z" /></Icon>;
 

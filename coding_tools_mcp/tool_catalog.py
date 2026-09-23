@@ -52,6 +52,11 @@ _GROUPS: dict[str, tuple[tuple[str, str], ...]] = {
         ("workspace_overview", "Orient in an unfamiliar project, including bounded Apple/Xcode/Swift metadata."),
         ("project_instructions", "Read root and nested instructions applicable to the path you will edit."),
     ),
+    "local capabilities": (
+        ("local_capabilities_search", "Only when asked about a local Skill or plugin; search authorized metadata by name or task."),
+        ("local_skill_read", "Read the selected Skill instructions and up to three explicit text references before using it."),
+        ("local_plugin_inspect", "Inspect plugin metadata; this does not activate plugin tools or hooks."),
+    ),
     "checks": (
         ("checks_discover", "Find existing project-defined checks; execute the chosen command with exec_command."),
     ),
@@ -76,6 +81,7 @@ TOOL_USAGE_INSTRUCTIONS = (
     "Use the listed tools directly; there is no secondary tool-discovery workflow. "
     "Read several known files with read_files and continue commands using their command_id. "
     "Use exec_command for native macOS developer tools and ordinary Git writes instead of looking for wrapper tools. "
+    "When the workspace contains multiple Git repositories, pass repo_path to Git tools for the intended repository; file paths remain workspace-relative. "
     "Use the model/client conversation for planning, review, and task state; this runtime only exposes coding primitives and bounded project helpers. "
     "Follow applicable project instructions before editing."
 )

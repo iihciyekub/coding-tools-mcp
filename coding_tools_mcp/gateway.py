@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from .local_capabilities import LocalCapabilityCatalog
 from .tool_results import make_tool_result
 
 
@@ -76,8 +77,20 @@ class HTTPProjectRuntime:
             }
         ).encode("utf-8")
         request = urllib.request.Request(self.endpoint, data=data, headers=headers, method="POST")
+        rpc_timeout = 30.0
+        if method == "tools/call":
+            tool_name = str(body_params.get("name") or "")
+            raw_arguments = body_params.get("arguments")
+            arguments = raw_arguments if isinstance(raw_arguments, dict) else {}
+            if tool_name in {"exec_command", "write_stdin"}:
+                yield_ms = int(arguments.get("yield_time_ms", 10000))
+                # The child runtime may legitimately hold the request for the
+                # whole yield window before returning a command handle. Leave
+                # transport headroom so a 30s yield is not mistaken for an
+                # unavailable project runtime.
+                rpc_timeout = max(rpc_timeout, min(35.0, (yield_ms / 1000.0) + 5.0))
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
+            with urllib.request.urlopen(request, timeout=rpc_timeout) as response:
                 payload = json.loads(response.read().decode("utf-8"))
         except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
             raise RuntimeError(
@@ -391,12 +404,17 @@ class GatewayRuntime:
         session_registry: SessionRegistry,
         *,
         project_tool_definition: Callable[[], dict[str, Any]],
+        local_capabilities: LocalCapabilityCatalog | None = None,
+        local_tool_definition: Callable[[str], dict[str, Any]] | None = None,
     ) -> None:
         self.control_runtime = control_runtime
         self.projects = project_registry
         self.sessions = session_registry
         self._project_tool_definition = project_tool_definition
+        self.local_capabilities = local_capabilities
+        self._local_tool_definition = local_tool_definition
         self.enable_project_gateway = True
+        self.enable_local_capabilities = local_capabilities is not None
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.control_runtime, name)
@@ -414,22 +432,34 @@ class GatewayRuntime:
             self.sessions.clear_project(project_id)
 
     def exposed_tool_names(self) -> list[str]:
-        return ["project_context", *self.control_runtime.exposed_tool_names()]
+        local = ["local_capabilities_search", "local_skill_read", "local_plugin_inspect"] if self.local_capabilities else []
+        return ["project_context", *local, *self.control_runtime.exposed_tool_names()]
 
     def list_tools(self) -> dict[str, Any]:
         payload = self.control_runtime.list_tools()
         tools = list(payload.get("tools", []))
         tools.insert(0, self._project_tool_definition())
+        if self.local_capabilities and self._local_tool_definition:
+            tools[1:1] = [self._local_tool_definition(name) for name in (
+                "local_capabilities_search", "local_skill_read", "local_plugin_inspect"
+            )]
         return {"tools": tools}
 
     def tool_usage_instructions(self) -> str:
-        return (
+        base = (
             "This endpoint is a persistent project gateway. Use project_context to inspect or explicitly select "
             "the project for this MCP session. Project selection never follows the desktop frontmost window. "
             "After a project is selected, relative paths and default searches are rooted in that project's "
             "immutable workspace. Full Access changes the maximum permission scope, not the default search root. "
             + self.control_runtime.tool_usage_instructions()
         )
+        if self.local_capabilities:
+            base += (
+                " When asked to use a named local Skill or inspect a local plugin, search the authorized catalog "
+                "and read the matching Skill before acting. Reading plugin metadata does not make its tools "
+                "or hooks available; use only separately exposed MCP tools for actions."
+            )
+        return base
 
     def discover_payload(self) -> dict[str, Any]:
         payload = dict(self.control_runtime.discover_payload())
@@ -508,6 +538,15 @@ class BoundGatewayRuntime:
     ) -> dict[str, Any]:
         if name == "project_context":
             payload = self._project_context(arguments or {})
+            return make_tool_result(name, payload, is_error=payload.get("ok") is False)
+        catalog = self.gateway.local_capabilities
+        if catalog and name in {"local_capabilities_search", "local_skill_read", "local_plugin_inspect"}:
+            operation = {
+                "local_capabilities_search": catalog.search,
+                "local_skill_read": catalog.read_skill,
+                "local_plugin_inspect": catalog.inspect_plugin,
+            }[name]
+            payload = operation(arguments or {})
             return make_tool_result(name, payload, is_error=payload.get("ok") is False)
         runtime = self._selected_runtime()
         if runtime is None:

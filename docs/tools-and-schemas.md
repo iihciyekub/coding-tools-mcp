@@ -9,18 +9,22 @@ primitives rather than an agent workflow engine or a second tool-discovery layer
 
 ## Fixed inventory
 
-The implementation declares exactly 29 tools. A normal macOS project runtime
-exposes every enabled capability directly in one stable `tools/list`; Gateway mode
-adds only `project_context`. There is no workflow-tool or discovery-gateway mode.
+The implementation declares exactly 32 tools. A normal macOS project runtime
+exposes every enabled coding capability directly in one stable `tools/list`;
+Gateway mode adds `project_context` and, only when explicit local capability
+roots are configured, three read-only catalog tools. There is no workflow-tool mode.
 
 - `project_context`: **gateway-only direct** — List projects registered with a persistent gateway, inspect the project bound to this MCP session, or explicitly bind this session to another project without restarting the gateway.
+- `local_capabilities_search`: **optional gateway-only read-only** — Search Skill and plugin metadata in explicitly authorized directories.
+- `local_skill_read`: **optional gateway-only read-only** — Read a selected `SKILL.md` and bounded text references; it does not execute the Skill.
+- `local_plugin_inspect`: **optional gateway-only read-only** — Inspect public plugin metadata; it does not activate plugin actions or hooks.
 - `server_info`: **direct** — Return server, workspace, project-context, auth, policy, and fixed-tool metadata.
 - `runtime_doctor`: **direct** — Run a non-destructive runtime health check covering common toolchain commands, workspace access, shell snapshot, LSP availability, sandbox status, network policy, and macOS Apple toolchain metadata including Xcode, Swift, SourceKit-LSP, codesign, notarytool, xcresulttool, and Homebrew.
 - `read_file`: **direct** — Read a UTF-8 text file slice inside the configured file scope. Relative paths are workspace-relative; host mode also accepts host absolute and ~/... paths.
 - `read_files`: **direct** — Read bounded UTF-8 slices from multiple files in the configured file scope.
 - `list_dir`: **direct** — List directory entries inside the configured file scope.
-- `list_files`: **direct** — List files in the configured file scope using glob filters.
-- `search_text`: **direct** — Search UTF-8 files in the configured file scope for text or regex matches.
+- `list_files`: **direct** — List files using glob filters. An omitted `path` uses the configured default search folder; an explicit relative path uses the project workspace.
+- `search_text`: **direct** — Search UTF-8 files for text or regex matches. An omitted `path` uses the configured default search folder; an explicit relative path uses the project workspace.
 - `apply_patch`: **direct** — Stage, validate, and atomically apply a patch envelope. Example: *** Begin Patch *** Update File: app.py @@ -old +new *** End Patch
 - `exec_command`: **direct** — Run a bounded command under runtime policy. Pass workdir explicitly for reconnect-safe paths. A still-running command returns command_id. Example: {"cmd":"pytest -q","workdir":".","yield_time_ms":30000}. Retained output is bounded per stream; for very large output redirect to a file (cmd > out.log 2>&1) and page it with read_file or search_text.
 - `get_command`: **direct** — Read command status without consuming output cursors. Resolve by command_id or operation_id; returned output_refs can be paged with read_output.
@@ -46,9 +50,10 @@ adds only `project_context`. There is no workflow-tool or discovery-gateway mode
 The direct catalog contains file reads/search, `apply_patch`, command lifecycle, Git
 evidence, code navigation/diagnostics, project-safe permission requests, project
 orientation/instructions, check discovery, and runtime diagnostics. `project_context`
-appears only on the persistent Project Gateway; `view_image` is present when image
-content is enabled. `listChanged` remains `false` because the catalog is fixed for
-the Runtime lifetime.
+appears only on the persistent Project Gateway; the three local capability tools
+appear only when capability roots are configured; `view_image` is present when image
+content is enabled. `listChanged` remains `false` because tool definitions are fixed
+for the Runtime lifetime; Skill files can change within that fixed catalog.
 
 Planning, task history, review records, check-result persistence, checkpoints,
 protocol Tasks, workspace Skills, local-agent discovery, Git write workflows,
@@ -98,12 +103,22 @@ count, dimensions, resize metadata, and warnings, but no base64 or data URL.
 ```
 
 All operations are parsed and matched before writes. Context must be unique.
+`@@ <scope>` headers can disambiguate repeated code inside an enclosing
+function/class-like scope, and `*** End of File` can anchor a hunk to the file
+tail. Matching is exact first, then conservatively ignores trailing whitespace;
+indentation is never fuzzed. Successful updates report `match_quality`,
+`changed_ranges`, and the resulting SHA-256 `revision`.
 Files are prepared in their destination directories, fsynced, baseline-checked,
 and installed with atomic replacement. Multi-file failure restores prior files.
 Mode bits, BOM, and newline style are preserved; moves inherit source mode.
 Lines are split on `\n` only, so a line containing another Unicode line
 boundary (`\x0c`, `\u2028`, `\x85`, …) is one line to both the file and the
 patch. A file's final newline is an ordinary line the hunk can add or remove.
+
+`read_file` returns a SHA-256 `revision`. `apply_patch.expected_revisions` may
+bind selected paths to those revisions for optimistic concurrency. An optional
+`idempotency_key` makes retries replay the original result instead of applying
+the same patch twice.
 
 ## Model-ready examples
 
@@ -122,6 +137,12 @@ session-scoped working directory. Use explicit paths for multi-call workflows:
 ```json
 {"cmd":"pytest -q","workdir":".","yield_time_ms":30000}
 ```
+
+`list_files` and `search_text` are the exception when `path` is omitted: they use
+the optional `--default-search-path` directory, which defaults to the workspace.
+The configured directory must already be inside the runtime's file access scope.
+This setting changes the search starting point, not file or command permissions;
+an explicit `"path":"."` still targets the workspace.
 
 If the result is still running, copy its `command_id` exactly:
 
@@ -142,7 +163,11 @@ Page a truncated stream using the returned reference:
 ```
 
 `exec_command.workdir` and each file/Git tool's `path` argument are how a call
-targets a subdirectory; both are still confined to the workspace.
+targets a subdirectory. In safe/trusted/dangerous modes direct file paths remain
+inside the workspace plus explicitly configured file-access roots. In `host`
+mode ordinary file tools and `apply_patch` may also use host absolute and
+home-relative paths; project-scoped Git/LSP/check/context behavior remains
+anchored to the configured workspace.
 
 ## Command and output behavior
 
@@ -150,6 +175,13 @@ targets a subdirectory; both are still confined to the workspace.
 commands ordinarily return `status: "exited"` in one call. A still-running
 command returns a `command_id` and a machine-readable `next_action` for
 `write_stdin` with empty `chars`.
+
+`exec_command.timeout_ms` is the process lifetime limit and defaults to
+`300000` (5 minutes). `yield_time_ms` is only how long one call waits before
+returning a running command handle; it does not shorten the process lifetime.
+Command results expose `operation_outcome` separately from MCP/tool-call
+success, so `ok: true` with `exit_code: 1` is represented as
+`operation_outcome: "exited_nonzero"`.
 
 Only truncated terminal output returns a `read_output` next action by default.
 `output_ref` values are `command:<id>:stdout` or `command:<id>:stderr`; offsets
@@ -181,8 +213,9 @@ than labeling pipes as a TTY.
   full host environment, including HOME, SSH agent, Git credentials, and cache
   locations. Use only with a trusted client and repository.
 
-These modes do not change the tool list. Direct path tools retain workspace
-confinement in every mode.
+These modes do not change the tool list. Host mode changes the maximum file
+scope as described above; the other permission modes retain workspace/file-root
+confinement.
 
 `--dangerously-fake-readonly-annotations` advertises every tool as read-only in
 `tools/list` for clients that gate on annotations. It does not change the tool list

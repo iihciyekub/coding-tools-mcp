@@ -1,0 +1,7 @@
+{
+  "productName": "coding-tools-mcp-dev",
+  "identifier": "com.codingtoolsmcp.desktop.dev",
+  "bundle": {
+    "targets": ["app"]
+  }
+}

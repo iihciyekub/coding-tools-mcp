@@ -4,7 +4,7 @@ Status: current macOS-first runtime contract. This repository intentionally does
 
 ## Product boundary
 
-The runtime exposes low-level coding primitives over MCP. Planning, tasks, reviews, checkpoints, Skills, local-agent discovery, Git write workflows, and agent orchestration are deliberately outside the runtime. Native developer tools are invoked through `exec_command` when their behavior is already well-defined by macOS or the underlying CLI.
+The per-project runtime exposes low-level coding primitives over MCP. Planning, tasks, reviews, checkpoints, Skill execution, Git write workflows, and agent orchestration remain with the client. The optional persistent Gateway can expose a read-only catalog of explicitly authorized local Skill and plugin metadata. Native developer tools are invoked through `exec_command` when their behavior is already well-defined by macOS or the underlying CLI.
 
 `apply_patch` is the only direct text/source editing primitive. Project routing is handled by the persistent Project Gateway and is separate from the immutable per-project Runtime.
 
@@ -19,7 +19,7 @@ The runtime exposes low-level coding primitives over MCP. Planning, tasks, revie
 
 ## Tool-surface rule
 
-The implementation currently registers exactly 29 tools. CI caps the registered inventory at 32 tools, total input-schema size at 16,000 bytes, and any one schema at 2,048 bytes. Every enabled capability is directly listed; there is no secondary tool-discovery gateway.
+The implementation currently registers exactly 32 tools. CI caps the registered inventory at 32 tools, total input-schema size at 16,000 bytes, and any one schema at 2,048 bytes. Every enabled capability is directly listed; the optional Gateway catalog searches local Skill metadata, not hidden MCP tools.
 
 New tools require a capability or safety advantage that cannot be obtained cleanly by composing existing primitives. A wrapper around a native CLI is not sufficient justification.
 
@@ -50,6 +50,36 @@ List projects registered with a persistent gateway, inspect the project bound to
 Inputs: `"action"`, `"project_id"`.
 
 Annotations: `{"title":"Project context","readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false}`.
+
+### local_capabilities_search
+
+Exposure: **Gateway-only** when one or more `--local-capability-root` directories are configured.
+
+Search names and descriptions of local Skills and plugins in explicitly authorized directories. Results are paged and omit absolute paths and connection details. No matching entries are returned when no authorized directory contains the requested capability.
+
+Inputs: `"query"`, `"kind"`, `"limit"`, `"cursor"`.
+
+Annotations: `{"title":"Search local capabilities","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+### local_skill_read
+
+Exposure: **Gateway-only** with local capability roots.
+
+Read one selected `SKILL.md` and up to three explicitly named text files under that Skill's `references/` directory. Returns a bounded body and SHA-256 revision; does not execute instructions, scripts, or plugin actions.
+
+Inputs: `"id"`, `"resources"`.
+
+Annotations: `{"title":"Read local Skill","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+### local_plugin_inspect
+
+Exposure: **Gateway-only** with local capability roots.
+
+Read public name, description, and Skill names from a local plugin manifest. `metadata_only` does not assert that ChatGPT has installed or connected that plugin's actions.
+
+Inputs: `"id"`.
+
+Annotations: `{"title":"Inspect local plugin","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
 ### server_info
 
@@ -138,7 +168,7 @@ Stage, validate, and atomically apply a patch envelope. Example: *** Begin Patch
 +new
 *** End Patch
 
-Inputs: `"patch"`, `"dry_run"`.
+Inputs: `"patch"`, `"dry_run"`, `"idempotency_key"`, `"expected_revisions"`.
 
 Required: `"patch"`.
 
@@ -228,7 +258,7 @@ Exposure: **direct**.
 
 Return unified git diff for workspace changes.
 
-Inputs: `"path"`, `"paths"`, `"staged"`, `"unstaged"`, `"context_lines"`, `"max_bytes"`, `"repo_path"`.
+Inputs: `"path"`, `"paths"`, `"staged"`, `"unstaged"`, `"include_untracked"`, `"context_lines"`, `"max_bytes"`, `"repo_path"`.
 
 Annotations: `{"title":"Git diff","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
@@ -369,7 +399,7 @@ Annotations: `{"title":"Code references","readOnlyHint":true,"destructiveHint":f
 Tool-domain failures use the standard MCP error envelope with a stable `error.code`, category, retryability, and bounded details. Current literal tool failure codes are:
 
 ```json
-["ABSOLUTE_PATH_DENIED", "APPROVAL_EXPIRED", "APPROVAL_NOT_FOUND", "APPROVAL_NOT_USABLE", "APPROVAL_SCOPE_MISMATCH", "BINARY_FILE", "COMMAND_CLOSED", "COMMAND_LIMIT_REACHED", "COMMAND_NOT_FOUND", "GATEWAY_REQUIRED", "GIT_ERROR", "GIT_NOT_REPOSITORY", "GIT_REPOSITORY_MISMATCH", "GIT_REPOSITORY_OUTSIDE_WORKSPACE", "GIT_STATE_CONFLICT", "INTERNAL_ERROR", "INVALID_ARGUMENT", "IS_DIRECTORY", "LSP_EDIT_UNSUPPORTED", "LSP_ERROR", "LSP_EXITED", "LSP_LANGUAGE_UNSUPPORTED", "LSP_PATH_OUTSIDE_WORKSPACE", "LSP_TIMEOUT", "LSP_UNAVAILABLE", "NOT_A_DIRECTORY", "NOT_FOUND", "OPERATION_CONFLICT", "OPERATION_NOT_FOUND", "OPERATION_PENDING", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_FILE_SCOPE", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_UNAVAILABLE", "SYMLINK_ESCAPE", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING"]
+["ABSOLUTE_PATH_DENIED", "APPROVAL_EXPIRED", "APPROVAL_NOT_FOUND", "APPROVAL_NOT_USABLE", "APPROVAL_SCOPE_MISMATCH", "BINARY_FILE", "COMMAND_CLOSED", "COMMAND_LIMIT_REACHED", "COMMAND_NOT_FOUND", "GATEWAY_REQUIRED", "GIT_ERROR", "GIT_NOT_REPOSITORY", "GIT_REPOSITORY_MISMATCH", "GIT_REPOSITORY_OUTSIDE_WORKSPACE", "GIT_STATE_CONFLICT", "IDEMPOTENCY_CONFLICT", "INTERNAL_ERROR", "INVALID_ARGUMENT", "IS_DIRECTORY", "LSP_EDIT_UNSUPPORTED", "LSP_ERROR", "LSP_EXITED", "LSP_LANGUAGE_UNSUPPORTED", "LSP_PATH_OUTSIDE_WORKSPACE", "LSP_TIMEOUT", "LSP_UNAVAILABLE", "NOT_A_DIRECTORY", "NOT_FOUND", "OPERATION_CONFLICT", "OPERATION_NOT_FOUND", "OPERATION_PENDING", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_FILE_SCOPE", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_UNAVAILABLE", "SYMLINK_ESCAPE", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING"]
 ```
 
 Non-retryable model-facing errors explicitly say not to repeat the same call unchanged. Permission failures identify the required operator action; runtime failures preserve bounded diagnostic evidence.

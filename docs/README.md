@@ -23,6 +23,7 @@ migration guides, and archived workflow designs are intentionally not retained.
 ## Guides and integration
 
 - [Embedding](embedding.md)
+- [Local agent Skill capability bridge design](local-codex-capability-bridge.md)
 - [Exec command recipes](exec-command-recipes.md)
 - [Exec troubleshooting](troubleshooting-exec.md)
 - [Profile](profile.md)

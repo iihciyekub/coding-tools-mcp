@@ -381,14 +381,24 @@ class SessionTelemetry:
         error_code: str | None,
         duration_ms: int,
         truncated: bool,
+        operation_outcome: str | None = None,
         context: Any = None,
     ) -> None:
         emit_error: tuple[str, int] | None = None
         with self._lock:
             stats = self._tools.get(tool)
             if stats is None:
-                stats = self._tools[tool] = {"calls": 0, "errors": {}, "buckets": {}, "truncated": 0}
+                stats = self._tools[tool] = {
+                    "calls": 0,
+                    "errors": {},
+                    "buckets": {},
+                    "outcomes": {},
+                    "truncated": 0,
+                }
             stats["calls"] += 1
+            if operation_outcome:
+                label = _label(operation_outcome) or "unknown"
+                stats["outcomes"][label] = stats["outcomes"].get(label, 0) + 1
             bucket = _DURATION_OVERFLOW
             for limit, name in _DURATION_BUCKETS:
                 if duration_ms < limit:
@@ -450,6 +460,8 @@ class SessionTelemetry:
                 }
                 for code, count in sorted(stats["errors"].items()):
                     properties[f"err_{code}"] = count
+                for outcome, count in sorted(stats["outcomes"].items()):
+                    properties[f"outcome_{outcome}"] = count
                 properties.update(stats["buckets"])
                 events.append(self._event("tool_summary", properties))
             end_properties: dict[str, Any] = {

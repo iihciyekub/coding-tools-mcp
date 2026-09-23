@@ -431,6 +431,35 @@ class SessionEventTests(unittest.TestCase):
         self.assertEqual(properties["truncated"], 4)
         self.assertEqual(len([event for event in sender.events if event["event"] == "session_end"]), 1)
 
+    def test_tool_summary_counts_command_operation_outcomes_separately(self) -> None:
+        sender = _CapturingSender()
+        with scrubbed_env(), patch.object(telemetry, "_get_sender", lambda: sender):
+            session = SessionTelemetry(permission_mode="safe")
+            session.record_session_start(None, LEGACY_PROTOCOL_VERSION)
+            session.record_tool_call(
+                "exec_command",
+                ok=True,
+                error_code=None,
+                duration_ms=10,
+                truncated=False,
+                operation_outcome="exited_nonzero",
+            )
+            session.record_tool_call(
+                "exec_command",
+                ok=True,
+                error_code=None,
+                duration_ms=10,
+                truncated=False,
+                operation_outcome="exited_0",
+            )
+            session.finish()
+        summary = next(event for event in sender.events if event["event"] == "tool_summary")
+        properties = summary["properties"]
+        assert isinstance(properties, dict)
+        self.assertEqual(properties["ok"], 2)
+        self.assertEqual(properties["outcome_exited_nonzero"], 1)
+        self.assertEqual(properties["outcome_exited_0"], 1)
+
 
 class FirstAppearanceLogTests(unittest.TestCase):
     """The one-line stderr notes an operator reads to see which era clients speak."""

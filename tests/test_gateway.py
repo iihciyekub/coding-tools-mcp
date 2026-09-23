@@ -10,13 +10,16 @@ import time
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from coding_tools_mcp.gateway import (
     GatewayRuntime,
+    HTTPProjectRuntime,
     ProjectDefinition,
     ProjectRegistry,
     SessionRegistry,
 )
+from coding_tools_mcp.local_capabilities import LocalCapabilityCatalog
 from coding_tools_mcp.server import tool_definition
 from tests.compliance.mcp_client import MCPClient, free_port, safe_server_env
 from tests.compliance.test_support import structured_payload
@@ -85,7 +88,87 @@ class _FakeRuntime:
         self.closed = True
 
 
+class _FakeHTTPResponse:
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self.payload = payload
+
+    def __enter__(self) -> "_FakeHTTPResponse":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return json.dumps(self.payload).encode("utf-8")
+
+
 class GatewayUnitTests(unittest.TestCase):
+    def test_authorized_local_skill_tools_are_gateway_only_and_readable_before_project_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            skills = root / "skills"
+            sample = skills / "review"
+            sample.mkdir(parents=True)
+            (sample / "SKILL.md").write_text(
+                "---\nname: review\ndescription: Review a project.\n---\n\nCheck the tests.\n",
+                encoding="utf-8",
+            )
+            runtime = _FakeRuntime(root)
+            gateway = GatewayRuntime(
+                runtime,
+                ProjectRegistry(
+                    ProjectDefinition("one", "One", root),
+                    runtime,
+                    runtime_factory=lambda definition: _FakeRuntime(definition.path),
+                ),
+                SessionRegistry(),
+                project_tool_definition=lambda: tool_definition("project_context"),
+                local_capabilities=LocalCapabilityCatalog([skills]),
+                local_tool_definition=lambda name: tool_definition(name),
+            )
+            names = {item["name"] for item in gateway.list_tools()["tools"]}
+            self.assertTrue({"local_capabilities_search", "local_skill_read", "local_plugin_inspect"} <= names)
+            bound = gateway.bind(None)
+            found = structured_payload(bound.call_tool("local_capabilities_search", {"query": "review"}))
+            self.assertEqual(found["count"], 1)
+            read = structured_payload(bound.call_tool("local_skill_read", {"id": found["items"][0]["id"]}))
+            self.assertIn("Check the tests.", read["content"])
+
+    def test_project_proxy_leaves_headroom_for_max_yield_command(self) -> None:
+        definition = ProjectDefinition(
+            "project",
+            "Project",
+            Path("/tmp/project"),
+            "http://127.0.0.1:12345/mcp",
+        )
+        runtime = HTTPProjectRuntime(definition)
+        captured: dict[str, float] = {}
+
+        def fake_urlopen(_request: object, *, timeout: float) -> _FakeHTTPResponse:
+            captured["timeout"] = timeout
+            return _FakeHTTPResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "content": [],
+                        "structuredContent": {"ok": True, "status": "running"},
+                        "isError": False,
+                    },
+                }
+            )
+
+        with mock.patch(
+            "coding_tools_mcp.gateway.urllib.request.urlopen",
+            side_effect=fake_urlopen,
+        ):
+            result = runtime.call_tool(
+                "exec_command",
+                {"cmd": "sleep 32", "yield_time_ms": 30000, "timeout_ms": 45000},
+            )
+        self.assertFalse(result["isError"])
+        self.assertGreaterEqual(captured["timeout"], 35.0)
+
     def test_sessions_keep_project_selection_isolated_and_runtimes_are_lazy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -273,6 +356,12 @@ class GatewayHTTPTests(unittest.TestCase):
             second = root / "second"
             first.mkdir()
             second.mkdir()
+            local_skill = root / "shared-skills" / "review"
+            local_skill.mkdir(parents=True)
+            (local_skill / "SKILL.md").write_text(
+                "---\nname: review\ndescription: Review a selected project.\n---\n\nCheck project tests.\n",
+                encoding="utf-8",
+            )
             (first / "marker.txt").write_text("FIRST_ONLY_MARKER\n", encoding="utf-8")
             (second / "marker.txt").write_text("SECOND_ONLY_MARKER\n", encoding="utf-8")
             registry_file = root / "projects.json"
@@ -308,6 +397,8 @@ class GatewayHTTPTests(unittest.TestCase):
                     "First",
                     "--project-registry-file",
                     str(registry_file),
+                    "--local-capability-root",
+                    str(local_skill.parent),
                 ],
                 cwd=str(first),
                 env=env,
@@ -337,6 +428,11 @@ class GatewayHTTPTests(unittest.TestCase):
                     self.assertNotEqual(client_a.session_id, client_b.session_id)
                     tool_names = {item["name"] for item in client_a.list_tools()}
                     self.assertIn("project_context", tool_names)
+                    self.assertIn("local_capabilities_search", tool_names)
+                    catalog = structured_payload(client_a.call_tool("local_capabilities_search", {"query": "review"}))
+                    self.assertEqual(catalog["count"], 1)
+                    skill = structured_payload(client_a.call_tool("local_skill_read", {"id": catalog["items"][0]["id"]}))
+                    self.assertIn("Check project tests.", skill["content"])
 
                     current_a = structured_payload(client_a.call_tool("project_context", {"action": "current"}))
                     self.assertEqual(current_a["project_id"], "first")

@@ -135,6 +135,8 @@ pub struct RuntimeConfig {
     pub file_access_scope: String,
     #[serde(default = "default_allowed_paths")]
     pub allowed_paths: Vec<String>,
+    #[serde(default)]
+    pub default_search_path: String,
     #[serde(default = "default_environment_variables")]
     pub environment_variables: Vec<EnvironmentVariable>,
 }
@@ -147,6 +149,7 @@ impl Default for RuntimeConfig {
             permission_mode: default_permission_mode(),
             file_access_scope: default_file_access_scope(),
             allowed_paths: default_allowed_paths(),
+            default_search_path: String::new(),
             environment_variables: default_environment_variables(),
         }
     }
@@ -162,6 +165,8 @@ pub struct GatewayConfig {
     pub tunnel: TunnelConfig,
     #[serde(default)]
     pub auth: AuthConfig,
+    #[serde(default)]
+    pub local_capability_roots: Vec<String>,
 }
 
 impl Default for GatewayConfig {
@@ -171,6 +176,7 @@ impl Default for GatewayConfig {
             local_port: default_port(),
             tunnel: TunnelConfig::default(),
             auth: AuthConfig::default(),
+            local_capability_roots: Vec::new(),
         }
     }
 }
@@ -182,6 +188,7 @@ impl GatewayConfig {
             local_port: profile.runtime.local_port,
             tunnel: profile.tunnel.clone(),
             auth: profile.auth.clone(),
+            local_capability_roots: Vec::new(),
         }
     }
 
@@ -333,6 +340,36 @@ impl WorkspaceProfile {
                 && self.runtime.permission_mode != "host"
             {
                 return Err("The user home directory can only be added as an allowed folder in Full Access mode.".into());
+            }
+        }
+        let search_path = self.runtime.default_search_path.trim();
+        if !search_path.is_empty() && search_path != "." {
+            let selected = if search_path == "~" {
+                if self.runtime.permission_mode != "host" {
+                    return Err("Home search requires Full Access.".into());
+                }
+                user_home_directory().ok_or("Could not resolve the user home directory.")?
+            } else {
+                let path = Path::new(search_path);
+                if !path.is_absolute() {
+                    return Err("Default search folder must be an absolute path.".into());
+                }
+                std::fs::canonicalize(path).map_err(|error| error.to_string())?
+            };
+            if !selected.is_dir() || selected.parent().is_none() {
+                return Err(
+                    "Choose a folder instead of the whole filesystem for default search.".into(),
+                );
+            }
+            if self.runtime.permission_mode != "host"
+                && !selected.starts_with(&workspace)
+                && !self.runtime.allowed_paths.iter().any(|raw| {
+                    std::fs::canonicalize(raw).is_ok_and(|allowed| selected.starts_with(allowed))
+                })
+            {
+                return Err(
+                    "Default search folder must be in the project or an allowed folder.".into(),
+                );
             }
         }
         let mut environment_names = std::collections::HashSet::new();
@@ -532,6 +569,29 @@ mod tests {
         );
         assert!(profile.runtime.allowed_paths.is_empty());
         assert!(profile.validate().is_ok());
+    }
+
+    #[test]
+    fn default_search_folder_must_stay_within_standard_file_access() {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = temporary.path().join("workspace");
+        let extra = temporary.path().join("extra");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&extra).unwrap();
+        let mut profile =
+            WorkspaceProfile::new(workspace.to_string_lossy().into_owned(), 28766).unwrap();
+        profile.runtime.default_search_path = extra.to_string_lossy().into_owned();
+        assert!(profile.validate().unwrap_err().contains("allowed folder"));
+        profile
+            .runtime
+            .allowed_paths
+            .push(extra.to_string_lossy().into_owned());
+        assert!(profile.validate().is_ok());
+        profile.runtime.allowed_paths.clear();
+        profile.runtime.permission_mode = "host".into();
+        assert!(profile.validate().is_ok());
+        profile.runtime.default_search_path = "/".into();
+        assert!(profile.validate().unwrap_err().contains("whole filesystem"));
     }
 
     #[test]

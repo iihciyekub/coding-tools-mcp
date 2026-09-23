@@ -44,7 +44,7 @@ whichever client connected first.
 | `session_start` | the first request or notification of the session, `ping` excepted | — |
 | `handshake` | every MCP `initialize` | negotiated protocol version, the client's `clientInfo` name and version |
 | `tool_error` | a tool call fails (max 20 per session) | tool name, error code, duration ms, consecutive-failure count, and for a 2026-07-28 request the `clientInfo` name and version it carried |
-| `tool_summary` | session ends, one per tool used | calls, ok, errors, per-error-code counts, duration buckets, truncation count |
+| `tool_summary` | session ends, one per tool used | calls, ok, errors, per-error-code counts, command `operation_outcome` counts when present, duration buckets, truncation count |
 | `session_end` | session ends | session duration, total calls, distinct tools, dropped error-event count, handshake-era and 2026-07-28 request counts, `server/discover` probe count, retained-output eviction and omitted-read counters |
 
 A typical session produces 5–15 events totalling a few kilobytes.
