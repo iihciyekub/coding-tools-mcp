@@ -323,7 +323,7 @@ class ProjectRegistry:
         if path is None:
             if self.bootstrap is None or (self.bootstrap.path / ".git").exists():
                 return set()
-            discovered: dict[str, ProjectDefinition] = {self.bootstrap.id: self.bootstrap}
+            discovered: dict[str, ProjectDefinition] = {}
             try:
                 children = sorted(self.bootstrap.path.iterdir(), key=lambda item: item.name.casefold())
             except OSError:
@@ -334,9 +334,17 @@ class ProjectRegistry:
                 resolved = child.resolve(strict=True)
                 project_id = "project-" + hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()[:16]
                 discovered[project_id] = ProjectDefinition(project_id, resolved.name, resolved)
+            if not discovered:
+                discovered = {self.bootstrap.id: self.bootstrap}
+                default_project_id: str | None = self.bootstrap.id
+            elif len(discovered) == 1:
+                default_project_id = next(iter(discovered))
+            else:
+                default_project_id = None
             with self._lock:
                 removed = set(self._definitions) - set(discovered)
                 self._definitions = discovered
+                self._default_project_id = default_project_id
                 for project_id in removed:
                     runtime = self._runtimes.pop(project_id, None)
                     if runtime is not None and project_id in self._owned_runtime_ids:
@@ -417,6 +425,32 @@ class ProjectRegistry:
         self.refresh()
         with self._lock:
             return self._definitions.get(project_id)
+
+    def resolve_selector(self, selector: str) -> tuple[ProjectDefinition | None, list[ProjectDefinition]]:
+        """Resolve one agent-friendly project selector without exposing registry internals."""
+        self.refresh()
+        raw = selector.strip()
+        folded = raw.casefold()
+        resolved_selector: Path | None = None
+        if "/" in raw or raw.startswith("~"):
+            try:
+                resolved_selector = Path(raw).expanduser().resolve(strict=False)
+            except OSError:
+                resolved_selector = None
+        with self._lock:
+            exact = self._definitions.get(raw)
+            if exact is not None:
+                return exact, [exact]
+            matches = [
+                definition
+                for definition in self._definitions.values()
+                if definition.name.casefold() == folded
+                or definition.path.name.casefold() == folded
+                or definition.path == resolved_selector
+            ]
+        unique = {definition.id: definition for definition in matches}
+        ordered = sorted(unique.values(), key=lambda item: (item.name.casefold(), item.id))
+        return (ordered[0] if len(ordered) == 1 else None), ordered
 
     def runtime_state(self, project_id: str) -> str:
         with self._lock:
@@ -611,7 +645,7 @@ class BoundGatewayRuntime:
         if runtime is None:
             payload = self._project_error(
                 "PROJECT_NOT_SELECTED",
-                "No project is bound to this MCP session. Use project_context with action=select first.",
+                "No project is bound to this MCP session. Use project_context with action=select and project=<name-or-path> first.",
             )
             return make_tool_result(name, payload, is_error=True)
         return runtime.call_tool(name, arguments, context=context)
@@ -634,16 +668,27 @@ class BoundGatewayRuntime:
                     "SESSION_REQUIRED",
                     "This client has no MCP session id, so persistent project switching is disabled.",
                 )
-            project_id = str(arguments.get("project_id") or "").strip()
-            if not project_id:
-                return self._project_error("INVALID_ARGUMENT", "project_id is required for action=select")
-            definition = self.gateway.projects.get(project_id)
+            selector = str(arguments.get("project") or "").strip()
+            if not selector:
+                return self._project_error("INVALID_ARGUMENT", "project is required for action=select")
+            definition, matches = self.gateway.projects.resolve_selector(selector)
             if definition is None:
+                if matches:
+                    return self._project_error(
+                        "PROJECT_AMBIGUOUS",
+                        f"Project selector is ambiguous: {selector}",
+                        project=selector,
+                        matches=[
+                            {"project_id": item.id, "name": item.name, "root": str(item.path)}
+                            for item in matches
+                        ],
+                    )
                 return self._project_error(
                     "PROJECT_NOT_FOUND",
-                    f"Project is not registered: {project_id}",
-                    project_id=project_id,
+                    f"Project is not registered: {selector}",
+                    project=selector,
                 )
+            project_id = definition.id
             context = self.gateway.sessions.select(self.session_id, project_id)
             if context is None:
                 return self._project_error(

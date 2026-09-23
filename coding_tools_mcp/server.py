@@ -708,7 +708,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         title="Project context",
         description=(
             "List projects registered with a persistent gateway, inspect the project bound to this MCP session, "
-            "or explicitly bind this session to another project without restarting the gateway."
+            "or explicitly bind this session to another project by name, directory, root path, or id without restarting the gateway."
         ),
         read_only=False,
         idempotent=False,
@@ -6880,7 +6880,12 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                     "enum": ["list", "current", "select"],
                     "default": "current",
                 },
-                "project_id": {**string, "minLength": 1, "maxLength": 200},
+                "project": {
+                    **string,
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "description": "For action=select, choose by exact project id, display name, directory name, or registered root path.",
+                },
             }
         ),
         "local_capabilities_search": object_schema({

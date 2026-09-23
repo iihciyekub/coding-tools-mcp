@@ -119,9 +119,112 @@ class GatewayUnitTests(unittest.TestCase):
                 runtime_factory=lambda definition: _FakeRuntime(definition.path),
             )
             names = {item.name for item in projects.definitions()}
-            self.assertIn("Root", names)
+            self.assertNotIn("Root", names)
             self.assertIn("child-project", names)
             self.assertNotIn("plain-dir", names)
+            selected = projects.get(str(projects.default_project_id))
+            self.assertIsNotNone(selected)
+            self.assertEqual(selected.name, "child-project")
+
+    def test_registry_requires_selection_when_container_has_multiple_git_projects(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("alpha", "beta"):
+                child = root / name
+                child.mkdir()
+                (child / ".git").mkdir()
+            runtime = _FakeRuntime(root)
+            projects = ProjectRegistry(
+                ProjectDefinition("root", "Root", root),
+                runtime,
+                runtime_factory=lambda definition: _FakeRuntime(definition.path),
+            )
+            self.assertIsNone(projects.default_project_id)
+            self.assertEqual({item.name for item in projects.definitions()}, {"alpha", "beta"})
+
+    def test_unselected_container_session_routes_only_after_project_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("alpha", "beta"):
+                child = root / name
+                child.mkdir()
+                (child / ".git").mkdir()
+            control_runtime = _FakeRuntime(root)
+            projects = ProjectRegistry(
+                ProjectDefinition("root", "Root", root),
+                control_runtime,
+                runtime_factory=lambda definition: _FakeRuntime(definition.path),
+            )
+            sessions = SessionRegistry()
+            gateway = GatewayRuntime(
+                control_runtime,
+                projects,
+                sessions,
+                project_tool_definition=lambda: tool_definition("project_context"),
+            )
+            session = sessions.create(selected_project_id=projects.default_project_id)
+            bound = gateway.bind(session.session_id)
+
+            denied = structured_payload(bound.call_tool("read_file", {"path": "src/app.py"}))
+            self.assertEqual(denied["error"]["code"], "PROJECT_NOT_SELECTED")
+            self.assertEqual({item["name"] for item in denied["error"]["details"]["available_projects"]}, {"alpha", "beta"})
+
+            selected = structured_payload(
+                bound.call_tool("project_context", {"action": "select", "project": "beta"})
+            )
+            self.assertEqual(selected["current"]["name"], "beta")
+            routed = structured_payload(bound.call_tool("read_file", {"path": "src/app.py"}))
+            self.assertEqual(Path(routed["root"]).resolve(), (root / "beta").resolve())
+
+    def test_registry_resolves_agent_friendly_project_selectors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "first-dir"
+            second = root / "coding-tools-mcp"
+            first.mkdir()
+            second.mkdir()
+            registry_file = root / "projects.json"
+            registry_file.write_text(
+                json.dumps(
+                    {
+                        "projects": [
+                            {"id": "opaque-second", "name": "Coding Tools", "path": str(second)},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            runtime = _FakeRuntime(first)
+            projects = ProjectRegistry(
+                ProjectDefinition("opaque-first", "First Project", first),
+                runtime,
+                runtime_factory=lambda definition: _FakeRuntime(definition.path),
+                registry_file=registry_file,
+            )
+            for selector in ("opaque-second", "Coding Tools", "coding-tools-mcp", str(second)):
+                with self.subTest(selector=selector):
+                    selected, matches = projects.resolve_selector(selector)
+                    self.assertIsNotNone(selected)
+                    self.assertEqual(selected.id, "opaque-second")
+                    self.assertEqual([item.id for item in matches], ["opaque-second"])
+
+            ambiguous_root = root / "ambiguous"
+            ambiguous_root.mkdir()
+            registry_file.write_text(
+                json.dumps(
+                    {
+                        "projects": [
+                            {"id": "same-a", "name": "Same", "path": str(second)},
+                            {"id": "same-b", "name": "Same", "path": str(ambiguous_root)},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            projects.refresh(force=True)
+            selected, matches = projects.resolve_selector("Same")
+            self.assertIsNone(selected)
+            self.assertEqual({item.id for item in matches}, {"same-a", "same-b"})
 
     def test_authorized_local_skill_tools_are_gateway_only_and_readable_before_project_selection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -283,7 +386,7 @@ class GatewayUnitTests(unittest.TestCase):
             selected = structured_payload(
                 bound_a.call_tool(
                     "project_context",
-                    {"action": "select", "project_id": "second"},
+                    {"action": "select", "project": "Second"},
                 )
             )
             self.assertEqual(selected["project_id"], "second")
@@ -505,7 +608,7 @@ class GatewayHTTPTests(unittest.TestCase):
                     switched = structured_payload(
                         client_a.call_tool(
                             "project_context",
-                            {"action": "select", "project_id": "second"},
+                            {"action": "select", "project": second.name},
                         )
                     )
                     self.assertEqual(switched["project_id"], "second")

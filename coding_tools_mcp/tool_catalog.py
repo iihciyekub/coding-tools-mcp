@@ -48,7 +48,7 @@ _GROUPS: dict[str, tuple[tuple[str, str], ...]] = {
         ("code_diagnostics", "Read language-server diagnostics for one file; use exec_command for project-wide verification."),
     ),
     "project": (
-        ("project_context", "List projects, inspect the session-bound project, or explicitly switch this MCP session."),
+        ("project_context", "List projects, inspect the session-bound project, or switch it using a project name/path/id selector."),
         ("workspace_overview", "Orient in an unfamiliar project, including instructions, recommended checks, and bounded Apple/Xcode/Swift metadata."),
         ("project_instructions", "Read root and nested instructions applicable to the path you will edit."),
     ),

@@ -15,7 +15,7 @@ and Git-history helpers can remain implemented without occupying `tools/list`.
 Gateway mode adds `project_context` and, only when explicit local capability
 roots are configured, three read-only catalog tools. There is no workflow-tool mode.
 
-- `project_context`: **gateway-only direct** — List projects registered with a persistent gateway, inspect the project bound to this MCP session, or explicitly bind this session to another project without restarting the gateway.
+- `project_context`: **gateway-only direct** — List projects registered with a persistent gateway, inspect the project bound to this MCP session, or bind this session using an exact project id, display name, directory name, or registered root path.
 - `local_capabilities_search`: **optional gateway-only read-only** — Search Skill and plugin metadata in explicitly authorized directories.
 - `local_skill_read`: **optional gateway-only read-only** — Read a selected `SKILL.md` and bounded text references; it does not execute the Skill.
 - `local_plugin_inspect`: **optional gateway-only read-only** — Inspect public plugin metadata; it does not activate plugin actions or hooks.

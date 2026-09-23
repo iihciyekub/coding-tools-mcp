@@ -45,9 +45,9 @@ On macOS the runtime prefers existing developer infrastructure instead of MCP wr
 
 Exposure: **direct**; gated by `enable_project_gateway`.
 
-List projects registered with a persistent gateway, inspect the project bound to this MCP session, or explicitly bind this session to another project without restarting the gateway.
+List projects registered with a persistent gateway, inspect the project bound to this MCP session, or explicitly bind this session to another project by exact id, display name, directory name, or registered root path without restarting the gateway.
 
-Inputs: `"action"`, `"project_id"`.
+Inputs: `"action"`, `"project"`.
 
 Annotations: `{"title":"Project context","readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false}`.
 

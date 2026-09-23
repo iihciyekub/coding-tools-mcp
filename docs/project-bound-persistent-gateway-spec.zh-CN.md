@@ -79,7 +79,10 @@ Gateway 仅新增一个直接工具：
 ```text
 project_context
   action = list | current | select
+  project = <name | directory | root path | id>   # action=select
 ```
+
+模型不需要先复制内部 `project_id`；优先直接使用人类可读的 Project 名称或目录名。
 
 远程模型默认不拥有 add/remove/rename/permission mutation。
 
@@ -88,6 +91,10 @@ Project 管理由 Desktop App 负责。
 ## 6. 路径语义
 
 Project 选定后：
+
+- 所有普通相对路径默认相对于该 Project Root；
+- 父容器目录不再继续参与文件、Git、LSP、检查或命令路径解析；
+- 若 Gateway 根目录只是多个 Git Project 的容器，新 Session 不会自动绑定父容器；只有一个子 Project 时可自动绑定，多个时需要选择一次。
 
 ```text
 无 path       -> Project Root；list_files / search_text 可配置默认检索目录
