@@ -11,6 +11,13 @@
 - Added lightweight Project Runtime recovery and avoided no-op registry rewrites
   when project endpoints and Runtime build identities are unchanged.
 
+## 0.4.5 - 2026-09-23
+
+- Normalized `**/` globstar matching so top-level files and nested files behave
+  consistently across the `fd` fast path and the portable fallback.
+- Use the portable fallback for explicitly authorized external search roots,
+  avoiding platform-specific `fd` differences outside the Project Root.
+
 ## 0.4.4 - 2026-09-23
 
 - Fixed the cross-platform `fd` fast path so the default `**/*` search includes
