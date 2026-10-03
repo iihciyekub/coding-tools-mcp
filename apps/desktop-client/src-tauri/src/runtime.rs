@@ -6,7 +6,6 @@ use chrono::Local;
 use rand::distr::{Alphanumeric, SampleString};
 use regex::Regex;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::hash::{Hash, Hasher};
@@ -141,9 +140,10 @@ struct GatewayRegistryDocument {
     generation: u128,
     default_project_id: Option<String>,
     projects: Vec<GatewayRegistryProject>,
+    workspaces: Vec<GatewayRegistryProject>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct GatewayRegistryProject {
     id: String,
     name: String,
@@ -820,73 +820,22 @@ fn project_runtime_fingerprint(profile: &WorkspaceProfile) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-fn derived_project_id(parent_id: &str, path: &Path) -> String {
-    let mut digest = Sha256::new();
-    digest.update(parent_id.as_bytes());
-    digest.update(b"\0");
-    digest.update(path.as_os_str().as_encoded_bytes());
-    let hex = format!("{:x}", digest.finalize());
-    hex[..32].to_string()
-}
-
-fn direct_git_projects(profile: &WorkspaceProfile) -> Result<Vec<WorkspaceProfile>, String> {
-    let root = fs::canonicalize(&profile.path).map_err(|error| error.to_string())?;
-    if root.join(".git").exists() {
-        return Ok(vec![profile.clone()]);
-    }
-    let mut children = fs::read_dir(&root)
-        .map_err(|error| {
-            format!(
-                "Could not inspect project container {}: {error}",
-                root.display()
-            )
-        })?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir() && path.join(".git").exists())
-        .collect::<Vec<_>>();
-    children.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
-    if children.is_empty() {
-        return Ok(vec![profile.clone()]);
-    }
-    children
-        .into_iter()
-        .map(|child| {
-            let resolved = fs::canonicalize(&child).map_err(|error| error.to_string())?;
-            let mut derived = profile.clone();
-            derived.id = derived_project_id(&profile.id, &resolved);
-            derived.name = resolved
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or(&profile.name)
-                .to_string();
-            derived.path = resolved.to_string_lossy().into_owned();
-            Ok(derived)
-        })
-        .collect()
-}
-
+// Persisted profiles are workspace roots and own policy. Python indexes and
+// creates child project contexts lazily within each supervised workspace.
 fn gateway_project_profiles(
     profiles: &[WorkspaceProfile],
 ) -> Result<Vec<WorkspaceProfile>, String> {
-    let explicit_roots = profiles
-        .iter()
-        .map(|profile| fs::canonicalize(&profile.path).map_err(|error| error.to_string()))
-        .collect::<Result<std::collections::HashSet<_>, _>>()?;
-    let mut expanded = Vec::new();
+    let mut roots = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for profile in profiles {
-        for project in direct_git_projects(profile)? {
-            let canonical = fs::canonicalize(&project.path).map_err(|error| error.to_string())?;
-            if project.id != profile.id && explicit_roots.contains(&canonical) {
-                continue;
-            }
-            if seen.insert(canonical) {
-                expanded.push(project);
-            }
+        let canonical = fs::canonicalize(&profile.path).map_err(|error| error.to_string())?;
+        if seen.insert(canonical.clone()) {
+            let mut root = profile.clone();
+            root.path = canonical.to_string_lossy().into_owned();
+            roots.push(root);
         }
     }
-    Ok(expanded)
+    Ok(roots)
 }
 
 fn effective_default_search_path(profile: &WorkspaceProfile) -> &str {
@@ -940,6 +889,11 @@ fn spawn_project_runtime(
             "--shell-env-inherit",
             "all",
         ])
+        .arg("--project-gateway")
+        .arg("--project-id")
+        .arg(&profile.id)
+        .arg("--project-name")
+        .arg(&profile.name)
         .arg("--state-root")
         .arg(runtime_state_root);
     for root in file_access_roots(profile) {
@@ -1029,7 +983,9 @@ fn write_gateway_registry(
                     );
                 let same_projects = existing.get("projects")
                     == Some(&serde_json::to_value(&entries).map_err(|error| error.to_string())?);
-                if same_default && same_projects {
+                let same_workspaces = existing.get("workspaces")
+                    == Some(&serde_json::to_value(&entries).map_err(|error| error.to_string())?);
+                if same_default && same_projects && same_workspaces {
                     return Ok(());
                 }
             }
@@ -1042,6 +998,7 @@ fn write_gateway_registry(
     let document = GatewayRegistryDocument {
         generation,
         default_project_id,
+        workspaces: entries.clone(),
         projects: entries,
     };
     let parent = path.parent().ok_or("Invalid Gateway registry path.")?;
@@ -2152,54 +2109,36 @@ while True:
     }
 
     #[test]
-    fn gateway_projects_expand_a_non_git_container_into_stable_direct_git_projects() {
+    fn gateway_preserves_workspace_roots_and_policy_independently_of_child_index() {
         let temporary = tempfile::tempdir().unwrap();
         let container = temporary.path().join("ii-research");
         let alpha = container.join("alpha");
         let beta = container.join("beta");
-        let plain = container.join("plain");
         fs::create_dir_all(alpha.join(".git")).unwrap();
         fs::create_dir_all(beta.join(".git")).unwrap();
-        fs::create_dir_all(&plain).unwrap();
-        let profile =
+        fs::create_dir_all(container.join("plain")).unwrap();
+        let mut profile =
             WorkspaceProfile::new(container.to_string_lossy().into_owned(), 28766).unwrap();
-
+        profile.enable_full_access();
         let first = gateway_project_profiles(std::slice::from_ref(&profile)).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].id, profile.id);
+        assert_eq!(
+            Path::new(&first[0].path),
+            fs::canonicalize(&container).unwrap()
+        );
+        assert_eq!(first[0].runtime.permission_mode, "host");
+        fs::create_dir_all(container.join("new-directory")).unwrap();
         let second = gateway_project_profiles(std::slice::from_ref(&profile)).unwrap();
-        assert_eq!(first.len(), 2);
-        assert_eq!(
-            first
-                .iter()
-                .map(|item| item.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["alpha", "beta"]
-        );
-        assert_eq!(
-            first.iter().map(|item| item.id.clone()).collect::<Vec<_>>(),
-            second
-                .iter()
-                .map(|item| item.id.clone())
-                .collect::<Vec<_>>()
-        );
-        assert!(first
-            .iter()
-            .all(|item| item.id.len() == 32 && item.id.chars().all(|ch| ch.is_ascii_hexdigit())));
-        assert!(first.iter().all(|item| Path::new(&item.path) != container));
-
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].id, profile.id);
         let mut explicit_beta =
             WorkspaceProfile::new(beta.to_string_lossy().into_owned(), 28766).unwrap();
         explicit_beta.name = "beta-explicit".into();
-        explicit_beta.runtime.permission_mode = "host".into();
-        let with_explicit =
-            gateway_project_profiles(&[profile.clone(), explicit_beta.clone()]).unwrap();
-        assert_eq!(with_explicit.len(), 2);
-        let beta_project = with_explicit
-            .iter()
-            .find(|item| Path::new(&item.path) == beta)
-            .unwrap();
-        assert_eq!(beta_project.id, explicit_beta.id);
-        assert_eq!(beta_project.name, "beta-explicit");
-        assert_eq!(beta_project.runtime.permission_mode, "host");
+        let nested = gateway_project_profiles(&[profile, explicit_beta.clone()]).unwrap();
+        assert_eq!(nested.len(), 2);
+        assert_eq!(nested[1].id, explicit_beta.id);
+        assert_eq!(nested[1].runtime.permission_mode, "trusted");
     }
 
     #[test]
@@ -2272,6 +2211,7 @@ while True:
         let registry: serde_json::Value =
             serde_json::from_slice(&fs::read(&registry_path).unwrap()).unwrap();
         assert_eq!(registry["projects"].as_array().unwrap().len(), 2);
+        assert_eq!(registry["workspaces"], registry["projects"]);
         assert!(registry["default_project_id"].is_null());
         assert!(registry["projects"]
             .as_array()

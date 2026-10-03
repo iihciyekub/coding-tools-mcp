@@ -10,6 +10,7 @@ desktop frontmost window.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import threading
 import time
@@ -22,6 +23,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .local_capabilities import LocalCapabilityCatalog
+from .project_context import SKIPPED_CONTEXT_DIRS
 from .tool_results import make_tool_result
 
 
@@ -143,7 +145,9 @@ class HTTPProjectRuntime:
         context: Any = None,
     ) -> dict[str, Any]:
         del context
-        tool_arguments = arguments or {}
+        tool_arguments = dict(arguments or {})
+        if self.definition.workspace_root is not None:
+            tool_arguments["project"] = str(self.definition.path)
         try:
             self._validate_runtime_build()
         except ProjectRuntimeBuildMismatch as exc:
@@ -205,7 +209,8 @@ class HTTPProjectRuntime:
         expected = self.definition.runtime_build_id
         if not expected or self._build_validated:
             return
-        result = self._rpc("tools/call", {"name": "server_info", "arguments": {}})
+        arguments = {"project": str(self.definition.path)} if self.definition.workspace_root else {}
+        result = self._rpc("tools/call", {"name": "server_info", "arguments": arguments})
         structured = result.get("structuredContent")
         actual = structured.get("runtime_build_id") if isinstance(structured, dict) else None
         actual_value = str(actual).strip() if actual is not None else None
@@ -224,6 +229,7 @@ class ProjectDefinition:
     path: Path
     endpoint: str | None = None
     runtime_build_id: str | None = None
+    workspace_root: Path | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "ProjectDefinition":
@@ -257,6 +263,7 @@ class ProjectDefinition:
             "root": str(self.path),
             "runtime_state": runtime_state,
             "runtime_build_id": self.runtime_build_id,
+            "workspace_root": str(self.workspace_root or self.path),
         }
 
 
@@ -336,10 +343,15 @@ class ProjectRegistry:
         *,
         runtime_factory: Callable[[ProjectDefinition], Any],
         registry_file: Path | None = None,
+        workspace_roots: tuple[ProjectDefinition, ...] = (),
     ) -> None:
         self.bootstrap = bootstrap
         self.runtime_factory = runtime_factory
         self.registry_file = registry_file.expanduser() if registry_file else None
+        self._configured_workspaces = {item.id: item for item in workspace_roots}
+        self._workspaces: dict[str, ProjectDefinition] = dict(self._configured_workspaces)
+        self._workspace_projects: dict[str, ProjectDefinition] = {}
+        self._last_scan = 0.0
         self._definitions: dict[str, ProjectDefinition] = (
             {bootstrap.id: bootstrap} if bootstrap is not None else {}
         )
@@ -368,6 +380,10 @@ class ProjectRegistry:
     def refresh(self, *, force: bool = False) -> set[str]:
         path = self.registry_file
         if path is None:
+            if self._configured_workspaces:
+                with self._lock:
+                    self._workspaces = dict(self._configured_workspaces)
+                    return self._refresh_workspace_index(force=force)
             if self.bootstrap is None or (self.bootstrap.path / ".git").exists():
                 return set()
             discovered: dict[str, ProjectDefinition] = {}
@@ -408,7 +424,8 @@ class ProjectRegistry:
         else:
             mtime_ns = stat.st_mtime_ns
             if not force and self._registry_mtime_ns == mtime_ns:
-                return set()
+                with self._lock:
+                    return self._refresh_workspace_index()
             parsed = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(parsed, dict):
                 raise ValueError("project registry must be a JSON object")
@@ -429,16 +446,38 @@ class ProjectRegistry:
                 raise ValueError(f"duplicate project id with different path: {definition.id}")
             definitions[definition.id] = definition
 
+        raw_workspaces = raw.get("workspaces", [])
+        if not isinstance(raw_workspaces, list):
+            raise ValueError("project registry workspaces must be an array")
+        workspaces = dict(self._configured_workspaces)
+        for item in raw_workspaces:
+            if not isinstance(item, dict):
+                raise ValueError("each workspace entry must be an object")
+            definition = ProjectDefinition.from_mapping(item)
+            if definition.id in workspaces and workspaces[definition.id].path != definition.path:
+                raise ValueError(f"duplicate workspace id with different path: {definition.id}")
+            if definition.id in definitions and definitions[definition.id].path != definition.path:
+                raise ValueError(f"workspace id conflicts with project path: {definition.id}")
+            workspaces[definition.id] = definition
+            definitions[definition.id] = self._workspace_project(definition, definition.path)
+
         raw_default = raw.get("default_project_id")
         default_project_id = (
             str(raw_default).strip()
             if raw_default is not None
-            else (self.bootstrap.id if self.bootstrap is not None else "")
+            else (self.bootstrap.id if self.bootstrap is not None else next(iter(workspaces)) if len(workspaces) == 1 else "")
         )
         if default_project_id and default_project_id not in definitions:
             raise ValueError(f"default project is not registered: {default_project_id}")
 
         with self._lock:
+            # Rebuild derived definitions from the authoritative workspace entries.
+            # Reusing live paths keeps on-demand directories indexed across scans.
+            self._workspaces = workspaces
+            for definition in self._workspace_projects.values():
+                derived = self._definition_for_path(definition.path)
+                if derived is not None:
+                    definitions[derived.id] = derived
             removed = set(self._definitions) - set(definitions)
             changed = {
                 project_id
@@ -448,6 +487,7 @@ class ProjectRegistry:
                     self._definitions[project_id].path != definition.path
                     or self._definitions[project_id].endpoint != definition.endpoint
                     or self._definitions[project_id].runtime_build_id != definition.runtime_build_id
+                    or self._definitions[project_id].workspace_root != definition.workspace_root
                 )
             }
             invalidated = removed | changed
@@ -462,7 +502,78 @@ class ProjectRegistry:
             self._default_project_id = default_project_id or None
             self._registry_mtime_ns = mtime_ns
             self._generation = raw.get("generation")
-            return removed
+            if not workspaces:
+                self._workspace_projects = {}
+            return removed | self._refresh_workspace_index(force=True)
+
+    @staticmethod
+    def _workspace_project(workspace: ProjectDefinition, path: Path) -> ProjectDefinition:
+        is_root = path == workspace.path
+        project_id = workspace.id if is_root else "project-" + hashlib.sha256(
+            (workspace.id + "\0" + str(path)).encode("utf-8")
+        ).hexdigest()[:16]
+        return ProjectDefinition(
+            project_id, workspace.name if is_root else path.name, path,
+            workspace.endpoint, workspace.runtime_build_id, workspace.path,
+        )
+
+    def _definition_for_path(self, path: Path) -> ProjectDefinition | None:
+        try:
+            resolved = path.expanduser().resolve(strict=True)
+        except (OSError, RuntimeError, ValueError):
+            return None
+        if not resolved.is_dir():
+            return None
+        owners = [item for item in self._workspaces.values() if resolved.is_relative_to(item.path)]
+        if not owners:
+            return None
+        owner = max(owners, key=lambda item: len(item.path.parts))
+        return self._workspace_project(owner, resolved)
+
+    def _refresh_workspace_index(self, *, force: bool = False) -> set[str]:
+        """Bounded discovery is an index; access never depends on scan coverage."""
+        if not self._workspaces or (not force and time.monotonic() - self._last_scan < 2):
+            return set()
+        self._last_scan = time.monotonic()
+        discovered: dict[str, ProjectDefinition] = {}
+        candidates = [item.path for item in self._workspace_projects.values()]
+        markers = (".git", "pyproject.toml", "package.json", "Cargo.toml", "Package.swift", "go.mod", "pom.xml")
+        for workspace in self._workspaces.values():
+            candidates.append(workspace.path)
+            pending = [(workspace.path, 0)]
+            visited = 0
+            while pending and visited < 2000:
+                directory, depth = pending.pop()
+                try:
+                    children = sorted(itertools.islice(directory.iterdir(), 2000 - visited), key=lambda item: item.name.casefold())
+                except OSError:
+                    continue
+                for child in children:
+                    visited += 1
+                    if visited > 2000:
+                        break
+                    if child.name.startswith(".") or child.name in SKIPPED_CONTEXT_DIRS or child.is_symlink() or not child.is_dir():
+                        continue
+                    if depth == 0 or any((child / marker).exists() for marker in markers):
+                        candidates.append(child)
+                    if depth < 7:
+                        pending.append((child, depth + 1))
+        for candidate in candidates:
+            definition = self._definition_for_path(candidate)
+            if definition is not None:
+                discovered[definition.id] = definition
+        removed = set(self._workspace_projects) - set(discovered)
+        for project_id in removed:
+            self._definitions.pop(project_id, None)
+            runtime = self._runtimes.pop(project_id, None)
+            if runtime is not None and project_id in self._owned_runtime_ids:
+                runtime.close()
+            self._owned_runtime_ids.discard(project_id)
+        self._workspace_projects = discovered
+        self._definitions.update(discovered)
+        if self.registry_file is None:
+            self._default_project_id = next(iter(self._workspaces)) if len(self._workspaces) == 1 else None
+        return removed
 
     def definitions(self) -> list[ProjectDefinition]:
         self.refresh()
@@ -483,12 +594,34 @@ class ProjectRegistry:
         if "/" in raw or raw.startswith("~"):
             try:
                 resolved_selector = Path(raw).expanduser().resolve(strict=False)
-            except OSError:
+            except (OSError, RuntimeError, ValueError):
                 resolved_selector = None
         with self._lock:
             exact = self._definitions.get(raw)
             if exact is not None:
                 return exact, [exact]
+            # Absolute paths and workspace-relative paths remain usable even
+            # when they were created after startup or exceed discovery limits.
+            candidates: dict[Path, ProjectDefinition] = {}
+            try:
+                selector_path = Path(raw).expanduser()
+            except (OSError, RuntimeError, ValueError):
+                return None, []
+            paths = [selector_path] if selector_path.is_absolute() else [
+                workspace.path / raw for workspace in self._workspaces.values()
+            ]
+            for path in paths:
+                definition = self._definition_for_path(path)
+                if definition is not None:
+                    candidates[definition.path] = definition
+            if candidates:
+                ordered = sorted(candidates.values(), key=lambda item: str(item.path))
+                if len(ordered) == 1:
+                    definition = ordered[0]
+                    self._definitions[definition.id] = definition
+                    self._workspace_projects[definition.id] = definition
+                    return definition, ordered
+                return None, ordered
             matches = [
                 definition
                 for definition in self._definitions.values()
@@ -611,7 +744,9 @@ class GatewayRuntime:
             "on project-scoped tool calls; session-aware clients may also use project_context to inspect or select "
             "a persistent project binding. Project selection never follows the desktop frontmost window. "
             "After a project is selected, relative paths and default searches are rooted in that project's "
-            "immutable workspace. Full Access changes the maximum permission scope, not the default search root. "
+            "project directory. Workspace roots own permissions; projects are an index within those roots. "
+            "Any existing directory under a configured workspace can be selected by absolute or workspace-relative "
+            "path, including newly created directories without Git. Full Access changes permission scope. "
             + self.control_runtime.tool_usage_instructions()
         )
         if self.local_capabilities:

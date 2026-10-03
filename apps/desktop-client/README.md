@@ -9,6 +9,9 @@ API.
 
 - Compact menu-bar panel with no macOS Dock icon
 - Multiple workspace profiles with one automatically assigned local port per workspace
+- Workspace profiles own access permissions; child projects inherit them and new
+  directories can be used immediately without registration. See the authoritative
+  [Workspace authorization and Project index contract](../../docs/project-bound-persistent-gateway-spec.zh-CN.md#4-project-registry).
 - Mode-first profile creation: both Standard and Full Access ask for a workspace
   folder so project context is always explicit. Full Access does not synthesize a
   folder allowlist: host-mode file tools and commands can use the host filesystem.
@@ -19,8 +22,8 @@ API.
 - **Allowed folders** apply to Standard access: ordinary file tools and `apply_patch`
   can use the workspace plus explicitly selected folders. In Full Access, file tools
   and host commands can use the host filesystem; relative paths still resolve from
-  the workspace. Git evidence, LSP, check discovery, project instructions, and project
-  context stay anchored to the selected workspace rather than following arbitrary host paths.
+  the selected project directory. Git evidence, LSP, check discovery, and project
+  context stay anchored to that project; project instructions inherit from its workspace root.
 - Workspace settings expose a separate default search folder for `list_files` and
   `search_text` when no path is supplied. Full Access defaults to the user's home
   directory, including existing profiles that never chose a search folder; Standard

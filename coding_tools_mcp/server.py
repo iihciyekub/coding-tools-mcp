@@ -1787,12 +1787,16 @@ class Runtime:
         fake_readonly_annotations: bool = False,
         transport: str = "stdio",
         command_manager: WorkspaceCommandManager | None = None,
+        workspace_root: Path | None = None,
     ) -> None:
         self.workspace = Workspace(workspace, allow_home_root=permission_mode == "host")
+        self.workspace_root = (workspace_root or self.workspace.root).expanduser().resolve(strict=True)
+        if not self.workspace.root.is_relative_to(self.workspace_root):
+            raise ToolFailure("PATH_OUTSIDE_WORKSPACE", "Project directory is outside its workspace root.", category="security")
         self.file_access = FileAccess(
             self.workspace,
             file_access_root,
-            file_access_roots,
+            (*file_access_roots, self.workspace_root) if workspace_root is not None else file_access_roots,
             host_filesystem=permission_mode == "host",
         )
         configured_search_path = default_search_path.strip() or "."
@@ -2033,7 +2037,7 @@ class Runtime:
         return self.capabilities.landlock
 
     def landlock_write_roots(self) -> list[Path]:
-        return [self.runtime_dir]
+        return [self.runtime_dir, self.workspace_root] if self.workspace_root != self.workspace.root else [self.runtime_dir]
 
     def is_allowed_command_tmp_path(self, candidate: str) -> bool:
         if self.capabilities.skip_all_permissions:
@@ -2093,6 +2097,12 @@ class Runtime:
                 " Ordinary file tools and apply_patch may access the project root plus these explicitly allowed "
                 f"folders: {file_scope}. Relative paths stay project-relative; absolute paths are allowed only "
                 "inside those folders."
+            )
+        if self.workspace_root != self.workspace.root:
+            scope_guidance += (
+                f" This project inherits authorization from workspace root {self.workspace_root}. "
+                "Before modifying files, use project_instructions to read current rules from the workspace "
+                "root through the selected project directory."
             )
         return f"{guidance}{scope_guidance}\n\n{self.project_context_data.server_instructions()}"
 
@@ -2175,6 +2185,7 @@ class Runtime:
     def _exec_environment_summary(self) -> dict[str, Any]:
         return {
             "workspace": str(self.workspace.root),
+            "workspace_root": str(self.workspace_root),
             "file_access_root": str(self.file_access.root),
             "file_access_roots": [str(path) for path in self.file_access.roots],
             "default_search_path": str(self.workspace.root) if self.default_search_path == "." else self.default_search_path,
@@ -5273,7 +5284,7 @@ class Runtime:
 
     def project_instructions(self, args: dict[str, Any]) -> dict[str, Any]:
         target = self.resolve_existing(str(args.get("path", "."))).path
-        return instructions_for_path(self.workspace.root, target)
+        return instructions_for_path(self.workspace_root, target)
 
 
 
@@ -8192,6 +8203,7 @@ def build_runtime(
         fake_readonly_annotations=runtime_policy.fake_readonly_annotations,
         transport=transport,
         command_manager=command_manager,
+        workspace_root=getattr(args, "workspace_root", None),
     )
     if emit_warning and runtime.capabilities.skip_all_permissions:
         warning = (
@@ -8435,6 +8447,7 @@ def run_http(args: argparse.Namespace) -> int:
                 return HTTPProjectRuntime(definition)
             child_args = argparse.Namespace(**vars(args))
             child_args.workspace = str(definition.path)
+            child_args.workspace_root = definition.workspace_root
             return build_runtime(
                 child_args,
                 runtime_policy,
@@ -8449,6 +8462,7 @@ def run_http(args: argparse.Namespace) -> int:
             None if registry_only else control_runtime,
             runtime_factory=build_project_runtime,
             registry_file=registry_path,
+            workspace_roots=(bootstrap,) if bootstrap is not None else (),
         )
         session_registry = SessionRegistry(
             ttl_seconds=int(getattr(args, "gateway_session_ttl", DEFAULT_GATEWAY_SESSION_TTL_SECONDS))

@@ -60,6 +60,9 @@ also use host filesystem access in this mode. Relative paths remain
 workspace-relative for deterministic project work, while absolute paths and
 home-relative paths may resolve across the host filesystem. Git, LSP, workflow
 state, checks, reviews, and project context remain anchored to the workspace.
+For Gateway-managed projects, the selected project directory supplies this context;
+authorization and parent instructions inherit from its configured workspace root.
+See the [Workspace authorization and Project index contract](project-bound-persistent-gateway-spec.zh-CN.md#4-project-registry).
 Unrestricted host command access, including SSH/SCP/rsync, installed developer
 tools, and Git over SSH, is available through `exec_command`. The server's own
 transport authentication secrets are always removed from child command

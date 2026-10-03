@@ -20,7 +20,7 @@ from coding_tools_mcp.gateway import (
     SessionRegistry,
 )
 from coding_tools_mcp.local_capabilities import LocalCapabilityCatalog
-from coding_tools_mcp.server import tool_definition
+from coding_tools_mcp.server import Runtime, tool_definition
 from tests.compliance.mcp_client import MCPClient, free_port, safe_server_env
 from tests.compliance.test_support import structured_payload
 
@@ -626,6 +626,151 @@ class GatewayUnitTests(unittest.TestCase):
             self.assertEqual(current["project_id"], "project")
 
 
+class WorkspaceGatewayTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name).resolve()
+        self.root = self.base / "workspace"
+        self.root.mkdir()
+
+    def registry(self, *, registry_file: Path | None = None) -> ProjectRegistry:
+        registry = ProjectRegistry(
+            None, None, runtime_factory=lambda definition: _FakeRuntime(definition.path),
+            registry_file=registry_file,
+            workspace_roots=(ProjectDefinition("workspace", "Workspace", self.root),) if registry_file is None else (),
+        )
+        self.addCleanup(registry.close)
+        return registry
+
+    def test_root_plain_and_nested_projects_are_indexed_without_replacing_root(self) -> None:
+        (self.root / "notes").mkdir()
+        (self.root / "group" / "repo" / ".git").mkdir(parents=True)
+        registry = self.registry()
+        paths = {item.path for item in registry.definitions()}
+        self.assertIn(self.root, paths)
+        self.assertIn(self.root / "notes", paths)
+        self.assertIn(self.root / "group" / "repo", paths)
+        self.assertEqual(registry.default_project_id, "workspace")
+
+    def test_new_directory_is_immediately_selectable_without_registry_or_scan(self) -> None:
+        registry = self.registry()
+        new = self.root / "group" / "new-plain"
+        new.mkdir(parents=True)
+        with mock.patch.object(registry, "_refresh_workspace_index", return_value=set()):
+            definition, _ = registry.resolve_selector("group/new-plain")
+            self.assertIsNotNone(definition)
+            self.assertEqual(definition.path, new)
+            absolute, _ = registry.resolve_selector(str(new))
+            self.assertEqual(absolute.id, definition.id)
+            self.assertEqual(absolute.workspace_root, self.root)
+
+    def test_new_children_work_with_unchanged_desktop_registry(self) -> None:
+        registry_file = self.base / "registry.json"
+        registry_file.write_text(json.dumps({
+            "workspaces": [{"id": "workspace", "path": str(self.root), "endpoint": "http://127.0.0.1:12345/mcp", "runtime_build_id": "build"}],
+        }))
+        registry = self.registry(registry_file=registry_file)
+        self.assertEqual(registry.default_project_id, "workspace")
+        before = registry_file.read_bytes()
+        new = self.root / "plain"
+        new.mkdir()
+        definition, _ = registry.resolve_selector(str(new))
+        self.assertEqual(definition.workspace_root, self.root)
+        self.assertEqual(definition.endpoint, "http://127.0.0.1:12345/mcp")
+        self.assertEqual(definition.runtime_build_id, "build")
+        self.assertEqual(registry_file.read_bytes(), before)
+
+    def test_symlink_escape_is_rejected_and_deep_paths_do_not_depend_on_scan_limit(self) -> None:
+        registry = self.registry()
+        outside = self.base / "outside"
+        outside.mkdir()
+        (self.root / "escape").symlink_to(outside, target_is_directory=True)
+        self.assertIsNone(registry.resolve_selector("escape")[0])
+        self.assertIsNone(registry.resolve_selector(str(outside))[0])
+        deep = self.root.joinpath(*[f"level-{i}" for i in range(10)])
+        deep.mkdir(parents=True)
+        self.assertEqual(registry.resolve_selector(str(deep))[0].path, deep)
+
+    def test_invalid_paths_return_no_project_without_crashing_the_gateway(self) -> None:
+        registry = self.registry()
+        for selector in ("bad\0path", "~/bad\0path", "~coding_tools_nonexistent_user_xyz/project"):
+            with self.subTest(selector=selector):
+                self.assertIsNone(registry.resolve_selector(selector)[0])
+
+    def test_longest_workspace_root_owns_nested_project_and_removal_revokes_it(self) -> None:
+        nested = self.root / "nested"
+        (nested / "notes").mkdir(parents=True)
+        registry_file = self.base / "registry.json"
+        roots = [{"id": "parent", "path": str(self.root)}, {"id": "child", "path": str(nested)}]
+        registry_file.write_text(json.dumps({"workspaces": roots}))
+        registry = self.registry(registry_file=registry_file)
+        definition, _ = registry.resolve_selector(str(nested / "notes"))
+        self.assertEqual(definition.workspace_root, nested)
+        runtime = registry.runtime_for(definition.id)
+        registry_file.write_text(json.dumps({"workspaces": []}))
+        removed = registry.refresh(force=True)
+        self.assertIn(definition.id, removed)
+        self.assertTrue(runtime.closed)
+        self.assertIsNone(registry.resolve_selector(str(nested / "notes"))[0])
+
+    def test_effective_permissions_rules_and_sessions_follow_workspace(self) -> None:
+        for mode in ("host", "trusted"):
+            with self.subTest(mode=mode):
+                (self.root / "AGENTS.md").write_text("Workspace rules")
+                for name in ("alpha", "beta"):
+                    directory = self.root / name
+                    directory.mkdir(exist_ok=True)
+                    (directory / "marker.txt").write_text(name)
+                control = Runtime(self.root, permission_mode=mode, state_root=self.base / f"state-{mode}")
+                registry = ProjectRegistry(
+                    ProjectDefinition("workspace", "Workspace", self.root), control,
+                    runtime_factory=lambda definition: Runtime(
+                        definition.path, workspace_root=definition.workspace_root,
+                        permission_mode=mode, state_root=self.base / f"state-{mode}",
+                    ),
+                    workspace_roots=(ProjectDefinition("workspace", "Workspace", self.root),),
+                )
+                sessions = SessionRegistry()
+                gateway = GatewayRuntime(control, registry, sessions, project_tool_definition=lambda: tool_definition("project_context"))
+                try:
+                    a = gateway.bind(sessions.create(selected_project_id="workspace").session_id)
+                    b = gateway.bind(sessions.create(selected_project_id="workspace").session_id)
+                    for bound, name in ((a, "alpha"), (b, "beta")):
+                        selected = structured_payload(bound.call_tool("project_context", {"action": "select", "project": name}))
+                        self.assertEqual(selected["current"]["workspace_root"], str(self.root))
+                    for bound, name in ((a, "alpha"), (b, "beta")):
+                        result = bound.call_tool("read_file", {"path": "marker.txt"})
+                        self.assertFalse(result["isError"], result)
+                        self.assertIn(name, str(result))
+                        info = structured_payload(bound.call_tool("server_info", {}))
+                        self.assertEqual(info["permission_mode"], mode)
+                        self.assertEqual(info["workspace_root"], str(self.root))
+                        rules = structured_payload(bound.call_tool("project_instructions", {}))
+                        self.assertIn("Workspace rules", str(rules))
+                    # Selecting alpha does not shrink authorization to alpha.
+                    sibling = a.call_tool("read_file", {"path": str(self.root / "beta" / "marker.txt")})
+                    self.assertFalse(sibling["isError"], sibling)
+                finally:
+                    gateway.close()
+
+    def test_proxy_preserves_child_target_for_build_probe_and_tool_call(self) -> None:
+        child = self.root / "child"
+        child.mkdir()
+        proxy = HTTPProjectRuntime(ProjectDefinition(
+            "child", "Child", child, "http://127.0.0.1:12345/mcp", "build", self.root,
+        ))
+        with mock.patch.object(proxy, "_rpc", side_effect=[
+            {"structuredContent": {"runtime_build_id": "build"}},
+            {"structuredContent": {"ok": True}},
+        ]) as rpc:
+            args = {"path": "note.txt"}
+            proxy.call_tool("read_file", args)
+        self.assertNotIn("project", args)
+        self.assertEqual(rpc.call_args_list[0].args[1]["arguments"]["project"], str(child))
+        self.assertEqual(rpc.call_args_list[1].args[1]["arguments"]["project"], str(child))
+
+
 class GatewayHTTPTests(unittest.TestCase):
     def test_one_url_routes_two_sessions_to_different_projects(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -755,8 +900,14 @@ class GatewayHTTPTests(unittest.TestCase):
                     process.stderr.close()
 
     def test_registry_only_gateway_proxies_an_isolated_loopback_project_runtime(self) -> None:
+        self._assert_loopback_proxy(workspace_model=False)
+
+    def test_workspace_proxy_inherits_full_access_and_uses_new_directories_without_restart(self) -> None:
+        self._assert_loopback_proxy(workspace_model=True)
+
+    def _assert_loopback_proxy(self, *, workspace_model: bool) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             control = root / "control"
             project = root / "project"
             control.mkdir()
@@ -770,12 +921,13 @@ class GatewayHTTPTests(unittest.TestCase):
                     {
                         "generation": 1,
                         "default_project_id": "project",
-                        "projects": [
+                        "workspaces" if workspace_model else "projects": [
                             {
                                 "id": "project",
                                 "name": "Project",
                                 "path": str(project),
                                 "endpoint": f"http://127.0.0.1:{child_port}/mcp",
+                                "runtime_build_id": "workspace-test-build",
                             }
                         ],
                     }
@@ -783,6 +935,7 @@ class GatewayHTTPTests(unittest.TestCase):
                 encoding="utf-8",
             )
             env = safe_server_env()
+            env["CODING_TOOLS_MCP_RUNTIME_BUILD_ID"] = "workspace-test-build"
             child = subprocess.Popen(
                 [
                     sys.executable,
@@ -794,6 +947,7 @@ class GatewayHTTPTests(unittest.TestCase):
                     "127.0.0.1",
                     "--port",
                     str(child_port),
+                    *(["--project-gateway", "--project-id", "project", "--permission-mode", "host"] if workspace_model else []),
                 ],
                 cwd=str(project),
                 env=env,
@@ -855,6 +1009,49 @@ class GatewayHTTPTests(unittest.TestCase):
                         client.call_tool("search_text", {"query": "PROXIED_PROJECT_MARKER"})
                     )
                     self.assertEqual(result["total_matches"], 1)
+                    if workspace_model:
+                        before = registry_file.read_bytes()
+                        notes = project / "group" / "notes"
+                        created = client.call_tool("apply_patch", {"patch": (
+                            "*** Begin Patch\n*** Add File: group/notes/marker.txt\n"
+                            "+NEW_DIRECTORY_MARKER\n*** End Patch"
+                        )})
+                        self.assertFalse(created["isError"], created)
+                        (project / "AGENTS.md").write_text("Inherited workspace rules\n")
+                        selected = structured_payload(client.call_tool("project_context", {
+                            "action": "select", "project": "group/notes",
+                        }))
+                        self.assertEqual(selected["current"]["root"], str(notes))
+                        info = structured_payload(client.call_tool("server_info", {}))
+                        self.assertEqual(info["permission_mode"], "host")
+                        self.assertEqual(info["workspace_root"], str(project))
+                        read = client.call_tool("read_file", {"path": "marker.txt"})
+                        self.assertFalse(read["isError"], read)
+                        self.assertIn("NEW_DIRECTORY_MARKER", str(read))
+                        rules = client.call_tool("project_instructions", {})
+                        self.assertIn("Inherited workspace rules", str(rules))
+                        patched = client.call_tool("apply_patch", {"patch": (
+                            "*** Begin Patch\n*** Add File: created.txt\n+CREATED\n*** End Patch"
+                        )})
+                        self.assertFalse(patched["isError"], patched)
+                        self.assertEqual((notes / "created.txt").read_text(), "CREATED\n")
+                        command = structured_payload(client.call_tool("exec_command", {
+                            "cmd": "pwd", "yield_time_ms": 1000, "verbosity": "full",
+                        }))
+                        self.assertEqual(command["exit_code"], 0)
+                        self.assertEqual(command["stdout"].strip(), str(notes))
+                        # Host file authority remains broader than the project index.
+                        host_file = control / "host.txt"
+                        host_file.write_text("HOST_ACCESS_MARKER")
+                        host_read = client.call_tool("read_file", {"path": str(host_file)})
+                        self.assertFalse(host_read["isError"], host_read)
+                        self.assertIn("HOST_ACCESS_MARKER", str(host_read))
+                        with MCPClient(control, url=f"http://127.0.0.1:{gateway_port}/mcp") as other:
+                            root_read = other.call_tool("read_file", {"path": "marker.txt"})
+                            self.assertIn("PROXIED_PROJECT_MARKER", str(root_read))
+                            child_read = client.call_tool("read_file", {"path": "marker.txt"})
+                            self.assertIn("NEW_DIRECTORY_MARKER", str(child_read))
+                        self.assertEqual(registry_file.read_bytes(), before)
             finally:
                 for process in processes:
                     if process.poll() is None:

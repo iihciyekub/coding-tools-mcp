@@ -1,7 +1,7 @@
 # Coding Tools MCP — Project-Bound Persistent Gateway 规格
 
-日期：2026-09-22  
-状态：Phase 1–4 已落地，进入完整回归与真实连接验收
+日期：2026-10-03
+状态：Workspace 授权与 Project 索引分离；真实 Desktop 连接验收仍需单独进行
 
 ## 1. 目标
 
@@ -30,6 +30,8 @@ Gateway 常驻。新增、删除、切换 Project 不要求重新配置 URL、�
 5. 前台窗口不得偷偷改变远程 MCP Project。
 6. Project Runtime 的 workspace 生命周期内不可变。
 7. Project secret / token / environment value 不进入 project registry 明文文件。
+8. Workspace Root 是持久授权单位，Project 是其下的工作目录索引，继承 Workspace 权限。
+9. 索引扫描不构成目录白名单；新建普通目录无需 Git、重新注册或重启 MCP。
 
 ## 3. Session 绑定
 
@@ -52,18 +54,39 @@ Registry 是可热更新的非敏感路由表：
 ```json
 {
   "generation": 3,
-  "default_project_id": "wosaide",
-  "projects": [
+  "default_project_id": "research",
+  "workspaces": [
     {
-      "id": "wosaide",
-      "name": "wosaide",
-      "path": "/Users/.../wosaide",
+      "id": "research",
+      "name": "Research",
+      "path": "/Users/.../ii-research",
       "endpoint": "http://127.0.0.1:54321/mcp",
       "runtime_build_id": "0.4.5-0123456789abcdefabcd"
     }
-  ]
+  ],
+  "projects": []
 }
 ```
+
+新 registry 的 `default_project_id` 应指向 Workspace Root 的 id（上例为 `research`）。
+只有一个 Workspace 且未指定默认项时，Gateway 自动以该根目录作为默认工作目标。
+`workspaces` 保存授权根目录及其受管执行器 endpoint，权限和环境变量来自持久
+Workspace profile，通过执行器启动参数与进程环境传入，不复制到 Project 索引。
+Desktop 为每个 Workspace 启动一个受管本地 Gateway，Project Runtime 在该进程内
+按需创建，并保持各自的 Git、LSP、命令和工作流状态。外层 Gateway 代理调用时携带
+Project 的绝对路径，让本地执行器保留正确的相对路径基准。
+
+启动扫描始终保留 Workspace Root，同时索引第一层普通目录和深层带 Git 或常见
+项目清单的目录；扫描每个 Workspace 最多检查 2000 个条目，最深检查 8 层，跳过
+依赖、构建目录和符号链接。后续请求至多每 2 秒刷新扫描；任意已有子目录可在调用时
+按绝对路径或 Workspace 相对路径立即解析，不受扫描深度、刷新间隔或 Git 标记限制。
+重叠 Workspace 由路径最深的根目录负责；同名且不唯一时返回候选项，避免静默串项目。
+符号链接按实际路径判断所属 Workspace。Project 规则从 Workspace Root 沿路径继承。
+
+旧的仅含 `projects` 的 registry 继续支持显式项目路由。Desktop 现有 `profiles.json`
+中的 Workspace profile 直接作为授权根目录使用，保留 id、路径、访问模式和 Keychain
+配置，无需重选目录。生成的 `projects` 根目录条目用于兼容旧 registry 消费者；子项目
+索引由 Python Runtime 管理，不作为新的持久授权配置。
 
 Desktop 写 registry 时必须 atomic replace。Gateway 使用 generation / mtime 发现变化。
 Registry 是某个 Desktop App instance / runtime build 的运行时状态，必须位于该 bundle
@@ -74,8 +97,8 @@ Registry 是某个 Desktop App instance / runtime build 的运行时状态，必
 代理某 Project Runtime 前必须通过 `server_info.runtime_build_id` 校验实际执行器；不一致时
 返回 `PROJECT_RUNTIME_VERSION_MISMATCH`，不得继续把业务 Tool 调用发送给旧 Runtime。
 
-Desktop 的现有 snapshot reconcile 同时承担轻量自愈：如果某个 Project Runtime 子进程
-已经退出，则用当前 bundle 的同一 `runtime_build_id` 重新启动该 Project Runtime，并原子
+Desktop 的现有 snapshot reconcile 同时承担轻量自愈：如果某个 Workspace 执行器子进程
+已经退出，则用当前 bundle 的同一 `runtime_build_id` 重新启动该执行器，并原子
 更新 registry endpoint；不额外创建常驻 health-monitor 服务。
 
 Registry 删除 Project 时：
@@ -186,12 +209,18 @@ ProjectProfile
   id
   name
   path
+
+WorkspaceProfile (持久配置)
+  id
+  name
+  path (Workspace Root)
   permission_mode
   allowed_paths
   environment_variables (secret values remain Keychain)
 ```
 
-旧 `WorkspaceProfile` 中的 Gateway 字段需要兼容迁移，不能静默丢弃配置。
+ProjectProfile 是工作索引；旧 Desktop snapshot 中的权限字段继续作为 Workspace
+有效权限的投影返回。旧 `WorkspaceProfile` 中的 Gateway 字段需要兼容迁移，不能静默丢弃配置。
 
 ## 9. Desktop 多窗口
 
@@ -257,14 +286,15 @@ Gateway 不增加第二层工具发现或 workflow。除 `project_context` 外�
 2. 两个 MCP Session 可选择不同 Project，互不影响。
 3. 同名文本的交叉搜索不会串 Project。
 4. Project 删除后绑定 Session 变为未选择状态，而不是自动切到兄弟 Project。
-5. Full Access Project 默认搜索仍限制在 Project Root。
+5. 默认搜索遵循 Workspace 的有效搜索目录设置，保留现有 Desktop 默认值；显式相对路径以所选 Project Root 为准。
 6. 普通单 workspace Runtime 旧契约不退化。
 7. Desktop 的 Tunnel/Auth 逐步提升为 Gateway 级配置。
 8. Project secrets 不进入 registry 明文。
 9. Python、Desktop TypeScript、Desktop Rust、compliance 全部通过。
 10. Gateway / Project Runtime `runtime_build_id` 一致；故意制造版本漂移时调用被阻断。
-11. 一个非 Git 父容器下存在多个直属 Git repo 时，registry 只发布真实子 Project，且多
-    Project 时 `default_project_id` 为空。
+11. Workspace Root 始终可用；扫描子项目不清除单 Workspace 的默认根目录。
+12. 新建普通目录能立即被选择和使用；读取、修改、命令执行继承 Workspace 权限。
+13. 子项目继承父级规则；重叠 Workspace、同名目录及符号链接不会串到错误执行器。
 
 ## 15. 当前实施顺序
 
