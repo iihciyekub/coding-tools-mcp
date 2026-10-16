@@ -1547,8 +1547,8 @@ class Workspace:
         try:
             completed = subprocess.run(
                 [git, "-C", str(self.root), "check-ignore", "--stdin", "-z"],
-                input="\0".join(rel_paths) + "\0",
-                text=True,
+                input=b"\0".join(os.fsencode(path) for path in rel_paths) + b"\0",
+                text=False,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 timeout=2,
@@ -1557,7 +1557,7 @@ class Workspace:
             return set()
         if completed.returncode not in {0, 1}:
             return set()
-        return {path for path in completed.stdout.split("\0") if path}
+        return {os.fsdecode(path) for path in completed.stdout.split(b"\0") if path}
 
 
 class FileAccess:
@@ -2338,7 +2338,7 @@ class Runtime:
         *,
         context: RequestContext | None = None,
     ) -> dict[str, Any]:
-        args = arguments or {}
+        args = {} if arguments is None else arguments
         payload = self._execute_tool_payload(name, args, context=context)
         spec = TOOL_REGISTRY[name]
         content = spec.content_builder(payload) if spec.content_builder else None
@@ -2931,6 +2931,8 @@ class Runtime:
                     args,
                     cwd=str(resolved.path),
                     text=True,
+                    encoding="utf-8",
+                    errors="strict",
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     timeout=10,
@@ -3116,6 +3118,8 @@ class Runtime:
                 args,
                 cwd=str(search_root),
                 text=True,
+                encoding="utf-8",
+                errors="strict",
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
             )
@@ -3735,6 +3739,7 @@ class Runtime:
         command.refresh_status()
         if command.process.poll() is not None:
             self._complete_command(command)
+        self._mark_terminal_observed(command)
         output_refs = {
             "stdout": f"command:{command.command_id}:stdout",
             "stderr": f"command:{command.command_id}:stderr",
@@ -3763,8 +3768,8 @@ class Runtime:
             "output_refs": output_refs,
         }
         payload.update(self._command_activity_payload(command))
-        if command.completed_at is not None:
-            payload["expires_at"] = command.completed_at + COMPLETED_COMMAND_TTL_SECONDS
+        if command.observed_at is not None:
+            payload["expires_at"] = command.observed_at + COMPLETED_COMMAND_TTL_SECONDS
         if command.status_name() == "running":
             payload["next_action"] = {
                 "tool": "get_command",
@@ -4336,13 +4341,24 @@ class Runtime:
     def _run_git_text(
         self, cmd: list[str], *, timeout: int | None = None, env: dict[str, str] | None = None
     ) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            cmd,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+        # Decode on the caller thread so failures stay structured even on
+        # platforms whose subprocess text-pipe reader runs in another thread.
+        completed = self._run_git_bytes(
+            [cmd[0], "-c", "i18n.logOutputEncoding=UTF-8", *cmd[1:]],
             timeout=timeout,
-            env=self._git_env() if env is None else env,
+            env=env,
+        )
+        try:
+            stdout = completed.stdout.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+            stderr = completed.stderr.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        except UnicodeDecodeError as exc:
+            raise ToolFailure(
+                "GIT_ERROR",
+                "Git output is not valid UTF-8; refusing to replace undecodable bytes.",
+                category="runtime",
+            ) from exc
+        return subprocess.CompletedProcess(
+            completed.args, completed.returncode, stdout, stderr
         )
 
     def _run_git_bytes(
@@ -4515,7 +4531,7 @@ class Runtime:
             expired = [
                 command_id
                 for command_id, command in self.output_commands.items()
-                if command.completed_at is not None and command.completed_at < cutoff
+                if command.observed_at is not None and command.observed_at < cutoff
             ]
             for command_id in expired:
                 self.output_commands.pop(command_id, None)
@@ -4618,6 +4634,7 @@ class Runtime:
             if requested_workdir and command.workdir != requested_workdir:
                 continue
             command.refresh_status()
+            self._mark_terminal_observed(command)
             items.append(
                 {
                     "command_id": command.command_id,
@@ -4693,11 +4710,20 @@ class Runtime:
             "truncated": total_candidates > len(items),
         }
 
+    @staticmethod
+    def _mark_terminal_observed(command: CommandRun) -> None:
+        # Background cleanup must not expire a result before a client has had
+        # a chance to see it. Count/byte limits still bound unobserved output.
+        with command.lock:
+            if command.completed_at is not None and command.observed_at is None:
+                command.observed_at = time.time()
+
     def _format_command_output(self, command: CommandRun, payload: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
         payload["workdir"] = command.workdir
         terminal = payload.get("status") != "running"
         if terminal:
             self._complete_command(command)
+            self._mark_terminal_observed(command)
         if payload.get("status") == "running":
             payload["next_action"] = {
                 "tool": "get_command",
@@ -4710,6 +4736,7 @@ class Runtime:
             "stdout": f"command:{command.command_id}:stdout",
             "stderr": f"command:{command.command_id}:stderr",
         }
+        payload["output_refs"] = output_refs
         truncated_streams: list[str] = []
         cursor_skipped_drop = False
         for stream in ("stdout", "stderr"):
@@ -4817,18 +4844,21 @@ class Runtime:
     def read_output(self, args: dict[str, Any]) -> dict[str, Any]:
         output_ref = str(args.get("output_ref", ""))
         match = re.fullmatch(r"command:([^:]+):(stdout|stderr)", output_ref)
+        requested_stream = str(args.get("stream", "") or "")
+        if requested_stream and requested_stream not in {"stdout", "stderr"}:
+            raise ToolFailure("INVALID_ARGUMENT", "stream must be stdout or stderr.", category="validation")
+        if not match and output_ref and ":" not in output_ref:
+            output_ref = f"command:{output_ref}:{requested_stream or 'stdout'}"
+            match = re.fullmatch(r"command:([^:]+):(stdout|stderr)", output_ref)
         if not match:
             raise ToolFailure(
                 "INVALID_ARGUMENT",
-                "output_ref must look like command:<id>:stdout or command:<id>:stderr.",
+                "output_ref must be a command id or command:<id>:stdout or command:<id>:stderr.",
                 category="validation",
             )
         command = self._get_output_command(match.group(1))
         command.refresh_status()
         stream = match.group(2)
-        requested_stream = str(args.get("stream", "") or "")
-        if requested_stream and requested_stream not in {"stdout", "stderr"}:
-            raise ToolFailure("INVALID_ARGUMENT", "stream must be stdout or stderr.", category="validation")
         if requested_stream and requested_stream != stream:
             raise ToolFailure("INVALID_ARGUMENT", "stream does not match output_ref.", category="validation")
         head, tail, tail_start_offset, total_stream_bytes, dropped_bytes = command.retained_stream_segments(stream)
@@ -4872,8 +4902,11 @@ class Runtime:
             )
         if omitted_bytes:
             self.command_manager.record_omitted_read("read_output")
+        self._mark_terminal_observed(command)
         result = {
             "command_id": command.command_id,
+            "status": command.status_name(),
+            "exit_code": command.exit_code,
             "operation_outcome": command_outcome(
                 command.status_name(),
                 command.exit_code,
@@ -4919,7 +4952,20 @@ class Runtime:
                 category="validation",
             )
         if command.process.poll() is not None:
-            raise ToolFailure("COMMAND_CLOSED", "Command is closed; stdin write blocked.", category="runtime")
+            self._complete_command(command)
+            self._mark_terminal_observed(command)
+            raise ToolFailure(
+                "COMMAND_CLOSED", "Command is closed; stdin write blocked.", category="runtime",
+                details={"reason": "exited", "status": command.status_name(), "exit_code": command.exit_code,
+                         "retry_hint": "Read remaining output with read_output; use get_command to inspect status."},
+            )
+        if command.stdin_closed:
+            raise ToolFailure(
+                "COMMAND_CLOSED",
+                "Command stdin is closed; restart with keep_stdin_open=true or tty=true to send input.",
+                category="runtime",
+                details={"reason": "stdin_closed", "retry_hint": "Restart with keep_stdin_open=true or tty=true; use get_command to poll without input."},
+            )
         command.write_input(chars.encode("utf-8"))
         wait_until = time.time() + (int(args.get("yield_time_ms", 10000)) / 1000.0)
         first_output_at: float | None = None
@@ -4958,12 +5004,15 @@ class Runtime:
             signal.SIGTERM,
         )
         evict = True
+        signal_sent = None
         if command.process.poll() is None:
+            signal_sent = signal.Signals(signum).name
             command.terminating = True
             terminate_process_group(command.process, signum, force=force)
             exited = self._wait_for_command_exit(command, int(args.get("wait_ms", 5000)) / 1000.0)
             if not exited and not force:
                 force = True
+                signal_sent = "SIGKILL"
                 terminate_process_group(command.process, HARD_KILL_SIGNAL, force=True)
                 exited = self._wait_for_command_exit(command, int(args.get("kill_wait_ms", 2000)) / 1000.0)
             if exited:
@@ -4976,7 +5025,6 @@ class Runtime:
         else:
             killed = False
             status = "exited"
-        signal_sent = "SIGKILL" if force else signal.Signals(signum).name
         payload = command.snapshot_since_cursor(int(args.get("max_output_bytes", 65536)))
         payload.update({"killed": killed, "status": status, "evicted": evict, "signal_sent": signal_sent})
         payload = self._format_command_output(command, payload, args)
@@ -7073,6 +7121,8 @@ def tool_output_properties() -> dict[str, dict[str, Any]]:
         },
         "read_output": {
             "command_id": string,
+            "status": string,
+            "exit_code": nullable_integer,
             "operation_outcome": {**string, "enum": list(COMMAND_OUTCOMES)},
             "output_ref": string,
             "stream": string,
@@ -7466,7 +7516,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         ),
         "read_output": object_schema(
             {
-                "output_ref": {**string, "minLength": 1},
+                "output_ref": {**string, "minLength": 1, "description": "A command id or command:<id>:stdout/stderr; stream defaults to stdout for a bare id."},
                 "stream": {**string, "enum": ["stdout", "stderr"]},
                 "offset": {**integer, "minimum": 0, "default": 0},
                 "limit": {**integer, "minimum": 1, "maximum": 1048576, "default": 4096},

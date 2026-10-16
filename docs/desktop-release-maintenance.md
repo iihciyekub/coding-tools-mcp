@@ -60,6 +60,12 @@ The local build may use Tauri's internal naming, but the GitHub Release assets M
 
 `apps/desktop-client/create-dmg.sh` MUST derive the version from the desktop configuration instead of hard-coding a release number.
 
+After writing Finder layout metadata, the packager closes its Finder window,
+syncs writes and retries detaching its temporary image five times with bounded
+backoff. Only that image may be forcibly detached after normal retries fail.
+Conversion must stop if detachment still fails; cleanup must not remove files
+through a mount that could not be detached.
+
 If Intel or universal builds are added later, introduce a documented naming rule and corresponding Cask architecture handling rather than silently replacing the arm64 asset.
 
 ## 4. Signing and notarization are release requirements

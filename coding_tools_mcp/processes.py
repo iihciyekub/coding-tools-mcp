@@ -172,6 +172,7 @@ class CommandRun:
     started_at: float = field(default_factory=time.time)
     last_output_at: float | None = None
     completed_at: float | None = None
+    observed_at: float | None = None
     closed: bool = False
     exit_code: int | None = None
     signal_name: str | None = None
@@ -182,6 +183,12 @@ class CommandRun:
     on_evict: Any = None
     _stdin_closed: bool = False
     workdir: str | None = None
+
+    @property
+    def stdin_closed(self) -> bool:
+        return self.pty_master_fd is None and (
+            self._stdin_closed or self.process.stdin is None or self.process.stdin.closed
+        )
 
     @property
     def head_buffer_limit(self) -> int:

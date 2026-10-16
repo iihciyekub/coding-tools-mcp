@@ -216,10 +216,20 @@ success, so `ok: true` with `exit_code: 1` is represented as
 `operation_outcome: "exited_nonzero"`.
 
 Only truncated terminal output returns a `read_output` next action by default.
+Every command result includes `output_refs` for both streams, including short,
+untruncated results. `read_output` also accepts a bare command id in `output_ref`
+with optional `stream` (default `stdout`); an explicit stream must agree with a
+full reference. Each page reports `status` and `exit_code`. Output-loss warnings
+are visible in model-facing text even on the final page.
 `output_ref` values are `command:<id>:stdout` or `command:<id>:stderr`; offsets
 are stream-specific absolute byte positions. Runtime limits bound active
 commands, retained completed commands, per-command output, total output, and
 retention time.
+
+Completed-output retention time starts when a client first sees completion via
+command results, status/list queries, output reads, or a rejected stdin write to
+an exited command. Repeated reads do not extend that time. Unobserved results
+remain subject to the existing count and byte limits.
 
 Each stream retains the earliest output (a frozen head segment, one eighth of
 the per-stream budget) plus the most recent output (a rolling tail). When a
@@ -232,6 +242,9 @@ budget, redirect it to a file (`cmd > out.log 2>&1`) and page it with
 Use `tty: true` only when a program requires a terminal. POSIX receives a real
 PTY (`isatty()` is true). This build returns `TTY_UNSUPPORTED` on Windows rather
 than labeling pipes as a TTY.
+For interactive input without a terminal, start with `keep_stdin_open: true`.
+An attempted write to closed stdin reports the cause and restart options.
+Stopping an already exited command sends no signal and reports `signal_sent: null`.
 
 ## Permission modes
 

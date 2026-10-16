@@ -6,7 +6,7 @@ Status: current macOS-first runtime contract. This repository intentionally does
 
 The per-project runtime exposes low-level coding primitives over MCP. Planning, tasks, reviews, checkpoints, Skill execution, Git write workflows, and agent orchestration remain with the client. The optional persistent Gateway can expose a read-only catalog of explicitly authorized local Skill and plugin metadata. Native developer tools are invoked through `exec_command` when their behavior is already well-defined by macOS or the underlying CLI.
 
-`apply_patch` is the only direct text/source editing primitive. Project routing is handled by the persistent Project Gateway and is separate from the immutable per-project Runtime.
+`apply_patch` and revision-bound `apply_changes` provide direct text/source editing. Project routing is handled by the persistent Project Gateway and is separate from the immutable per-project Runtime.
 
 ## Protocol and transport
 
@@ -16,6 +16,7 @@ The per-project runtime exposes low-level coding primitives over MCP. Planning, 
 - `tools/list` is static for the lifetime of a Runtime (`listChanged: false`).
 - `content` is bounded model-facing text; `structuredContent` is the complete machine result.
 - `notifications/cancelled` does not terminate a running command; use `kill_command`.
+- Tool arguments must be objects. Missing or `null` arguments mean `{}`; arrays, strings, booleans and numbers are rejected before execution or Gateway routing.
 
 ## Tool-surface rule
 
@@ -28,6 +29,10 @@ New tools require a capability or safety advantage that cannot be obtained clean
 `exec_command` owns process creation. Running commands return `command_id`; `get_command`, `list_commands`, `write_stdin`, `read_output`, and `kill_command` reuse that identity instead of starting duplicate processes. `operation_id` may be used for recoverable execution deduplication.
 
 `kill_command` terminal/status values are: ["terminated", "killed", "exited", "terminating", "not_found"].
+
+Command results always include stdout/stderr `output_refs`. `read_output` accepts those references or a bare command id with optional `stream`, and reports `status` and `exit_code`. Completed output's TTL begins at the first client observation of completion; repeated observations do not extend it. Count and byte limits continue to evict unobserved output. See [command and output behavior](tools-and-schemas.md#command-and-output-behavior).
+
+Git text subprocesses request UTF-8 log output without changing repository configuration, then decode stdout and stderr strictly on the caller thread. Undecodable text returns `GIT_ERROR`. Git-ignore path transport preserves filesystem bytes; model-facing text escapes non-UTF-8 path characters while structured JSON retains the exact path.
 
 ## Project and permission boundary
 

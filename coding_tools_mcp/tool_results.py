@@ -297,6 +297,14 @@ def _render_read_output(payload: dict[str, Any]) -> str:
     content = payload.get("content")
     if not isinstance(content, str):
         return ""
+    warnings = payload.get("warnings")
+    if isinstance(warnings, list) and warnings:
+        content += "\n" + "\n".join(f"Warning: {warning}" for warning in warnings)
+    status = payload.get("status")
+    if isinstance(status, str) and status:
+        exit_code = payload.get("exit_code")
+        suffix = f" | exit code {exit_code}" if exit_code is not None else ""
+        content += f"\n[command {status}{suffix}]"
     next_offset = payload.get("next_offset")
     if next_offset is None:
         return content
@@ -613,9 +621,11 @@ def _render_tool_call(tool: str, arguments: dict[str, Any]) -> str:
 
 
 def _bounded_model_text(value: str, tool_name: str) -> str:
-    encoded = value.encode("utf-8")
+    # Preserve surrogate-escaped paths in structuredContent; escape only text
+    # that clients must encode as UTF-8 for display or model input.
+    encoded = value.encode("utf-8", errors="backslashreplace")
     if len(encoded) <= MODEL_TEXT_SAFETY_LIMIT_BYTES:
-        return value
+        return encoded.decode("utf-8")
     suffix = (
         f"\n… {tool_name} model text reached the "
         f"{MODEL_TEXT_SAFETY_LIMIT_BYTES}-byte safety ceiling; retry with narrower paths or limits."

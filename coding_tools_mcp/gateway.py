@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from .errors import JsonRpcError
 from .local_capabilities import LocalCapabilityCatalog
 from .project_context import SKIPPED_CONTEXT_DIRS
 from .tool_results import make_tool_result
@@ -145,6 +146,8 @@ class HTTPProjectRuntime:
         context: Any = None,
     ) -> dict[str, Any]:
         del context
+        if arguments is not None and not isinstance(arguments, dict):
+            raise JsonRpcError(-32602, "tools/call arguments must be an object")
         tool_arguments = dict(arguments or {})
         if self.definition.workspace_root is not None:
             tool_arguments["project"] = str(self.definition.path)
@@ -880,6 +883,8 @@ class BoundGatewayRuntime:
         *,
         context: Any = None,
     ) -> dict[str, Any]:
+        if arguments is not None and not isinstance(arguments, dict):
+            raise JsonRpcError(-32602, "tools/call arguments must be an object")
         if name == "project_context":
             payload = self._project_context(arguments or {})
             return make_tool_result(name, payload, is_error=payload.get("ok") is False)

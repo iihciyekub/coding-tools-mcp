@@ -8,6 +8,22 @@
   revision-bound atomic `apply_changes`, a shared 64-entry write replay cache, and
   explicit `keep_stdin_open` for pipe-based interactive commands.
 
+## Desktop 0.5.6 - 2026-10-16
+
+- Close the DMG layout window and retry temporary-image detachment with bounded
+  backoff before a final owned-image force detach. Stop conversion and preserve
+  staging files if the image cannot be detached.
+
+- Selectively adapted upstream subprocess encoding and tool-call validation fixes
+  (b13d0d4, 11b29f6, dbc99d6, c832222), retaining the maintained Gateway and tool surface.
+  Git text failures are structured, ignore paths remain lossless, and model text
+  safely escapes non-UTF-8 filenames. Missing/null arguments remain compatible;
+  other non-object inputs are rejected before execution or routing.
+- Always return command stream references, report completion in output pages,
+  preserve final-page eviction warnings, explain closed stdin, and report no
+  signal when stopping an exited process. Start completed-output TTL at first
+  client observation while preserving count/byte limits. Added focused
+  regressions for these cases and existing physical-line pagination boundaries.
 ## Desktop 0.5.5 - 2026-10-16
 
 - Recheck resolver-only failures through Cloudflare DNS-over-HTTPS within the

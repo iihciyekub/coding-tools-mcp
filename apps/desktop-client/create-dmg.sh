@@ -28,11 +28,37 @@ MOUNT_DEVICE=""
 
 cleanup() {
   if [[ -n "$MOUNT_DEVICE" ]]; then
-    hdiutil detach "$MOUNT_DEVICE" -force >/dev/null 2>&1 || true
+    if ! hdiutil detach "$MOUNT_DEVICE" -force >/dev/null 2>&1; then
+      echo "Unable to detach $MOUNT_DEVICE; leaving staging directory at $TMP_DIR" >&2
+      return
+    fi
   fi
   rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
+
+detach_image() {
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    if hdiutil detach "$MOUNT_DEVICE" >/dev/null; then
+      MOUNT_DEVICE=""
+      return 0
+    fi
+    if [[ "$attempt" -lt 5 ]]; then
+      echo "DMG volume is busy; retrying detach ($attempt/5)" >&2
+      sleep "$attempt"
+    fi
+  done
+  # Only force the temporary image attached by this script, after metadata
+  # has been synced and normal detach has had a bounded chance to succeed.
+  echo "Normal detach exhausted; forcing detach of $MOUNT_DEVICE" >&2
+  if hdiutil detach "$MOUNT_DEVICE" -force >/dev/null; then
+    MOUNT_DEVICE=""
+    return 0
+  fi
+  echo "DMG volume could not be detached; refusing to convert a mounted image" >&2
+  return 1
+}
 
 mkdir -p "$MOUNT_POINT"
 
@@ -74,13 +100,13 @@ tell application "Finder"
     open
     update without registering applications
     delay 2
+    close
   end tell
 end tell
 APPLESCRIPT
 
 sync
-hdiutil detach "$MOUNT_DEVICE" >/dev/null
-MOUNT_DEVICE=""
+detach_image
 
 rm -f "$OUTPUT_PATH"
 hdiutil convert \
