@@ -8,13 +8,13 @@ import type { DependencyStatus, GatewayConfig, LogBundle, PermissionMode, Runtim
 import { normalizePublicOrigin, publicEndpoint, workspaceHue } from "./utils";
 
 const PANEL_WIDTH = 420;
-const APP_VERSION = "0.5.6";
+const APP_VERSION = "0.5.7";
 type Page = "home" | "new-access" | "workspaces" | "environment" | "logs" | "settings" | "more" | "connection";
 type CopyAction = "server-name" | "server-url" | "credential" | "logs";
 type ConfirmAction = { kind: "stop"; profileId: string } | { kind: "stop-all" } | { kind: "quit" } | null;
 type WorkspaceAction = { state: "starting" | "stopping" };
 
-const stoppedStatus = (port: number): RuntimeStatus => ({ state: "stopped", pid: null, server_name: "", local_message: "Not running", public_message: "Unknown", public_url: "", local_url: `http://127.0.0.1:${port}/mcp` });
+const stoppedStatus = (port: number): RuntimeStatus => ({ state: "stopped", pid: null, server_name: "", local_message: "Not running", public_message: "Unknown", public_url: "", local_url: `http://127.0.0.1:${port}/mcp`, local_dns_error: false, dns_repairing: false, can_repair_dns: false });
 const shortPath = (path: string) => path.split(/[\\/]/).filter(Boolean).slice(-2).join(" / ") || path;
 
 function App() {
@@ -46,6 +46,7 @@ function App() {
   const [runtimeLogs, setRuntimeLogs] = useState<LogBundle | null>(null);
   const [installLog, setInstallLog] = useState<string[]>([]);
   const [error, setError] = useState("");
+  const [dnsNotice, setDnsNotice] = useState<boolean | null>(null);
   const [connectionDraft, setConnectionDraft] = useState<TunnelConfig | null>(null);
   const [autoStart, setAutoStart] = useState(false);
   const [mcpNamePrefix, setMcpNamePrefix] = useState("www");
@@ -115,7 +116,7 @@ function App() {
   useEffect(() => {
     if (gateway) { setConnectionDraft({ ...gateway.tunnel }); setAutoStart(gateway.auto_start); }
   }, [gateway?.tunnel.type, gateway?.tunnel.cloudflare_mode, gateway?.tunnel.public_url, gateway?.tunnel.cloudflare_token, gateway?.auto_start]);
-  useEffect(() => { selectedIdRef.current = selectedId; setRevealCredential(false); setConfirmDelete(false); setConfirmAction(null); setRuntimeLogs(null); }, [selectedId]);
+  useEffect(() => { selectedIdRef.current = selectedId; setRevealCredential(false); setConfirmDelete(false); setConfirmAction(null); setRuntimeLogs(null); setDnsNotice(null); }, [selectedId]);
   useEffect(() => { setMcpNamePrefix(gateway?.server_name_prefix ?? "www"); }, [gateway?.server_name_prefix]);
   useEffect(() => { if (!confirmAction) return; const timer = window.setTimeout(() => setConfirmAction(null), 4000); return () => window.clearTimeout(timer); }, [confirmAction]);
   useEffect(() => { if (!confirmRemoveId) return; const timer = window.setTimeout(() => setConfirmRemoveId(null), 4000); return () => window.clearTimeout(timer); }, [confirmRemoveId]);
@@ -175,7 +176,7 @@ function App() {
     return action;
   };
   const startWorkspace = async (profile: WorkspaceProfile) => {
-    const action = setWorkspaceAction(profile.id, "starting"); setError("");
+    const action = setWorkspaceAction(profile.id, "starting"); setError(""); setDnsNotice(null);
     try {
       const saved = profile;
       if (workspaceActionsRef.current[profile.id] !== action) return;
@@ -192,7 +193,7 @@ function App() {
     } finally { setWorkspaceAction(profile.id, null, action); }
   };
   const stopWorkspace = async (profileId: string) => {
-    const action = setWorkspaceAction(profileId, "stopping"); setError("");
+    const action = setWorkspaceAction(profileId, "stopping"); setError(""); setDnsNotice(null);
     try {
       const next = await api.stopProfile(profileId);
       setStatuses((current) => ({ ...current, [profileId]: next }));
@@ -213,6 +214,17 @@ function App() {
     try { const result = await action(); setInstallLog((current) => [...current, `${new Date().toLocaleTimeString()}  ${result}`]); await refresh(); }
     catch (reason) { const message = String(reason); setInstallLog((current) => [...current, `${new Date().toLocaleTimeString()}  ${t("Failed")}: ${message}`]); setError(message); }
     finally { setBusy(null); }
+  };
+  const repairLocalDns = async () => {
+    setBusy("dns-repair"); setError(""); setDnsNotice(null);
+    try {
+      const resolved = await api.repairLocalDns();
+      setDnsNotice(resolved);
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      if (message !== "DNS repair was cancelled.") setError(message);
+    }
+    finally { await refresh(); setBusy(null); }
   };
   const loadLogs = async () => {
     if (!selected) return; const profileId = selected.id; setBusy("logs");
@@ -368,15 +380,17 @@ function App() {
   const backPage = page === "environment" || page === "logs" || page === "settings" || page === "connection" ? backTarget : "home";
 
   return <main className={`panel${projectWindow ? " project-window" : ""}`} ref={panelRef}>
-    {page === "home" ? <Header /> : <header className="subpage-header"><button className="icon-button" type="button" aria-label={t("Back")} onClick={() => setPage(backPage)}><BackIcon /></button><strong>{pageTitle[page]}</strong></header>}
+    {page === "home" ? <Header /> : <header className="subpage-header"><button className="icon-button" type="button" aria-label={t("Back")} onClick={() => setPage(backPage)}><BackIcon /></button><strong>{pageTitle[page]}</strong><small className="app-version">v{APP_VERSION}</small></header>}
     {error && <div className="error-banner" role="alert"><span>{t(error)}</span><button type="button" onClick={() => setError("")} aria-label={t("Dismiss")}>×</button></div>}
     {migrationWarning && <div className="migration-banner" role="status">{t(migrationWarning)}</div>}
+    {page === "home" && dnsNotice !== null && status?.state === "running" && dnsNotice !== status.local_dns_error && <div className="migration-banner" role="status">{t(dnsNotice ? "Local DNS has recovered. Reopen the authorization page; your browser may still need a refresh." : "DNS cache refreshed. Waiting for DNS to recover; checking again automatically.")}</div>}
 
     {page === "home" && <>
       <section className={`workspace-hero ${selected ? "tinted" : ""}`} style={selected ? { "--workspace-hue": workspaceHue(selectedPosition) } as React.CSSProperties : undefined}>
         <div className="workspace-picker-row"><button className="workspace-picker" type="button" disabled={!profiles.length || projectWindow} onClick={() => setPage("workspaces")}>{selected?.runtime.permission_mode === "host" ? <ShieldIcon /> : <FolderIcon />}<span><strong>{selected ? t(selected.name) : t(projectWindow ? "Project unavailable" : "No access profile")}</strong><small>{selectedSubtitle}</small></span>{profiles.length > 1 && !projectWindow && <SwitchIcon />}</button>{!projectWindow && <button className="icon-button" type="button" aria-label={t("Add access profile")} onClick={() => setPage("new-access")}><PlusIcon /></button>}</div>
-        {selected && <div className="status-row"><span className="status-copy"><i className={`status-dot ${status?.state ?? "stopped"}`} />{profiles.length > 1 && <b className="status-index">[{selectedPosition}/{profiles.length}]</b>}{starting ? t(status?.pid ? "Connecting…" : "Starting…") : stopping ? t("Stopping…") : status?.state === "running" ? t("Connected") : status?.state === "error" ? t("Connection error") : t("Workspace stopped")}</span><button className={`power-button ${running && !starting ? "danger" : ""} ${confirmAction?.kind === "stop" && confirmAction.profileId === selected.id ? "confirm" : ""}`} type="button" disabled={stopping} onClick={toggleWorkspace}>{starting || stopping ? <SpinnerIcon /> : null}{stopping ? t("Stopping…") : starting ? t("Cancel startup") : confirmAction?.kind === "stop" && confirmAction.profileId === selected.id ? t("Click again to stop") : t(running ? "Stop" : "Start")}</button></div>}
+        {selected && <div className="status-row"><span className="status-copy"><i className={`status-dot ${status?.local_dns_error ? "dns-warning" : status?.state ?? "stopped"}`} />{profiles.length > 1 && <b className="status-index">[{selectedPosition}/{profiles.length}]</b>}{starting ? t(status?.pid ? "Connecting…" : "Starting…") : stopping ? t("Stopping…") : status?.local_dns_error ? t("Local DNS issue") : status?.state === "running" ? t("Connected") : status?.state === "error" ? t("Connection error") : t("Workspace stopped")}</span><button className={`power-button ${running && !starting ? "danger" : ""} ${confirmAction?.kind === "stop" && confirmAction.profileId === selected.id ? "confirm" : ""}`} type="button" disabled={stopping} onClick={toggleWorkspace}>{starting || stopping ? <SpinnerIcon /> : null}{stopping ? t("Stopping…") : starting ? t("Cancel startup") : confirmAction?.kind === "stop" && confirmAction.profileId === selected.id ? t("Click again to stop") : t(running ? "Stop" : "Start")}</button></div>}
         {status?.state === "error" && <p className="connection-error">{t(status.public_message)}</p>}
+        {status?.local_dns_error && <div className="dns-recovery" role="status"><p>{t("Public service is reachable, but local DNS is failing. Checking again automatically.")}</p>{status.can_repair_dns && <><button type="button" className="secondary-button" disabled={Boolean(busy) || status.dns_repairing} onClick={() => void repairLocalDns()}>{busy === "dns-repair" || status.dns_repairing ? <SpinnerIcon /> : <RepairIcon />}{t(busy === "dns-repair" || status.dns_repairing ? "Repairing DNS…" : "Repair local DNS")}</button><small>{t("macOS will ask for an administrator password to refresh its DNS cache.")}</small></>}</div>}
       </section>
       {selected && <section className="connection-block">
         <button className="connection-heading" type="button" onClick={() => openSubpage("connection", "home")}><strong>{t(gateway?.tunnel.cloudflare_mode === "named" ? "Fixed link" : "Temporary link")}</strong><span>{t("Connection settings")}<ChevronIcon /></span></button>
@@ -394,7 +408,7 @@ function App() {
 
     {page === "workspaces" && <section className="subpage-body workspace-page">
       <div className="workspace-list">{profiles.map((profile, index) => { const profileStatus = workspaceStatus(profile); const removing = confirmRemoveId === profile.id; return <div style={{ "--workspace-hue": workspaceHue(index + 1) } as React.CSSProperties} className={`workspace-item ${profile.id === selectedId ? "selected" : ""}`} key={profile.id}>
-        <button className="workspace-choice" type="button" onClick={() => { setConfirmRemoveId(null); setSelectedId(profile.id); setPage("home"); }}><i className={`status-dot ${profileStatus.state}`} /><span><strong>{t(profile.name)}</strong><small title={profile.path}>{shortPath(profile.path)}</small></span></button>
+        <button className="workspace-choice" type="button" onClick={() => { setConfirmRemoveId(null); setSelectedId(profile.id); setPage("home"); }}><i className={`status-dot ${profileStatus.local_dns_error ? "dns-warning" : profileStatus.state}`} /><span><strong>{t(profile.name)}</strong><small title={profile.path}>{shortPath(profile.path)}</small></span></button>
         <div className="workspace-item-actions"><button className="workspace-item-action" type="button" aria-label={`${t("Workspace settings")}: ${profile.name}`} title={t("Workspace settings")} onClick={() => { setConfirmRemoveId(null); setSelectedId(profile.id); openSubpage("settings", "workspaces"); }}><SettingsIcon /></button><button className={`workspace-item-action remove ${removing ? "confirm" : ""}`} type="button" disabled={busy === "delete"} aria-label={`${t(removing ? "Click again to remove project" : "Remove project")}: ${profile.name}`} title={t(removing ? "Click again to remove project" : "Remove project")} onClick={() => void removeWorkspaceFromList(profile.id)}><TrashIcon />{removing && <small>{t("Confirm")}</small>}</button></div>
       </div>; })}</div>
       <button className="primary-button" type="button" onClick={() => setPage("new-access")}><PlusIcon />{t("Add access profile")}</button>
@@ -468,7 +482,7 @@ function App() {
   </main>;
 }
 
-function Header() { return <header className="panel-header"><span className="brand-mark"><AppMarkIcon /></span><strong>Coding Tools MCP</strong></header>; }
+function Header() { return <header className="panel-header"><span className="brand-mark"><AppMarkIcon /></span><strong>Coding Tools MCP</strong><small className="app-version">v{APP_VERSION}</small></header>; }
 function middleEllipsis(value: string, limit = 30) {
   if (value.length <= limit) return value;
   const visible = limit - 1;

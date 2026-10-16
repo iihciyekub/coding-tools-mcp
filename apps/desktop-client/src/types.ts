@@ -73,6 +73,9 @@ export interface RuntimeStatus {
   public_message: string;
   public_url: string;
   local_url: string;
+  local_dns_error: boolean;
+  dns_repairing: boolean;
+  can_repair_dns: boolean;
 }
 
 export interface DesktopSnapshot {

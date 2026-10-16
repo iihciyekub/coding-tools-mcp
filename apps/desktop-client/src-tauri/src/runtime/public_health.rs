@@ -2,9 +2,10 @@
 use super::*;
 use std::net::Ipv4Addr;
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum PublicHealth {
     Healthy,
+    HealthyWithStaleDns,
     DnsUnavailable,
     Unreachable,
 }
@@ -12,7 +13,7 @@ pub(super) enum PublicHealth {
 impl PublicHealth {
     pub(super) fn error(&self) -> Option<&'static str> {
         match self {
-            Self::Healthy => None,
+            Self::Healthy | Self::HealthyWithStaleDns => None,
             Self::DnsUnavailable => {
                 Some("Domain lookup failed; check DNS or wait for it to update")
             }
@@ -20,6 +21,10 @@ impl PublicHealth {
                 Some("Public endpoint is unreachable; checking again automatically")
             }
         }
+    }
+
+    pub(super) fn is_reachable(self) -> bool {
+        matches!(self, Self::Healthy | Self::HealthyWithStaleDns)
     }
 }
 
@@ -36,10 +41,14 @@ pub(super) fn public_card_matches(raw: &[u8], name: &str) -> bool {
 }
 
 pub(super) fn probe(origin: &str, name: &str) -> PublicHealth {
+    probe_cancellable(origin, name, &AtomicBool::new(false))
+}
+
+pub(super) fn probe_cancellable(origin: &str, name: &str, cancelled: &AtomicBool) -> PublicHealth {
     let deadline = Instant::now() + Duration::from_secs(5);
     probe_with(origin, name, |url, resolve| {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining < Duration::from_millis(50) {
+        if cancelled.load(Ordering::Relaxed) || remaining < Duration::from_millis(50) {
             return None;
         }
         // All attempts share a five-second budget. Keep ordinary TLS/hostname
@@ -71,6 +80,9 @@ pub(super) fn probe(origin: &str, name: &str) -> PublicHealth {
             .stderr(Stdio::null())
             .output()
             .ok()?;
+        if cancelled.load(Ordering::Relaxed) {
+            return None;
+        }
         Some(Reply {
             code: response.status.code().unwrap_or(-1),
             body: response.stdout,
@@ -127,7 +139,7 @@ fn probe_with(
         if fetch(&endpoint, Some(&resolve))
             .is_some_and(|reply| reply.code == 0 && public_card_matches(&reply.body, name))
         {
-            return PublicHealth::Healthy;
+            return PublicHealth::HealthyWithStaleDns;
         }
     }
     PublicHealth::Unreachable
@@ -179,7 +191,7 @@ mod tests {
         let origin = std::env::var("CODING_TOOLS_MCP_PROBE_ORIGIN").unwrap();
         let name = std::env::var("CODING_TOOLS_MCP_PROBE_SERVER_NAME").unwrap();
         let started = Instant::now();
-        assert_eq!(probe(&origin, &name), PublicHealth::Healthy);
+        assert!(probe(&origin, &name).is_reachable());
         println!("Live public Gateway verified in {:?}", started.elapsed());
         assert!(started.elapsed() < Duration::from_secs(6));
     }
@@ -235,7 +247,7 @@ mod tests {
                     }
                 }
             ),
-            PublicHealth::Healthy
+            PublicHealth::HealthyWithStaleDns
         );
     }
 

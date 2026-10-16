@@ -1,6 +1,8 @@
+mod dns_recovery;
 mod environment;
 mod public_health;
 mod supervisor;
+pub use dns_recovery::repair_local_dns;
 #[cfg(unix)]
 pub use supervisor::install_termination_handler;
 pub use supervisor::maintain_connection;
@@ -186,6 +188,10 @@ pub struct RuntimeManager {
     public_healthy: Option<bool>,
     public_error: Option<&'static str>,
     public_checked_at: Option<Instant>,
+    local_dns_error: bool,
+    dns_refresh_attempted: bool,
+    dns_repair: Option<Arc<PendingOperation>>,
+    public_probe_generation: u64,
     last_gateway_error: Option<String>,
 }
 
@@ -216,6 +222,10 @@ impl RuntimeManager {
             public_healthy: None,
             public_error: None,
             public_checked_at: None,
+            local_dns_error: false,
+            dns_refresh_attempted: false,
+            dns_repair: None,
+            public_probe_generation: 0,
             last_gateway_error: None,
         }
     }
@@ -321,6 +331,9 @@ impl RuntimeManager {
             state: state.into(),
             pid: Some(runtime_pid),
             server_name: session.server_name.clone(),
+            local_dns_error: false,
+            dns_repairing: false,
+            can_repair_dns: false,
             local_message: format!("Listening on 127.0.0.1:{}", profile.runtime.local_port),
             public_message,
             public_url,
@@ -402,6 +415,9 @@ impl RuntimeManager {
             state: state.into(),
             pid: Some(runtime_pid),
             server_name: session.gateway.server_name.clone(),
+            local_dns_error: tunnel_ok && self.local_dns_error,
+            dns_repairing: self.dns_repair.is_some(),
+            can_repair_dns: cfg!(target_os = "macos") && tunnel_ok && self.local_dns_error,
             local_message: format!(
                 "Shared Gateway listening on 127.0.0.1:{}",
                 profile.runtime.local_port
@@ -552,6 +568,8 @@ fn start_gateway_inner(
     state.public_healthy = None;
     state.public_error = None;
     state.public_checked_at = None;
+    state.local_dns_error = false;
+    state.dns_refresh_attempted = false;
     Ok(state.gateway_status(&gateway_profile))
 }
 
@@ -564,46 +582,73 @@ pub fn stop_gateway(
 }
 
 fn stop_gateway_processes(manager: &Arc<Mutex<RuntimeManager>>) -> Result<(), String> {
-    {
+    enum Request {
+        Wait(Arc<PendingOperation>),
+        Cleanup {
+            preparing: Option<Arc<PendingOperation>>,
+            dns_repair: Option<Arc<PendingOperation>>,
+            session: Option<Box<ManagedGatewaySession>>,
+            completion: Arc<PendingOperation>,
+        },
+    }
+    // Claim or join cleanup in one critical section. Concurrent Stop/Quit calls
+    // must never replace a completion another caller is still waiting for.
+    let request = {
         let mut state = manager
             .lock()
             .map_err(|_| "Runtime manager is unavailable")?;
         state.connection_wanted = false;
         state.last_gateway_error = None;
-    }
-    let existing_stop = {
-        let state = manager
-            .lock()
-            .map_err(|_| "Runtime manager is unavailable")?;
-        state.gateway_stopping.clone()
-    };
-    if let Some(existing) = existing_stop {
-        existing.wait();
-        return Ok(());
-    }
-    let (preparing, mut session, completion) = {
-        let mut state = manager
-            .lock()
-            .map_err(|_| "Runtime manager is unavailable")?;
-        let preparing = state.gateway_preparing.take();
-        if let Some(signal) = &preparing {
-            signal.cancelled.store(true, Ordering::Relaxed);
+        if let Some(existing) = state.gateway_stopping.as_ref() {
+            Request::Wait(Arc::clone(existing))
+        } else {
+            let preparing = state.gateway_preparing.take();
+            if let Some(operation) = &preparing {
+                operation.cancelled.store(true, Ordering::Relaxed);
+            }
+            let dns_repair = state.dns_repair.take();
+            if let Some(operation) = &dns_repair {
+                operation.cancelled.store(true, Ordering::Relaxed);
+            }
+            let completion = Arc::new(PendingOperation::default());
+            state.gateway_stopping = Some(Arc::clone(&completion));
+            Request::Cleanup {
+                preparing,
+                dns_repair,
+                session: state.gateway.take().map(Box::new),
+                completion,
+            }
         }
-        let completion = Arc::new(PendingOperation::default());
-        state.gateway_stopping = Some(Arc::clone(&completion));
-        (preparing, state.gateway.take(), completion)
     };
-    if let Some(preparing) = preparing {
-        preparing.wait();
+    match request {
+        Request::Wait(existing) => existing.wait(),
+        Request::Cleanup {
+            preparing,
+            dns_repair,
+            mut session,
+            completion,
+        } => {
+            if let Some(operation) = preparing {
+                operation.wait();
+            }
+            if let Some(operation) = dns_repair {
+                operation.wait();
+            }
+            if let Some(ref mut session) = session {
+                terminate_gateway_session(session);
+            }
+            let mut state = manager.lock().unwrap_or_else(|e| e.into_inner());
+            if state
+                .gateway_stopping
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &completion))
+            {
+                state.gateway_stopping = None;
+            }
+            drop(state);
+            completion.finish();
+        }
     }
-    if let Some(ref mut session) = session {
-        terminate_gateway_session(session);
-    }
-    let mut state = manager
-        .lock()
-        .map_err(|_| "Runtime manager is unavailable")?;
-    state.gateway_stopping = None;
-    completion.finish();
     Ok(())
 }
 

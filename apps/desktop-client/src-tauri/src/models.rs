@@ -562,6 +562,9 @@ pub struct RuntimeStatus {
     pub public_message: String,
     pub public_url: String,
     pub local_url: String,
+    pub local_dns_error: bool,
+    pub dns_repairing: bool,
+    pub can_repair_dns: bool,
 }
 
 impl RuntimeStatus {
@@ -578,6 +581,9 @@ impl RuntimeStatus {
             public_message: "Unknown".into(),
             public_url: String::new(),
             local_url: format!("http://127.0.0.1:{port}{MCP_ENDPOINT_PATH}"),
+            local_dns_error: false,
+            dns_repairing: false,
+            can_repair_dns: false,
         }
     }
 }

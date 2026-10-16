@@ -75,7 +75,7 @@ html.project-window-root, html.project-window-root body, html.project-window-roo
 .panel-header, .subpage-header { display: flex; height: 39px; align-items: center; padding: 0 12px; border-bottom: 1px solid var(--line); }
 .panel-header { gap: 6px; }
 .panel-header strong, .subpage-header strong { font-size: 14px; font-weight: 650; }
-.panel-header small { margin-left: auto; color: var(--muted); font-size: 11px; }
+.panel-header small, .subpage-header .app-version { margin-left: auto; flex-shrink: 0; color: var(--muted); font-size: 11px; }
 .brand-mark { display: grid; width: 22px; height: 22px; place-items: center; color: var(--text); }
 .brand-mark svg { display: block; width: 22px; height: 22px; fill: currentColor; }
 .subpage-header { gap: 4px; padding-left: 6px; }
@@ -99,6 +99,7 @@ html.project-window-root, html.project-window-root body, html.project-window-roo
 .status-index { margin-right: 5px; color: var(--text); font-weight: 700; }
 .status-dot { --status-color: light-dark(#697586, #b7c1cf); display: inline-block; width: 8px; height: 8px; margin-right: 6px; border: 1px solid color-mix(in srgb, var(--status-color) 60%, white); border-radius: 50%; background: var(--status-color); box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-color) 24%, transparent), 0 0 6px color-mix(in srgb, var(--status-color) 38%, transparent); vertical-align: 0; }
 .status-dot.running { --status-color: light-dark(#159957, #5ee897); }
+.status-dot.dns-warning { --status-color: light-dark(#d88912, #ffbd4a); }
 .status-dot.starting { --status-color: light-dark(#d88912, #ffbd4a); }
 .status-dot.stopping { --status-color: light-dark(#2369d8, #70a7ff); }
 .status-dot.error { --status-color: light-dark(#c9342f, #ff716a); }
@@ -280,6 +281,10 @@ html.project-window-root, html.project-window-root body, html.project-window-roo
 .error-banner span { min-width: 0; flex: 1; user-select: text; }
 .error-banner button { padding: 0; color: inherit; border: 0; background: transparent; cursor: pointer; font-size: 13px; line-height: 1; }
 .migration-banner { padding: 7px 11px; color: var(--text); background: var(--hover); border-bottom: 1px solid var(--line); font-size: 10px; line-height: 1.4; }
+.dns-recovery { margin-top: 7px; font-size: 11px; line-height: 1.4; }
+.dns-recovery p { margin: 0 0 6px; color: var(--muted); }
+.dns-recovery .secondary-button { display: inline-flex; align-items: center; gap: 5px; width: auto; font-size: 11px; }
+.dns-recovery small { display: block; margin-top: 5px; color: var(--muted); font-size: 10px; }
 
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
 

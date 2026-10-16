@@ -125,7 +125,7 @@ https://mcp.example.com/mcp
 | 公网地址无法保存 | 确认是 `https://域名`，没有 `/mcp`、路径、查询参数或空格 |
 | Tunnel 显示未连接 / Inactive | 确认 App 已启动连接、Mac 已联网，token 属于这个 Tunnel；在“更多 → 运行日志”查看错误 |
 | Tunnel Healthy，但访问返回 502 | 确认 App 已启动，Cloudflare Service URL 的端口与 App 页面一致，本地协议选 HTTP |
-| 路由正确，但提示域名解析未生效 | 新域名可能仍被本机或 VPN 缓存为不存在。新版 App 会通过加密 DNS 复核公网；本机其他客户端仍需等待自己的 DNS 缓存更新 |
+| 公网正常，但授权页提示域名不存在 | App 会自动复核公网并尝试刷新本机缓存。仍显示“本机 DNS 异常”时，点击“修复本机 DNS”，在 macOS 弹窗中授权；完成后重新发起授权。浏览器独立缓存可能仍需刷新。技术边界见[固定公网连接与恢复](project-bound-persistent-gateway-spec.zh-CN.md#固定公网连接与恢复) |
 | MCP 客户端收到 404 或找不到认证接口 | 检查 Cloudflare 的 Path 是否留空、本地 Service URL 是否误加 `/mcp`，以及客户端地址是否带 `/mcp` |
 | 出现额外的 Cloudflare 登录页或 HTML 挑战页 | 检查该域名的 Access/WAF 策略是否支持所用 MCP 客户端；保留 Gateway 自身认证，并为该客户端配置兼容的访问策略 |
 | 退出 App、休眠后连不上 | 固定域名保留，但本机服务已离线；恢复联网、唤醒并启动 App |

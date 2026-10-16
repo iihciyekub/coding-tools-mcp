@@ -388,6 +388,20 @@ async fn stop_profile(
 }
 
 #[tauri::command]
+async fn repair_local_dns(state: tauri::State<'_, DesktopState>) -> Result<bool, String> {
+    let runtime = Arc::clone(&state.runtime);
+    let language = state
+        .store
+        .lock()
+        .map_err(|_| "Profile store is unavailable.")?
+        .language()
+        .to_string();
+    tauri::async_runtime::spawn_blocking(move || runtime::repair_local_dns(&runtime, &language))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 async fn stop_all_profiles(
     state: tauri::State<'_, DesktopState>,
 ) -> Result<HashMap<String, RuntimeStatus>, String> {
@@ -817,6 +831,8 @@ fn status_text(status: &RuntimeStatus, language: &str) -> &'static str {
         menu_text(language, "Preparing runtime", "正在准备运行时")
     } else if status.pid.is_none() {
         menu_text(language, "Stopped", "已停止")
+    } else if status.local_dns_error {
+        menu_text(language, "Local DNS issue", "本机 DNS 异常")
     } else if status.state == "running" {
         menu_text(language, "Running", "运行中")
     } else {
@@ -1943,6 +1959,7 @@ pub fn run() {
             delete_profile,
             start_profile,
             stop_profile,
+            repair_local_dns,
             stop_all_profiles,
             profile_status,
             profile_logs,

@@ -119,6 +119,7 @@ pub fn maintain_connection(
                 state.public_healthy = None;
                 state.public_error = None;
                 state.public_checked_at = None;
+                state.local_dns_error = false;
                 Ok(())
             }
             Ok(mut child) => {
@@ -152,13 +153,61 @@ fn record_recovery(manager: &Arc<Mutex<RuntimeManager>>, result: &Result<(), Str
     }
 }
 
-fn check_public_endpoint(manager: &Arc<Mutex<RuntimeManager>>) {
+pub(super) fn check_public_endpoint(manager: &Arc<Mutex<RuntimeManager>>) {
+    check_public_endpoint_with(
+        manager,
+        public_health::probe,
+        dns_recovery::refresh_user_cache,
+    );
+}
+
+fn check_public_endpoint_with(
+    manager: &Arc<Mutex<RuntimeManager>>,
+    probe: impl FnOnce(&str, &str) -> PublicHealth,
+    refresh_cache: impl FnOnce(),
+) {
+    check_public_endpoint_for_operation(manager, None, probe, refresh_cache);
+}
+
+pub(super) fn check_public_endpoint_for_repair(
+    manager: &Arc<Mutex<RuntimeManager>>,
+    operation: &Arc<PendingOperation>,
+) {
+    check_public_endpoint_for_operation(
+        manager,
+        Some(operation),
+        |origin, name| public_health::probe_cancellable(origin, name, &operation.cancelled),
+        || {},
+    );
+}
+
+fn owns_dns_repair(state: &RuntimeManager, operation: Option<&Arc<PendingOperation>>) -> bool {
+    operation.is_some_and(|operation| {
+        state
+            .dns_repair
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, operation))
+    })
+}
+
+fn check_public_endpoint_for_operation(
+    manager: &Arc<Mutex<RuntimeManager>>,
+    repair: Option<&Arc<PendingOperation>>,
+    probe: impl FnOnce(&str, &str) -> PublicHealth,
+    refresh_cache: impl FnOnce(),
+) {
     let target = {
         let mut state = manager.lock().unwrap_or_else(|e| e.into_inner());
+        let owns_repair = owns_dns_repair(&state, repair);
         if !state.connection_wanted
-            || state
-                .public_checked_at
-                .is_some_and(|at| at.elapsed() < Duration::from_secs(30))
+            || state.shutting_down
+            || repair.is_some_and(|operation| operation.cancelled.load(Ordering::Relaxed))
+            || (repair.is_some() && !owns_repair)
+            || (state.dns_repair.is_some() && !owns_repair)
+            || (!owns_repair
+                && state
+                    .public_checked_at
+                    .is_some_and(|at| at.elapsed() < Duration::from_secs(30)))
         {
             return;
         }
@@ -174,32 +223,144 @@ fn check_public_endpoint(manager: &Arc<Mutex<RuntimeManager>>) {
         if !origin.starts_with("https://") {
             return;
         }
-        let identity = (
+        let mut identity = (
             origin,
             session.gateway.runtime.child.id(),
             session.gateway.server_name.clone(),
+            0,
         );
+        state.public_probe_generation = state.public_probe_generation.wrapping_add(1);
+        identity.3 = state.public_probe_generation;
         state.public_checked_at = Some(Instant::now());
         identity
     };
-    let health = public_health::probe(&target.0, &target.2);
+    let health = probe(&target.0, &target.2);
     let mut state = manager.lock().unwrap_or_else(|e| e.into_inner());
-    if state.gateway.as_ref().is_some_and(|session| {
-        session.gateway.runtime.child.id() == target.1
-            && session
-                .gateway
-                .public_url
-                .lock()
-                .is_ok_and(|url| *url == target.0)
-    }) {
-        state.public_healthy = Some(health == PublicHealth::Healthy);
+    if state.connection_wanted
+        && !state.shutting_down
+        && !repair.is_some_and(|operation| operation.cancelled.load(Ordering::Relaxed))
+        && (owns_dns_repair(&state, repair) || (repair.is_none() && state.dns_repair.is_none()))
+        && state.public_probe_generation == target.3
+        && state.gateway.as_ref().is_some_and(|session| {
+            session.gateway.runtime.child.id() == target.1
+                && session
+                    .gateway
+                    .public_url
+                    .lock()
+                    .is_ok_and(|url| *url == target.0)
+        })
+    {
+        state.public_healthy = Some(health.is_reachable());
         state.public_error = health.error();
+        state.local_dns_error = health == PublicHealth::HealthyWithStaleDns;
+        if state.local_dns_error && !state.dns_refresh_attempted {
+            state.dns_refresh_attempted = true;
+            // One unprivileged attempt per connection. Never prompt in the
+            // background or hold the status lock while running a command.
+            state.public_checked_at = None;
+            drop(state);
+            refresh_cache();
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    fn gateway_fixture() -> (Arc<Mutex<RuntimeManager>>, WorkspaceProfile) {
+        let path = std::env::temp_dir().to_string_lossy().into_owned();
+        let mut profile = WorkspaceProfile::new(path, 28766).unwrap();
+        profile.tunnel.r#type = "frp".into();
+        let mut command = Command::new("/bin/sleep");
+        command.arg("60");
+        configure_process_group(&mut command);
+        let child = command.spawn().unwrap();
+        let pid = child.id();
+        let manager = Arc::new(Mutex::new(RuntimeManager::new()));
+        {
+            let mut state = manager.lock().unwrap();
+            state.connection_wanted = true;
+            state.gateway = Some(ManagedGatewaySession {
+                gateway: ManagedSession {
+                    runtime: ManagedChild {
+                        child,
+                        group_id: pid,
+                    },
+                    tunnel: None,
+                    public_url: Arc::new(Mutex::new("https://example.test".into())),
+                    server_name: "test".into(),
+                },
+                projects: HashMap::new(),
+                registry_path: PathBuf::new(),
+                resolved_runtime: ResolvedRuntime {
+                    command: (PathBuf::new(), vec![]),
+                    build_id: "test".into(),
+                },
+            });
+        }
+        (manager, profile)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_dns_is_visible_and_auto_refresh_runs_only_once_per_connection() {
+        let (manager, profile) = gateway_fixture();
+        let mut refreshes = 0;
+        check_public_endpoint_with(
+            &manager,
+            |_, _| PublicHealth::HealthyWithStaleDns,
+            || {
+                refreshes += 1;
+            },
+        );
+        {
+            let mut state = manager.lock().unwrap();
+            let status = state.gateway_status(&profile);
+            assert_eq!(status.state, "running");
+            assert!(status.local_dns_error);
+            assert_eq!(status.can_repair_dns, cfg!(target_os = "macos"));
+            assert!(state.public_checked_at.is_none());
+        }
+        check_public_endpoint_with(
+            &manager,
+            |_, _| PublicHealth::HealthyWithStaleDns,
+            || {
+                refreshes += 1;
+            },
+        );
+        assert_eq!(refreshes, 1);
+        manager.lock().unwrap().public_checked_at = None;
+        check_public_endpoint_with(
+            &manager,
+            |_, _| PublicHealth::Healthy,
+            || panic!("healthy DNS must not be refreshed"),
+        );
+        let mut state = manager.lock().unwrap();
+        assert!(!state.gateway_status(&profile).local_dns_error);
+        assert!(state.public_healthy.unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_probe_started_before_repair_cannot_restore_a_stale_warning() {
+        let (manager, _) = gateway_fixture();
+        check_public_endpoint_with(
+            &manager,
+            |_, _| {
+                let mut state = manager.lock().unwrap();
+                state.public_probe_generation += 1;
+                state.public_healthy = Some(true);
+                PublicHealth::HealthyWithStaleDns
+            },
+            || panic!("stale results must not flush caches"),
+        );
+        let state = manager.lock().unwrap();
+        assert!(!state.local_dns_error);
+        assert!(state.public_healthy.unwrap());
+        assert!(!state.dns_refresh_attempted);
+    }
+
     #[test]
     fn recovery_is_bounded_and_manual_stop_stays_stopped() {
         assert_eq!(retry_delay(1), Duration::from_secs(5));
