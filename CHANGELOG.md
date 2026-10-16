@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+- Moved recurring Workspace discovery out of project tool calls, while preserving
+  dynamic path selection, Workspace permissions, and stale-scan rejection.
+- Adapted upstream d7c2dda file pagination and patch locating fixes; added
+  revision-bound atomic `apply_changes`, a shared 64-entry write replay cache, and
+  explicit `keep_stdin_open` for pipe-based interactive commands.
+
+## Desktop 0.5.5 (development)
+
+- Recheck resolver-only failures through Cloudflare DNS-over-HTTPS within the
+  existing public health-check time budget. Preserve TLS certificate and Gateway
+  identity verification while avoiding false offline status from stale VPN DNS.
+- Distinguish unresolved domains from other public endpoint failures in Chinese.
+
+## Desktop 0.5.4 (development)
+
+- Added fixed Cloudflare Named Tunnel settings without overwriting them on start,
+  optional connection on app launch, background recovery with bounded backoff, and
+  cached public endpoint checks. Tokens stay in Keychain and out of process arguments.
+- Simplified the menu-bar home and More panels and stopped full snapshot polling
+  while hidden. Login-shell PATH is cached and persistent tunnel logs are bounded.
+- Accept pasted MCP URLs in fixed-link settings by removing a terminal `/mcp`;
+  explain the expected address and validation errors in Chinese.
+- Show manual startup failures as errors awaiting retry instead of leaving the
+  panel in a persistent starting state. Local port conflicts never stop an unrelated process.
+- Clean up Gateway, project runtime, and tunnel process groups on Unix SIGTERM
+  and SIGINT before exiting, preventing stale listeners after a normal update.
+
 ## Desktop 0.5.2
 
 - Bound Desktop to the exact bundled Runtime build instead of reusing a system

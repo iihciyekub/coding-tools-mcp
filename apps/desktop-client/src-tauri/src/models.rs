@@ -221,6 +221,8 @@ pub struct GatewayConfig {
     pub auth: AuthConfig,
     #[serde(default)]
     pub local_capability_roots: Vec<String>,
+    #[serde(default)]
+    pub auto_start: bool,
     #[serde(default = "default_auto_discover_local_capabilities")]
     pub auto_discover_local_capabilities: bool,
 }
@@ -234,6 +236,7 @@ impl Default for GatewayConfig {
             auth: AuthConfig::default(),
             local_capability_roots: Vec::new(),
             auto_discover_local_capabilities: true,
+            auto_start: false,
         }
     }
 }
@@ -247,6 +250,7 @@ impl GatewayConfig {
             auth: profile.auth.clone(),
             local_capability_roots: Vec::new(),
             auto_discover_local_capabilities: true,
+            auto_start: false,
         }
     }
 
@@ -498,14 +502,16 @@ impl WorkspaceProfile {
                         return Err("A named Cloudflare tunnel requires a Tunnel Token.".into());
                     }
                     let url = self.tunnel.public_url.trim();
-                    let origin = url
-                        .strip_prefix("https://")
-                        .unwrap_or_default()
-                        .trim_end_matches('/');
-                    if origin.is_empty()
-                        || origin.contains(['/', '?', '#'])
-                        || origin.chars().any(char::is_whitespace)
-                    {
+                    let valid = tauri::Url::parse(url).is_ok_and(|origin| {
+                        origin.scheme() == "https"
+                            && origin.host_str().is_some()
+                            && origin.username().is_empty()
+                            && origin.password().is_none()
+                            && origin.path() == "/"
+                            && origin.query().is_none()
+                            && origin.fragment().is_none()
+                    });
+                    if !valid || url.chars().any(char::is_whitespace) {
                         return Err("Public URL must be an HTTPS origin without a path.".into());
                     }
                 }
@@ -763,6 +769,16 @@ mod tests {
         profile.tunnel.public_url = "https://mcp.example.com/path".into();
         assert!(profile.validate().is_err());
 
+        for invalid in [
+            "https://user:password@mcp.example.com",
+            "https://mcp.example.com?token=secret",
+            "https://mcp.example.com#path",
+            "https://",
+            "http://mcp.example.com",
+        ] {
+            profile.tunnel.public_url = invalid.into();
+            assert!(profile.validate().is_err());
+        }
         profile.tunnel.public_url = "https://mcp.example.com/".into();
         assert!(profile.validate().is_ok());
         assert_eq!(profile.public_url(), "https://mcp.example.com");

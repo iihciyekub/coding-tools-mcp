@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { DesktopSnapshot, GatewayConfig, LogBundle, RuntimeStatus, WorkspaceProfile } from "./types";
+import type { DesktopSnapshot, GatewayConfig, LogBundle, RuntimeStatus, TunnelConfig, WorkspaceProfile } from "./types";
 
 export const api = {
   snapshot: () => invoke<DesktopSnapshot>("desktop_snapshot"),
@@ -7,6 +7,7 @@ export const api = {
     invoke<void>("decide_approval", { profileId, approvalId, approved }),
   createProfile: (path: string) => invoke<WorkspaceProfile>("create_profile", { path }),
   createFullAccessProfile: (path: string) => invoke<WorkspaceProfile>("create_full_access_profile", { path }),
+  saveConnection: (tunnel: TunnelConfig, autoStart: boolean) => invoke<GatewayConfig>("save_connection", { tunnel, autoStart }),
   saveProfile: (profile: WorkspaceProfile) => invoke<WorkspaceProfile>("save_profile", { profile }),
   saveLocalCapabilityRoots: (roots: string[]) => invoke<GatewayConfig>("save_local_capability_roots", { roots }),
   saveAutoDiscoverLocalCapabilities: (enabled: boolean) => invoke<GatewayConfig>("save_auto_discover_local_capabilities", { enabled }),

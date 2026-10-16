@@ -19,7 +19,7 @@ The per-project runtime exposes low-level coding primitives over MCP. Planning, 
 
 ## Tool-surface rule
 
-The implementation currently registers exactly 32 tools. CI caps the registered inventory at 32 tools, total input-schema size at 16,000 bytes, and any one schema at 2,048 bytes. Every enabled capability is directly listed; the optional Gateway catalog searches local Skill metadata, not hidden MCP tools.
+The implementation currently registers exactly 33 tools. CI caps the default exposed inventory at 32 tools, total input-schema size at 16,000 bytes, and any one schema at 2,048 bytes. Every enabled capability is directly listed; the optional Gateway catalog searches local Skill metadata, not hidden MCP tools.
 
 New tools require a capability or safety advantage that cannot be obtained cleanly by composing existing primitives. A wrapper around a native CLI is not sufficient justification.
 
@@ -107,7 +107,7 @@ Exposure: **direct**.
 
 Read a UTF-8 text file slice inside the configured file scope. Relative paths are Project-relative; host mode also accepts host absolute and ~/... paths.
 
-Inputs: `"path"`, `"if_revision"`, `"start_line"`, `"end_line"`, `"max_lines"`, `"max_bytes"`, `"encoding"`.
+Inputs: `"path"`, `"line_numbers"`, `"if_revision"`, `"start_line"`, `"end_line"`, `"max_lines"`, `"max_bytes"`, `"encoding"`.
 
 Required: `"path"`.
 
@@ -157,6 +157,20 @@ Required: `"query"`.
 
 Annotations: `{"title":"Search text","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
+### apply_changes
+
+Exposure: **direct**.
+
+Revision-bound atomic multi-file edits; semantic details and examples live in
+[tools and schemas](tools-and-schemas.md#patch-behavior).
+
+Inputs: `"changes"`, `"dry_run"`, `"idempotency_key"`. Each change carries
+`"action"`, `"path"`, and action-specific `"revision"`, `"content"`,
+`"destination"`, or `"edits"`. Edits use `"op"`, `"line"`, `"start_line"`,
+`"end_line"`, `"content"`. Required: `"changes"`.
+
+Annotations: `{"title":"Apply changes","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
+
 ### apply_patch
 
 Exposure: **direct**.
@@ -180,7 +194,7 @@ Exposure: **direct**.
 
 Run a bounded command under runtime policy. Pass workdir explicitly for reconnect-safe paths. A still-running command returns command_id. Example: {"cmd":"pytest -q","workdir":".","yield_time_ms":30000}. Retained output is bounded per stream; for very large output redirect to a file (cmd > out.log 2>&1) and page it with read_file or search_text.
 
-Inputs: `"cmd"`, `"approval_ids"`, `"operation_id"`, `"workdir"`, `"timeout_ms"`, `"yield_time_ms"`, `"max_output_bytes"`, `"verbosity"`, `"preview_bytes"`, `"stdin"`, `"tty"`, `"env"`.
+Inputs: `"cmd"`, `"approval_ids"`, `"operation_id"`, `"workdir"`, `"timeout_ms"`, `"yield_time_ms"`, `"max_output_bytes"`, `"verbosity"`, `"preview_bytes"`, `"stdin"`, `"keep_stdin_open"`, `"tty"`, `"env"`.
 
 Required: `"cmd"`.
 
@@ -399,7 +413,7 @@ Annotations: `{"title":"Code references","readOnlyHint":true,"destructiveHint":f
 Tool-domain failures use the standard MCP error envelope with a stable `error.code`, category, retryability, and bounded details. Current literal tool failure codes are:
 
 ```json
-["ABSOLUTE_PATH_DENIED", "APPROVAL_EXPIRED", "APPROVAL_NOT_FOUND", "APPROVAL_NOT_USABLE", "APPROVAL_SCOPE_MISMATCH", "BINARY_FILE", "COMMAND_CLOSED", "COMMAND_LIMIT_REACHED", "COMMAND_NOT_FOUND", "GATEWAY_REQUIRED", "GIT_ERROR", "GIT_NOT_REPOSITORY", "GIT_REPOSITORY_MISMATCH", "GIT_REPOSITORY_OUTSIDE_WORKSPACE", "GIT_STATE_CONFLICT", "IDEMPOTENCY_CONFLICT", "INTERNAL_ERROR", "INVALID_ARGUMENT", "IS_DIRECTORY", "LSP_EDIT_UNSUPPORTED", "LSP_ERROR", "LSP_EXITED", "LSP_LANGUAGE_UNSUPPORTED", "LSP_PATH_OUTSIDE_WORKSPACE", "LSP_TIMEOUT", "LSP_UNAVAILABLE", "NOT_A_DIRECTORY", "NOT_FOUND", "OPERATION_CONFLICT", "OPERATION_NOT_FOUND", "OPERATION_PENDING", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_FILE_SCOPE", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_UNAVAILABLE", "SYMLINK_ESCAPE", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING"]
+["ABSOLUTE_PATH_DENIED", "APPROVAL_EXPIRED", "APPROVAL_NOT_FOUND", "APPROVAL_NOT_USABLE", "APPROVAL_SCOPE_MISMATCH", "BINARY_FILE", "COMMAND_CLOSED", "COMMAND_LIMIT_REACHED", "COMMAND_NOT_FOUND", "GATEWAY_REQUIRED", "GIT_ERROR", "GIT_NOT_REPOSITORY", "GIT_REPOSITORY_MISMATCH", "GIT_REPOSITORY_OUTSIDE_WORKSPACE", "GIT_STATE_CONFLICT", "IDEMPOTENCY_CONFLICT", "INTERNAL_ERROR", "INVALID_ARGUMENT", "IS_DIRECTORY", "LSP_EDIT_UNSUPPORTED", "LSP_ERROR", "LSP_EXITED", "LSP_LANGUAGE_UNSUPPORTED", "LSP_PATH_OUTSIDE_WORKSPACE", "LSP_TIMEOUT", "LSP_UNAVAILABLE", "NOT_A_DIRECTORY", "NOT_FOUND", "OPERATION_CONFLICT", "OPERATION_NOT_FOUND", "OPERATION_PENDING", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_FILE_SCOPE", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "REVISION_MISMATCH", "REVISION_REQUIRED", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_UNAVAILABLE", "SYMLINK_ESCAPE", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING"]
 ```
 
 Non-retryable model-facing errors explicitly say not to repeat the same call unchanged. Permission failures identify the required operator action; runtime failures preserve bounded diagnostic evidence.

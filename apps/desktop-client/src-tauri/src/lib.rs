@@ -7,7 +7,7 @@ mod storage;
 use models::{GatewayConfig, LogBundle, ProjectProfile, RuntimeStatus, WorkspaceProfile};
 use resource_installer::managed_version;
 use runtime::{
-    prepare_runtime as prepare_runtime_environment, read_gateway_project_logs,
+    maintain_connection, prepare_runtime as prepare_runtime_environment, read_gateway_project_logs,
     reconcile_gateway_projects, runtime_logs_root, shutdown, start_gateway, stop_all_workspaces,
     stop_gateway, DependencyStatus, RuntimeManager,
 };
@@ -58,7 +58,6 @@ struct DesktopSnapshot {
 
 #[tauri::command]
 fn desktop_snapshot(state: tauri::State<'_, DesktopState>) -> Result<DesktopSnapshot, String> {
-    reconcile_project_runtimes(state.inner())?;
     let (profiles, gateway, migration_warning, language) = {
         let store = state
             .store
@@ -233,6 +232,28 @@ fn save_profile(
         .update(profile)?;
     reconcile_project_runtimes(state.inner())?;
     Ok(saved)
+}
+
+#[tauri::command]
+fn save_connection(
+    tunnel: models::TunnelConfig,
+    auto_start: bool,
+    state: tauri::State<'_, DesktopState>,
+) -> Result<GatewayConfig, String> {
+    let runtime = state
+        .runtime
+        .lock()
+        .map_err(|_| "Runtime manager is unavailable.")?;
+    if runtime.connection_wanted || runtime.gateway_is_busy() {
+        return Err("Stop the connection before changing its settings.".into());
+    }
+    let result = state
+        .store
+        .lock()
+        .map_err(|_| "Profile store is unavailable.")?
+        .set_connection(tunnel, auto_start);
+    drop(runtime);
+    result
 }
 
 #[tauri::command]
@@ -751,18 +772,6 @@ fn running_indicator_icon() -> Image<'static> {
         }
     }
     Image::new_owned(rgba, SIZE, SIZE)
-}
-
-fn quick_tunnel_profile(mut profile: WorkspaceProfile) -> WorkspaceProfile {
-    profile.tunnel.r#type = "cloudflare".into();
-    profile.tunnel.cloudflare_mode = "quick".into();
-    profile.tunnel.domain.clear();
-    profile.tunnel.public_url.clear();
-    profile.tunnel.frp_server.clear();
-    profile.tunnel.frp_subdomain.clear();
-    profile.tunnel.cloudflare_token.clear();
-    profile.auth.r#type = "oauth".into();
-    profile
 }
 
 fn public_endpoint(profile: &WorkspaceProfile, resolved_url: &str) -> String {
@@ -1434,7 +1443,6 @@ fn start_workspace_from_menu(app: AppHandle, profile_id: String) {
                 let profile = store
                     .get(&profile_id)
                     .ok_or_else(|| "Workspace profile was not found.".to_string())?;
-                let profile = store.update(quick_tunnel_profile(profile))?;
                 store.prepare_for_start(&profile.id)?;
                 (store.profiles(), store.gateway())
             };
@@ -1827,6 +1835,12 @@ pub fn run() {
                 .lock()
                 .map_err(|_| std::io::Error::other("Runtime manager is unavailable"))?
                 .configure_environment(resources, app.path().app_local_data_dir()?);
+            #[cfg(unix)]
+            {
+                let manager = Arc::clone(&app.state::<DesktopState>().runtime);
+                let exit_app = app.handle().clone();
+                runtime::install_termination_handler(manager, move || exit_app.exit(0))?;
+            }
             #[cfg(target_os = "macos")]
             {
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -1854,6 +1868,37 @@ pub fn run() {
                 if !cfg!(debug_assertions) && matches!(event, WindowEvent::Focused(false)) {
                     let _ = focus_panel.hide();
                 }
+            });
+            let supervisor_state = app.state::<DesktopState>().inner().clone();
+            supervisor_state
+                .runtime
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .connection_wanted = supervisor_state
+                .store
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .gateway()
+                .auto_start;
+            std::thread::spawn(move || loop {
+                if supervisor_state
+                    .runtime
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_shutting_down()
+                {
+                    break;
+                }
+                let (profiles, gateway) = {
+                    let store = supervisor_state
+                        .store
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    (store.profiles(), store.gateway())
+                };
+                let _ = maintain_connection(&supervisor_state.runtime, &profiles, &gateway);
+                let _ = reconcile_gateway_projects(&supervisor_state.runtime, &profiles);
+                std::thread::sleep(Duration::from_secs(5));
             });
             let fallback_menu = build_tray_menu(app.handle()).map_err(std::io::Error::other)?;
             #[cfg(not(target_os = "linux"))]
@@ -1891,6 +1936,7 @@ pub fn run() {
             create_profile,
             create_full_access_profile,
             save_profile,
+            save_connection,
             save_local_capability_roots,
             save_auto_discover_local_capabilities,
             save_server_name_prefix,
@@ -1924,20 +1970,6 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn quick_tunnel_start_preserves_host_permission_mode() {
-        let workspace = tempfile::tempdir().unwrap();
-        let mut profile =
-            WorkspaceProfile::new(workspace.path().to_string_lossy().to_string(), 28766).unwrap();
-        profile.runtime.permission_mode = "host".into();
-
-        let profile = quick_tunnel_profile(profile);
-
-        assert_eq!(profile.runtime.permission_mode, "host");
-        assert_eq!(profile.auth.r#type, "oauth");
-        assert_eq!(profile.tunnel.cloudflare_mode, "quick");
-    }
 
     #[test]
     fn desktop_access_has_two_modes() {

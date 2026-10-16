@@ -4,18 +4,17 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { api } from "./api";
 import { detectLanguage, translator, type Language } from "./i18n";
-import type { DependencyStatus, GatewayConfig, LogBundle, PermissionMode, RuntimeStatus, WorkspaceProfile } from "./types";
-import { publicEndpoint, workspaceHue } from "./utils";
+import type { DependencyStatus, GatewayConfig, LogBundle, PermissionMode, RuntimeStatus, TunnelConfig, WorkspaceProfile } from "./types";
+import { normalizePublicOrigin, publicEndpoint, workspaceHue } from "./utils";
 
 const PANEL_WIDTH = 420;
-const APP_VERSION = "0.5.3";
-type Page = "home" | "new-access" | "workspaces" | "environment" | "logs" | "settings" | "approvals" | "more";
+const APP_VERSION = "0.5.5";
+type Page = "home" | "new-access" | "workspaces" | "environment" | "logs" | "settings" | "more" | "connection";
 type CopyAction = "server-name" | "server-url" | "credential" | "logs";
 type ConfirmAction = { kind: "stop"; profileId: string } | { kind: "stop-all" } | { kind: "quit" } | null;
 type WorkspaceAction = { state: "starting" | "stopping" };
 
 const stoppedStatus = (port: number): RuntimeStatus => ({ state: "stopped", pid: null, server_name: "", local_message: "Not running", public_message: "Unknown", public_url: "", local_url: `http://127.0.0.1:${port}/mcp` });
-const quickTunnelProfile = (profile: WorkspaceProfile): WorkspaceProfile => ({ ...profile, tunnel: { ...profile.tunnel, type: "cloudflare", cloudflare_mode: "quick", domain: "", public_url: "", frp_server: "", frp_subdomain: "", cloudflare_token: "" }, auth: { ...profile.auth, type: "oauth" } });
 const shortPath = (path: string) => path.split(/[\\/]/).filter(Boolean).slice(-2).join(" / ") || path;
 
 function App() {
@@ -34,7 +33,6 @@ function App() {
   const [statuses, setStatuses] = useState<Record<string, RuntimeStatus>>({});
   const [workspaceActions, setWorkspaceActions] = useState<Record<string, WorkspaceAction>>({});
   const workspaceActionsRef = useRef<Record<string, WorkspaceAction>>({});
-  const [runtimeState, setRuntimeState] = useState<Awaited<ReturnType<typeof api.snapshot>>["runtime_state"]>({});
   const [dependencies, setDependencies] = useState<DependencyStatus>({ uv: false, cloudflared: false, runtime_ready: false, runtime_version: null });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selectedIdRef = useRef<string | null>(null);
@@ -48,6 +46,8 @@ function App() {
   const [runtimeLogs, setRuntimeLogs] = useState<LogBundle | null>(null);
   const [installLog, setInstallLog] = useState<string[]>([]);
   const [error, setError] = useState("");
+  const [connectionDraft, setConnectionDraft] = useState<TunnelConfig | null>(null);
+  const [autoStart, setAutoStart] = useState(false);
   const [mcpNamePrefix, setMcpNamePrefix] = useState("www");
 
   const workspaceStatus = (profile: WorkspaceProfile) => {
@@ -64,12 +64,12 @@ function App() {
   const starting = status?.state === "starting";
   const stopping = status?.state === "stopping";
   const running = Boolean(status?.pid) || starting || stopping;
-  const serverUrl = selected && status?.state === "running" ? publicEndpoint(selected, status.public_url) : "";
+  const serverUrl = selected ? publicEndpoint(selected, status?.public_url) : "";
   const credentialLabel = gateway?.auth.type === "bearer" ? "Bearer Token" : t("OAuth authorization passcode");
   const credential = gateway?.auth.type === "bearer" ? gateway.auth.bearer_token : gateway?.auth.oauth_password ?? "";
-  const selectedRuntimeState = selected ? runtimeState[selected.id] : undefined;
   const allowedFolderCount = selected?.runtime.allowed_paths.length ?? 0;
   const defaultSearchPath = selected?.runtime.default_search_path || (selected?.runtime.permission_mode === "host" ? "~" : "");
+  const connectionChanged = Boolean(connectionDraft && gateway && (JSON.stringify(connectionDraft) !== JSON.stringify(gateway.tunnel) || autoStart !== gateway.auto_start));
   const localCapabilityRoots = gateway?.local_capability_roots ?? [];
   const environmentReady = dependencies.runtime_ready && dependencies.cloudflared;
   const activeWorkspaceCount = profiles.reduce((count, profile) => {
@@ -89,7 +89,6 @@ function App() {
       setMigrationWarning(snapshot.migration_warning);
       setProfiles(snapshot.profiles);
       setStatuses(snapshot.statuses);
-      setRuntimeState(snapshot.runtime_state);
       setDependencies(snapshot.dependencies);
       if (!snapshot.profiles.length && !projectWindow) setPage("new-access");
       setSelectedId((current) => {
@@ -101,7 +100,21 @@ function App() {
     } catch (reason) { setError(String(reason)); }
   }, [boundProjectId, projectWindow]);
 
-  useEffect(() => { void refresh(false); const timer = window.setInterval(() => void refresh(), 2500); return () => window.clearInterval(timer); }, [refresh]);
+  useEffect(() => {
+    let disposed = false;
+    let timer: ReturnType<typeof window.setTimeout>;
+    const poll = async () => {
+      try { if (!disposed && await getCurrentWindow().isVisible()) await refresh(); } catch { /* Window may be closing. */ }
+      if (!disposed) timer = window.setTimeout(() => void poll(), 5000);
+    };
+    void refresh(false);
+    timer = window.setTimeout(() => void poll(), 5000);
+    const unlisten = getCurrentWindow().onFocusChanged(({ payload }) => { if (payload) void refresh(); });
+    return () => { disposed = true; window.clearTimeout(timer); void unlisten.then((stop) => stop()); };
+  }, [refresh]);
+  useEffect(() => {
+    if (gateway) { setConnectionDraft({ ...gateway.tunnel }); setAutoStart(gateway.auto_start); }
+  }, [gateway?.tunnel.type, gateway?.tunnel.cloudflare_mode, gateway?.tunnel.public_url, gateway?.tunnel.cloudflare_token, gateway?.auto_start]);
   useEffect(() => { selectedIdRef.current = selectedId; setRevealCredential(false); setConfirmDelete(false); setConfirmAction(null); setRuntimeLogs(null); }, [selectedId]);
   useEffect(() => { setMcpNamePrefix(gateway?.server_name_prefix ?? "www"); }, [gateway?.server_name_prefix]);
   useEffect(() => { if (!confirmAction) return; const timer = window.setTimeout(() => setConfirmAction(null), 4000); return () => window.clearTimeout(timer); }, [confirmAction]);
@@ -164,8 +177,7 @@ function App() {
   const startWorkspace = async (profile: WorkspaceProfile) => {
     const action = setWorkspaceAction(profile.id, "starting"); setError("");
     try {
-      const saved = await api.saveProfile(quickTunnelProfile(profile));
-      setProfiles((current) => current.map((item) => item.id === saved.id ? saved : item));
+      const saved = profile;
       if (workspaceActionsRef.current[profile.id] !== action) return;
       const next = await api.startProfile(saved.id);
       if (workspaceActionsRef.current[profile.id] !== action) return;
@@ -173,7 +185,10 @@ function App() {
       const endpoint = next.state === "running" ? publicEndpoint(saved, next.public_url) : "";
       if (endpoint) await copy(endpoint, "server-url");
     } catch (reason) {
-      if (workspaceActionsRef.current[profile.id] === action && String(reason) !== "Workspace startup was cancelled.") setError(String(reason));
+      if (workspaceActionsRef.current[profile.id] === action && String(reason) !== "Workspace startup was cancelled.") {
+        setError(String(reason));
+        await refresh();
+      }
     } finally { setWorkspaceAction(profile.id, null, action); }
   };
   const stopWorkspace = async (profileId: string) => {
@@ -246,6 +261,15 @@ function App() {
       setMcpNamePrefix(gateway?.server_name_prefix ?? "www");
       setError(String(reason));
     } finally { setBusy(null); }
+  };
+  const saveConnection = async () => {
+    if (!connectionDraft) return;
+    setBusy("connection"); setError("");
+    try {
+      const tunnel = { ...connectionDraft, public_url: normalizePublicOrigin(connectionDraft.public_url) };
+      const saved = await api.saveConnection(tunnel, autoStart);
+      setGateway(saved); await refresh();
+    } catch (reason) { setError(String(reason)); } finally { setBusy(null); }
   };
   const addAllowedFolder = async () => {
     if (!selected) return;
@@ -338,17 +362,10 @@ function App() {
     try { await api.setLanguage(next); localStorage.setItem("coding-tools-language", next); setLanguage(next); setError(""); } catch (reason) { setError(String(reason)); } finally { setBusy(null); }
   };
 
-  const decideApproval = async (approvalId: string, approved: boolean) => {
-    if (!selected) return;
-    setBusy(approvalId);
-    try { await api.decideApproval(selected.id, approvalId, approved); await refresh(); setError(""); }
-    catch (reason) { setError(String(reason)); }
-    finally { setBusy(null); }
-  };
   const openSubpage = (next: Page, back: Page) => { setBackTarget(back); setPage(next); };
 
-  const pageTitle: Record<Page, string> = { home: "", "new-access": t("Choose access mode"), workspaces: t("Access profiles"), environment: t("Environment & setup"), logs: t("Runtime logs"), settings: t("Workspace settings"), approvals: t("Approvals"), more: t("More") };
-  const backPage = page === "environment" || page === "logs" || page === "settings" || page === "approvals" ? backTarget : "home";
+  const pageTitle: Record<Page, string> = { home: "", "new-access": t("Choose access mode"), workspaces: t("Access profiles"), environment: t("Environment & setup"), logs: t("Runtime logs"), settings: t("Workspace settings"), more: t("More"), connection: t("Connection settings") };
+  const backPage = page === "environment" || page === "logs" || page === "settings" || page === "connection" ? backTarget : "home";
 
   return <main className={`panel${projectWindow ? " project-window" : ""}`} ref={panelRef}>
     {page === "home" ? <Header /> : <header className="subpage-header"><button className="icon-button" type="button" aria-label={t("Back")} onClick={() => setPage(backPage)}><BackIcon /></button><strong>{pageTitle[page]}</strong></header>}
@@ -358,11 +375,16 @@ function App() {
     {page === "home" && <>
       <section className={`workspace-hero ${selected ? "tinted" : ""}`} style={selected ? { "--workspace-hue": workspaceHue(selectedPosition) } as React.CSSProperties : undefined}>
         <div className="workspace-picker-row"><button className="workspace-picker" type="button" disabled={!profiles.length || projectWindow} onClick={() => setPage("workspaces")}>{selected?.runtime.permission_mode === "host" ? <ShieldIcon /> : <FolderIcon />}<span><strong>{selected ? t(selected.name) : t(projectWindow ? "Project unavailable" : "No access profile")}</strong><small>{selectedSubtitle}</small></span>{profiles.length > 1 && !projectWindow && <SwitchIcon />}</button>{!projectWindow && <button className="icon-button" type="button" aria-label={t("Add access profile")} onClick={() => setPage("new-access")}><PlusIcon /></button>}</div>
-        {selected && <div className="status-row"><span className="status-copy"><i className={`status-dot ${status?.state ?? "stopped"}`} />{profiles.length > 1 && <b className="status-index">[{selectedPosition}/{profiles.length}]</b>}{starting ? t("Preparing runtime dependencies…") : stopping ? t("Stopping…") : status?.state === "running" ? t("Running · public tunnel ready") : status?.state === "error" ? t("Connection error") : t("Workspace stopped")}</span><button className={`power-button ${running && !starting ? "danger" : ""} ${confirmAction?.kind === "stop" && confirmAction.profileId === selected.id ? "confirm" : ""}`} type="button" disabled={stopping} onClick={toggleWorkspace}>{starting || stopping ? <SpinnerIcon /> : null}{stopping ? t("Stopping…") : starting ? t("Cancel startup") : confirmAction?.kind === "stop" && confirmAction.profileId === selected.id ? t("Click again to stop") : t(running ? "Stop" : "Start")}</button></div>}
+        {selected && <div className="status-row"><span className="status-copy"><i className={`status-dot ${status?.state ?? "stopped"}`} />{profiles.length > 1 && <b className="status-index">[{selectedPosition}/{profiles.length}]</b>}{starting ? t(status?.pid ? "Connecting…" : "Starting…") : stopping ? t("Stopping…") : status?.state === "running" ? t("Connected") : status?.state === "error" ? t("Connection error") : t("Workspace stopped")}</span><button className={`power-button ${running && !starting ? "danger" : ""} ${confirmAction?.kind === "stop" && confirmAction.profileId === selected.id ? "confirm" : ""}`} type="button" disabled={stopping} onClick={toggleWorkspace}>{starting || stopping ? <SpinnerIcon /> : null}{stopping ? t("Stopping…") : starting ? t("Cancel startup") : confirmAction?.kind === "stop" && confirmAction.profileId === selected.id ? t("Click again to stop") : t(running ? "Stop" : "Start")}</button></div>}
+        {status?.state === "error" && <p className="connection-error">{t(status.public_message)}</p>}
       </section>
-      {selected && <section className="connection-block"><div className="gateway-label"><strong>{t("Shared MCP Gateway")}</strong><small>{t("One connection is shared by all projects.")}</small></div><ValueButton label={t("MCP name")} copyLabel={t("Copy")} value={status?.server_name || t("Start the workspace to create an MCP name")} disabled={!status?.server_name} copied={copied === "server-name"} onClick={() => void copy(status?.server_name ?? "", "server-name")} /><ValueButton label="Server URL" copyLabel={t("Copy")} value={serverUrl || t("Start the workspace to create a public URL")} disabled={!serverUrl} copied={copied === "server-url"} onClick={() => void copy(serverUrl, "server-url")} /><ValueButton label={credentialLabel} copyLabel={t("Copy")} value={revealCredential ? credential : "••••••••••••"} disabled={!credential} copied={copied === "credential"} onClick={() => void copy(credential, "credential")} after={<button className="reveal-button" type="button" aria-label={t(revealCredential ? "Hide authorization passcode" : "Show authorization passcode")} onClick={(event) => { event.stopPropagation(); setRevealCredential((current) => !current); }}>{revealCredential ? <EyeOffIcon /> : <EyeIcon />}</button>} /></section>}
+      {selected && <section className="connection-block">
+        <button className="connection-heading" type="button" onClick={() => openSubpage("connection", "home")}><strong>{t(gateway?.tunnel.cloudflare_mode === "named" ? "Fixed link" : "Temporary link")}</strong><span>{t("Connection settings")}<ChevronIcon /></span></button>
+        <ValueButton label={t("Server URL")} copyLabel={t("Copy")} value={serverUrl || t("Start to get a connection link")} disabled={!serverUrl} copied={copied === "server-url"} onClick={() => void copy(serverUrl, "server-url")} />
+        <ValueButton label={t("Authorization passcode")} copyLabel={t("Copy")} value={revealCredential ? credential : "••••••••••••"} disabled={!credential} copied={copied === "credential"} onClick={() => void copy(credential, "credential")} after={<button className="reveal-button" type="button" aria-label={t(revealCredential ? "Hide authorization passcode" : "Show authorization passcode")} onClick={() => setRevealCredential((current) => !current)}>{revealCredential ? <EyeOffIcon /> : <EyeIcon />}</button>} />
+      </section>}
       <nav className="menu-list" aria-label={t("Manage")}><MenuRow icon={<MoreIcon />} label={t("More")} onClick={() => setPage("more")} /></nav>
-      <footer className="panel-footer"><button type="button" disabled={!selected} onClick={() => openSubpage("settings", "home")}><ShieldIcon /><span>{selected?.runtime.permission_mode === "host" ? t("Full Access") : t("Standard access")}{selected?.runtime.permission_mode !== "host" && allowedFolderCount ? ` · ${allowedFolderCount} ${t("folders")}` : ""}</span></button><button className={`footer-quit-button ${confirmAction?.kind === "quit" ? "confirm" : ""}`} type="button" onClick={() => void quitApp()}><PowerIcon /><span>{confirmAction?.kind === "quit" ? t("Click again to quit") : t("Quit Coding Tools MCP")}</span></button></footer>
+      <footer className="panel-footer"><button type="button" disabled={!selected} onClick={() => openSubpage("settings", "home")}><ShieldIcon /><span>{selected?.runtime.permission_mode === "host" ? t("Full Access") : t("Standard access")}{selected?.runtime.permission_mode !== "host" && allowedFolderCount ? ` · ${allowedFolderCount} ${t("folders")}` : ""}</span></button><button className={`footer-quit-button ${confirmAction?.kind === "quit" ? "confirm" : ""}`} type="button" onClick={() => void quitApp()}><PowerIcon /><span>{confirmAction?.kind === "quit" ? t("Click again to quit") : t("Quit")}</span></button></footer>
     </>}
 
     {page === "new-access" && <section className="subpage-body access-mode-page">
@@ -377,6 +399,20 @@ function App() {
       </div>; })}</div>
       <button className="primary-button" type="button" onClick={() => setPage("new-access")}><PlusIcon />{t("Add access profile")}</button>
       <button className={`stop-all-button ${confirmAction?.kind === "stop-all" ? "confirm" : ""}`} type="button" disabled={!activeWorkspaceCount || busy === "stop-all"} onClick={() => void stopAllWorkspaces()}>{busy === "stop-all" ? <SpinnerIcon /> : <StopIcon />}{busy === "stop-all" ? t("Stopping all…") : confirmAction?.kind === "stop-all" ? t("Click again to stop all") : t("Stop all")}{activeWorkspaceCount > 1 && busy !== "stop-all" && confirmAction?.kind !== "stop-all" ? <small>{activeWorkspaceCount}</small> : null}</button>
+    </section>}
+
+    {page === "connection" && gateway && connectionDraft && <section className="subpage-body connection-page">
+      <div className="field-copy"><strong>{t("Connection link")}</strong><small>{t("Shared by all workspaces.")}</small></div>
+      <div className="segmented-control"><button type="button" className={connectionDraft.cloudflare_mode === "quick" ? "selected" : ""} disabled={running} onClick={() => setConnectionDraft({ ...connectionDraft, type: "cloudflare", cloudflare_mode: "quick" })}>{t("Temporary link")}</button><button type="button" className={connectionDraft.cloudflare_mode === "named" ? "selected" : ""} disabled={running} onClick={() => setConnectionDraft({ ...connectionDraft, type: "cloudflare", cloudflare_mode: "named" })}>{t("Fixed link")}</button></div>
+      {connectionDraft.cloudflare_mode === "named" ? <>
+        <label className="connection-field"><span>{t("Public address")}</span><input type="url" placeholder="https://mcp.example.com" value={connectionDraft.public_url} disabled={running} spellCheck={false} autoComplete="off" onChange={(event) => setConnectionDraft({ ...connectionDraft, public_url: event.target.value })} /></label>
+        <p className="hint-copy">{t("Enter the domain only. /mcp is added automatically.")}</p>
+        <label className="connection-field"><span>{t("Tunnel token")}</span><input type="password" value={connectionDraft.cloudflare_token} disabled={running} spellCheck={false} autoComplete="off" onChange={(event) => setConnectionDraft({ ...connectionDraft, cloudflare_token: event.target.value })} /></label>
+        <p className="hint-copy">{t("Create a named tunnel in Cloudflare and point its public hostname to:")} <code>http://127.0.0.1:{gateway.local_port}</code></p>
+      </> : <p className="hint-copy">{t("A temporary address changes when the connection restarts.")}</p>}
+      <label className="auto-discover-row"><input type="checkbox" checked={autoStart} disabled={running} onChange={(event) => setAutoStart(event.target.checked)} /><span><strong>{t("Connect when the app opens")}</strong></span></label>
+      {running ? <p className="hint-copy">{t("Stop the connection before changing its settings.")}</p> : <button className="primary-button" type="button" disabled={Boolean(busy) || !connectionChanged || (connectionDraft.cloudflare_mode === "named" && (!connectionDraft.public_url.trim() || !connectionDraft.cloudflare_token.trim()))} onClick={() => void saveConnection()}>{busy === "connection" ? <SpinnerIcon /> : null}{t("Save")}</button>}
+      <details className="advanced-settings"><summary>{t("Connection details")}</summary><div className="advanced-settings-body"><ValueButton label={t("MCP name")} copyLabel={t("Copy")} value={status?.server_name || "—"} disabled={!status?.server_name} copied={copied === "server-name"} onClick={() => void copy(status?.server_name ?? "", "server-name")} /><p className="hint-copy">{t("The fixed address stays the same. Your Mac must be awake and online.")}</p></div></details>
     </section>}
 
     {page === "environment" && <section className="subpage-body environment-page">
@@ -423,22 +459,16 @@ function App() {
     </section>}
 
 
-    {page === "approvals" && <section className="subpage-body approvals-page">{!selectedRuntimeState?.available ? <p className="empty-copy">{selectedRuntimeState?.warning || t("No approvals yet.")}</p> : <>{selectedRuntimeState.approvals.filter((item) => item.status === "pending").map((approval) => <div className="approval-item" key={approval.approval_id}><span><strong>{approval.reason}</strong><small>{approval.tool_name} · {approval.permission}</small></span><div><button type="button" disabled={busy === approval.approval_id} onClick={() => void decideApproval(approval.approval_id, false)}>{t("Deny")}</button><button className="approve" type="button" disabled={busy === approval.approval_id} onClick={() => void decideApproval(approval.approval_id, true)}>{t("Approve")}</button></div></div>)}{!selectedRuntimeState.approvals.some((item) => item.status === "pending") && <p className="empty-copy">{t("No approvals yet.")}</p>}</>}</section>}
-
     {page === "more" && <section className="subpage-body more-page"><div className="menu-list compact">
-      <MenuRow icon={<FolderIcon />} label={t("Workspace settings")} disabled={!selected} onClick={() => openSubpage("settings", "more")} />
+      <MenuRow icon={<SwitchIcon />} label={t("Connection settings")} disabled={!selected} onClick={() => openSubpage("connection", "more")} />
       <MenuRow icon={<PackageIcon />} label={t("Environment & setup")} detail={environmentReady ? t("Ready") : t("Setup needed")} onClick={() => openSubpage("environment", "more")} />
-      {!projectWindow && <MenuRow icon={<SwitchIcon />} label={t("Open project window")} disabled={!selected} onClick={() => { if (selected) void api.openProjectWindow(selected.id); }} />}
       <MenuRow icon={<LogIcon />} label={t("Runtime logs")} disabled={!selected || busy === "logs"} onClick={() => { setBackTarget("more"); void loadLogs(); }} />
-      <MenuRow icon={<ActivityIcon />} label={t("Approvals")} detail={selectedRuntimeState ? `${selectedRuntimeState.approvals.filter((item) => item.status === "pending").length} ${t("approvals")}` : ""} disabled={!selected} onClick={() => openSubpage("approvals", "more")} />
       <div className="language-row"><span><LanguageIcon />{t("Language")}</span><select aria-label={t("Language")} value={language} disabled={busy === "language"} onChange={(event) => void changeLanguage(event.target.value as Language)}><option value="zh-CN">简体中文</option><option value="en">English</option></select></div>
-      <MenuRow icon={<RefreshIcon />} label={t("Refresh status")} onClick={() => void refresh()} />
-      <MenuRow icon={<GithubIcon />} label={t("GitHub source")} onClick={() => void api.openResource("github")} />
     </div><div className="version-block"><span>Coding Tools MCP <strong>{APP_VERSION}</strong></span><span>MCP Runtime <strong>{dependencies.runtime_version ?? "—"}</strong></span></div><button className={`quit-button ${confirmAction?.kind === "quit" ? "confirm" : ""}`} type="button" onClick={() => void quitApp()}><PowerIcon />{confirmAction?.kind === "quit" ? t("Click again to quit") : t("Quit Coding Tools MCP")}</button></section>}
   </main>;
 }
 
-function Header() { return <header className="panel-header"><span className="brand-mark"><AppMarkIcon /></span><strong>Coding Tools MCP</strong><small>{APP_VERSION}</small></header>; }
+function Header() { return <header className="panel-header"><span className="brand-mark"><AppMarkIcon /></span><strong>Coding Tools MCP</strong></header>; }
 function middleEllipsis(value: string, limit = 30) {
   if (value.length <= limit) return value;
   const visible = limit - 1;
@@ -469,11 +499,9 @@ const RefreshIcon = () => <Icon><path d="M20 11a8 8 0 0 0-14.8-4M4 4v5h5M4 13a8 
 const RepairIcon = () => <Icon><path d="M14.7 6.3a4 4 0 0 0-5-5L7 4l3 3 2.7-2.7a4 4 0 0 0 2 5L6 18.9a2.1 2.1 0 0 0 3 3l9.6-8.7a4 4 0 0 0 5-5L21 11l-3-3Z" /></Icon>;
 const SpinnerIcon = () => <Icon className="spinner"><path d="M21 12a9 9 0 1 1-3-6.7" /></Icon>;
 const LanguageIcon = () => <Icon><circle cx="12" cy="12" r="10" /><path d="M2 12h20M12 2a15 15 0 0 1 0 20M12 2a15 15 0 0 0 0 20" /></Icon>;
-const GithubIcon = () => <Icon><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3.3-.4 6.8-1.6 6.8-7A5.4 5.4 0 0 0 19.4 4 5 5 0 0 0 19.3.5S18.2.1 15 2a13.4 13.4 0 0 0-7 0C4.8.1 3.7.5 3.7.5A5 5 0 0 0 3.6 4a5.4 5.4 0 0 0-1.4 3.7c0 5.3 3.5 6.5 6.8 6.9A4.8 4.8 0 0 0 8 18v4M8 19c-3 .9-3-1.5-4-2" /></Icon>;
 const PowerIcon = () => <Icon><path d="M12 2v10M18.4 6.6a9 9 0 1 1-12.8 0" /></Icon>;
 const StopIcon = () => <Icon><rect x="6" y="6" width="12" height="12" rx="2" /></Icon>;
 const TrashIcon = () => <Icon><path d="M4 7h16M10 3h4l1 2H9l1-2ZM6 7l1 13h10l1-13M10 11v5M14 11v5" /></Icon>;
-const ActivityIcon = () => <Icon><path d="M3 12h4l3-8 4 16 3-8h4" /></Icon>;
 const SettingsIcon = () => <Icon><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z" /></Icon>;
 
 export default App;

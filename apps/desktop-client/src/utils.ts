@@ -1,5 +1,17 @@
 import type { WorkspaceProfile } from "./types";
 
+export function normalizePublicOrigin(value: string): string {
+  const trimmed = value.trim().replace(/\/+$/, "");
+  try {
+    const url = new URL(trimmed);
+    if (url.protocol === "https:" && !url.username && !url.password
+      && url.pathname === "/mcp" && !trimmed.includes("?") && !trimmed.includes("#")) {
+      return url.origin;
+    }
+  } catch { /* Leave invalid addresses for the server's validation. */ }
+  return trimmed;
+}
+
 export function normalizeDomain(value: string): string {
   return value
     .trim()

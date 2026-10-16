@@ -350,6 +350,7 @@ class CommandRun:
             terminate_process_group(self.process, signal.SIGTERM)
             self.warnings.append("background descendants were terminated after the command leader exited")
         self.drain_readers()
+        self.close_stdin()
         self.exit_code = code
         self.terminating = False
         if code < 0:

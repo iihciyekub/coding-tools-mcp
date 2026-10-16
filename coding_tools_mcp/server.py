@@ -25,6 +25,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+from collections import OrderedDict
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -36,6 +37,10 @@ from . import apple_toolchain
 from . import code_intel
 from . import lsp as lsp_tools
 from . import workspace_insight
+from .changes import (
+    CHANGE_ACTIONS, EDIT_OPERATIONS, MAX_CHANGES_PER_CALL, MAX_EDITS_PER_CHANGE,
+    ChangeRequest, apply_line_edits, normalize_revision, parse_changes, reject_duplicate_paths,
+)
 from .envutils import ENV_PREFIX, truthy_env
 from .errors import JsonRpcError, ToolFailure
 from .gateway import (
@@ -70,6 +75,7 @@ from .patching import (
     StagedFile,
     apply_update_hunks_detailed,
     content_revision,
+    changed_ranges_between,
     parse_patch,
     read_text_preserve_newlines,
 )
@@ -780,6 +786,15 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         description="Search authorized UTF-8 files for text or regex matches. Omit path to use the configured default search folder; explicit relative paths use the bound project root.",
         read_only=True,
         idempotent=True,
+    ),
+    "apply_changes": ToolSpec(
+        title="Apply changes",
+        description=(
+            "Atomically create, edit, write, delete, move or copy files. Existing files require "
+            "the revision from read_file; edit line numbers must belong to that revision. "
+            "Re-read after REVISION_MISMATCH. Use idempotency_key to retry a lost response."
+        ),
+        destructive=True,
     ),
     "apply_patch": ToolSpec(
         title="Apply patch",
@@ -1766,6 +1781,43 @@ class WorkspaceCommandManager:
 
 
 
+def _count_lines(text: str) -> int:
+    """Count file lines the way ``read_file`` reports ``total_lines``."""
+
+    # TextIO's universal-newline iteration treats CRLF, LF, and bare CR as
+    # line boundaries. Normalize only this temporary counting view; the
+    # caller's original bytes are preserved unchanged.
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    return normalized.count("\n") + (1 if normalized and not normalized.endswith("\n") else 0)
+
+
+def _whole_file_range(text: str) -> list[dict[str, int]]:
+    """The changed range for a file written in full."""
+
+    lines = _count_lines(text)
+    return [{"start_line": 1, "end_line": lines, "added_lines": lines, "removed_lines": 0}]
+
+
+def _patch_evidence(
+    content: str, changed_ranges: list[dict[str, int]], *, quality: str | None = None
+) -> dict[str, Any]:
+    """Post-edit evidence for one file: what the result is, not just that it worked.
+
+    ``revision`` is the same token ``read_file`` publishes and ``apply_changes``
+    requires, so a model can chain a structured edit onto a patch result
+    without re-reading the file.
+    """
+
+    evidence: dict[str, Any] = {
+        "revision": content_revision(content),
+        "total_lines": _count_lines(content),
+        "changed_ranges": changed_ranges,
+    }
+    if quality is not None:
+        evidence["match_quality"] = quality
+    return evidence
+
+
 class Runtime:
     def __init__(
         self,
@@ -1900,9 +1952,9 @@ class Runtime:
             self._fresh_command_env(create_runtime_dirs=False),
         )
         self.patch_baselines: dict[str, str | None] = {}
-        self.patch_lock = threading.Lock()
+        self.patch_lock = threading.RLock()
         self.patch_committer = AtomicPatchCommitter()
-        self.patch_replays: dict[str, tuple[str, dict[str, Any]]] = {}
+        self.patch_replays: OrderedDict[tuple[str, str], tuple[str, dict[str, Any]]] = OrderedDict()
         # ProjectContext is frozen and derived only from the workspace tree, so
         # an embedder that builds several runtimes over one workspace can reuse
         # the discovery (git ls-files / directory walk) result.
@@ -2518,6 +2570,7 @@ class Runtime:
         print(json.dumps(event, sort_keys=True, separators=(",", ":")), file=sys.stderr, flush=True)
 
     def read_file(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Read a bounded UTF-8 line range with its file revision and continuation metadata."""
         requested_path = str(args.get("path", ""))
         resolved = self.resolve_file_existing(requested_path)
         if resolved.path.is_dir():
@@ -2571,7 +2624,6 @@ class Runtime:
         if encoding != "utf-8":
             raise ToolFailure("UNSUPPORTED_ENCODING", "Only utf-8 is supported.", category="validation")
         total_bytes = resolved.path.stat().st_size
-        digest = hashlib.sha256()
         with resolved.path.open("rb") as raw_handle:
             if b"\x00" in raw_handle.read(4096):
                 raise ToolFailure("BINARY_FILE", "Binary file read blocked for text tool.", category="validation")
@@ -2582,37 +2634,53 @@ class Runtime:
         selected_bytes = 0
         total_lines = 0
         selection_complete = False
+        truncated_by = None
+        first_line_exceeds_limit = False
+        # The revision is folded into the pass that already walks every line,
+        # so it names the bytes this call decoded rather than whatever a second
+        # open would have found a moment later.
+        digest = hashlib.sha256()
         try:
             with resolved.path.open("r", encoding="utf-8", errors="strict", newline="") as handle:
                 for total_lines, line in enumerate(handle, start=1):
-                    digest.update(line.encode("utf-8"))
+                    line_bytes = line.encode("utf-8")
+                    digest.update(line_bytes)
                     if total_lines < start_line:
                         continue
                     if requested_end is not None and total_lines > requested_end:
                         continue
                     if selection_complete:
                         continue
-                    selected_parts.append(line)
-                    selected_bytes += len(line.encode("utf-8"))
-                    if len(selected_parts) > DEFAULT_MAX_LINES or selected_bytes > max_bytes:
+                    if len(selected_parts) >= DEFAULT_MAX_LINES:
+                        truncated_by = "lines"
                         selection_complete = True
+                    elif selected_bytes + len(line_bytes) > max_bytes:
+                        truncated_by = "bytes"
+                        selection_complete = True
+                        if not selected_parts:
+                            # Preserve the existing oversized-first-line preview.
+                            # All other pages end at a physical line boundary.
+                            preview = truncate_text_head(line, max_bytes=max_bytes)
+                            selected_parts.append(preview.content)
+                            first_line_exceeds_limit = True
+                    else:
+                        selected_parts.append(line)
+                        selected_bytes += len(line_bytes)
         except UnicodeDecodeError as exc:
             raise ToolFailure("UNSUPPORTED_ENCODING", "File is not valid utf-8.", category="validation") from exc
         selected = "".join(selected_parts)
-        truncation = truncate_text_head(selected, max_lines=DEFAULT_MAX_LINES, max_bytes=max_bytes)
-        selected = truncation.content
-        truncated = truncation.truncated or selection_complete
+        truncated = selection_complete
         end = requested_end if requested_end is not None else total_lines
         if end < start_line:
             selected = ""
         actual_end = min(end, total_lines)
-        if truncated and truncation.output_lines > 0:
-            actual_end = min(total_lines, start_line + truncation.output_lines - 1)
-        next_start_line = actual_end + 1 if truncated and actual_end < total_lines else None
+        if truncated and selected_parts:
+            actual_end = min(total_lines, start_line + len(selected_parts) - 1)
+        next_start_line = actual_end + 1 if truncated and actual_end < min(end, total_lines) else None
         warnings = []
         if truncated:
             warnings.append("content truncated")
-        if truncation.first_line_exceeds_limit:
+        if first_line_exceeds_limit:
             warnings.append("first selected line exceeds max_bytes")
         result = {
             "path": resolved.display,
@@ -2627,22 +2695,28 @@ class Runtime:
             "total_bytes": total_bytes,
             "bytes_read": len(selected.encode("utf-8")),
             "truncated": truncated,
-            "truncated_by": truncation.truncated_by or ("bytes" if selection_complete else None),
-            "first_line_exceeds_limit": truncation.first_line_exceeds_limit,
-            "output_lines": truncation.output_lines,
-            "output_bytes": truncation.output_bytes,
+            "truncated_by": truncated_by,
+            "first_line_exceeds_limit": first_line_exceeds_limit,
+            "output_lines": len(selected_parts),
+            "output_bytes": len(selected.encode("utf-8")),
             "next_start_line": next_start_line,
             "warnings": warnings,
         }
+        if args.get("line_numbers") is True:
+            # Echoed so the text renderer can number lines; content itself
+            # stays the file's bytes.
+            result["line_numbers"] = True
         if next_start_line is not None:
-            result["next_action"] = {
-                "tool": "read_file",
-                "arguments": {
-                    "path": requested_path,
-                    "start_line": next_start_line,
-                    "max_bytes": max_bytes,
-                },
+            continuation: dict[str, Any] = {
+                "path": requested_path,
+                "start_line": next_start_line,
+                "max_bytes": max_bytes,
             }
+            if requested_end is not None:
+                continuation["end_line"] = requested_end
+            if result.get("line_numbers"):
+                continuation["line_numbers"] = True
+            result["next_action"] = {"tool": "read_file", "arguments": continuation}
         return result
 
     def read_files(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -3145,7 +3219,7 @@ class Runtime:
             expected_revisions = {}
         with self.patch_lock:
             if idempotency_key is not None:
-                replay = self.patch_replays.get(idempotency_key)
+                replay = self.patch_replays.get(("apply_patch", idempotency_key))
                 if replay is not None:
                     previous_digest, previous_result = replay
                     if previous_digest != request_digest:
@@ -3155,6 +3229,7 @@ class Runtime:
                             category="validation",
                             details={"idempotency_key": idempotency_key},
                         )
+                    self.patch_replays.move_to_end(("apply_patch", idempotency_key))
                     result = dict(previous_result)
                     result["deduplicated"] = True
                     result["message"] = "Existing patch result returned for this idempotency_key; no files were written."
@@ -3232,10 +3307,8 @@ class Runtime:
                     outcome = apply_update_hunks_detailed(content, op.hunks, op.path)
                     updated = outcome.content
                     warnings.extend(f"{source.display}: {warning}" for warning in outcome.warnings)
-                    for hunk in op.hunks:
-                        for line in hunk.lines:
-                            additions += line.startswith("+")
-                            removals += line.startswith("-")
+                    additions += sum(item["added_lines"] for item in outcome.changed_ranges)
+                    removals += sum(item["removed_lines"] for item in outcome.changed_ranges)
                     source_mode = prior.mode if prior is not None else baseline.mode
                     if op.move_to:
                         dest = self.resolve_file_for_write(op.move_to)
@@ -3272,15 +3345,16 @@ class Runtime:
                             updated,
                             baseline,
                             source_mode,
+                            action="verify" if updated == content else "write",
                         )
                         affected.append({
                             "path": source.display,
-                            "operation": "update",
+                            "operation": "unchanged" if updated == content else "update",
                             "revision": content_revision(updated),
                             "changed_ranges": outcome.changed_ranges,
                             "match_quality": outcome.match_quality,
                         })
-                        summaries.append(f"M {source.display}")
+                        summaries.append(f"{'=' if updated == content else 'M'} {source.display}")
             if not affected:
                 raise ToolFailure("PATCH_FAILED", "No files were modified.", category="validation")
             if not dry_run:
@@ -3290,14 +3364,300 @@ class Runtime:
                 "clean": True,
                 "revision_algorithm": REVISION_ALGORITHM,
                 "summary": "\n".join(summaries),
+                "already_applied": all(item["operation"] == "unchanged" for item in affected),
                 "affected_files": affected,
                 "additions": additions,
                 "removals": removals,
                 "warnings": warnings,
             }
             if idempotency_key is not None and not dry_run:
-                self.patch_replays[idempotency_key] = (request_digest, dict(result))
+                self.patch_replays[("apply_patch", idempotency_key)] = (request_digest, dict(result))
+                self._prune_patch_replays()
             return result
+
+    def _prune_patch_replays(self) -> None:
+        while len(self.patch_replays) > 64:
+            self.patch_replays.popitem(last=False)
+
+    def apply_changes(self, args: dict[str, Any]) -> dict[str, Any]:
+        key = str(args.get("idempotency_key") or "").strip()
+        slot = ("apply_changes", key)
+        digest = hashlib.sha256(json_response_payload({
+            "changes": args.get("changes"), "dry_run": bool(args.get("dry_run", False)),
+        })).hexdigest()
+        with self.patch_lock:
+            if key and slot in self.patch_replays:
+                previous_digest, result = self.patch_replays[slot]
+                if previous_digest != digest:
+                    raise ToolFailure("IDEMPOTENCY_CONFLICT", "idempotency_key was already used with different change arguments.", category="validation")
+                self.patch_replays.move_to_end(slot)
+                return {**result, "deduplicated": True}
+            result = self._apply_changes(args)
+            if key and not args.get("dry_run"):
+                self.patch_replays[slot] = (digest, dict(result))
+                self._prune_patch_replays()
+            return result
+
+    def _apply_changes(self, args: dict[str, Any]) -> dict[str, Any]:
+        dry_run = bool(args.get("dry_run", False))
+        changes = parse_changes(args.get("changes"))
+        staged: dict[str, StagedFile] = {}
+        summaries: list[str] = []
+        affected: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        additions = 0
+        removals = 0
+        unchanged_files = 0
+        with self.patch_lock:
+            # Every path in the array is resolved before anything is staged, so
+            # a rejected path in the last change cannot leave the earlier ones
+            # half prepared, and so the duplicate check below compares the
+            # names staging will actually use.
+            targets: list[tuple[int, str]] = []
+            for change in changes:
+                targets.extend(self._resolve_change_paths(change))
+            reject_duplicate_paths(targets)
+            for change in changes:
+                if change.action in {"create", "write"}:
+                    result = self._stage_written_file(change, staged)
+                elif change.action == "edit":
+                    result = self._stage_edited_file(change, staged)
+                elif change.action == "delete":
+                    result = self._stage_deleted_file(change, staged)
+                else:
+                    result = self._stage_relocated_file(change, staged)
+                entry, summary, added, removed = result
+                affected.append(entry)
+                summaries.append(summary)
+                additions += added
+                removals += removed
+                unchanged_files += entry["operation"] == "unchanged"
+            if not affected:
+                raise ToolFailure("PATCH_FAILED", "No files were modified.", category="validation")
+            if not dry_run:
+                self._commit_staged_files(list(staged.values()))
+        return {
+            "dry_run": dry_run,
+            "clean": True,
+            "already_applied": unchanged_files == len(changes),
+            "revision_algorithm": REVISION_ALGORITHM,
+            "summary": "\n".join(summaries),
+            "affected_files": affected,
+            "additions": additions,
+            "removals": removals,
+            "warnings": warnings,
+
+        }
+
+    def _resolve_change_paths(self, change: ChangeRequest) -> list[tuple[int, str]]:
+        """Validate one change's paths and return the display names it claims."""
+
+        requires_existing = change.action in {"edit", "delete", "move", "copy"}
+        self.file_access.reject_write_symlink(change.path)
+        targets = [(change.index, (self.resolve_file_existing(change.path) if requires_existing else self.resolve_file_for_write(change.path)).display)]
+        if change.destination is not None:
+            self.file_access.reject_write_symlink(change.destination)
+            targets.append((change.index, self.resolve_file_for_write(change.destination).display))
+        return targets
+
+    def _stage_written_file(
+        self, change: ChangeRequest, staged: dict[str, StagedFile]
+    ) -> tuple[dict[str, Any], str, int, int]:
+        """Stage a create or revision-checked write and return file evidence and line counts."""
+        target = self.resolve_file_for_write(change.path)
+        content = change.content or ""
+        if target.existed and target.path.is_dir():
+            raise ToolFailure(
+                "PATCH_FAILED",
+                f"Cannot {change.action} {target.display}: it is a directory. create and write "
+                "only produce files; choose a file path inside it instead.",
+                category="validation",
+                details={"path": target.display, "is_directory": True},
+            )
+        baseline = FileBaseline.capture(target.path)
+        if change.action == "create" and target.existed:
+            if baseline.data != content.encode("utf-8"):
+                raise ToolFailure(
+                    "PATCH_FAILED",
+                    f"Cannot create {target.display}: it already exists with different content. "
+                    "To replace it, read_file it and send action \"write\" with that revision.",
+                    category="validation",
+                    details={
+                        "path": target.display,
+                        "exists": True,
+                        "next_action": {"tool": "read_file", "arguments": {"path": target.display}},
+                    },
+                )
+            # Byte-identical: most likely a retry after a lost response. The
+            # requested state already holds, so this is an idempotent success
+            # that writes nothing, exactly like any other unchanged change.
+            current = baseline.text(target.display)
+        elif target.existed:
+            current = baseline.text(target.display)
+            self._check_revision(change, target.display, current)
+        else:
+            current = None
+            if change.revision is not None:
+                normalize_revision(change.revision, f"changes[{change.index}]")
+                raise ToolFailure(
+                    "REVISION_MISMATCH",
+                    f"{target.display} does not exist, so it has no revision to match.",
+                    category="conflict",
+                    retryable=True,
+                    details={"path": target.display, "expected_revision": change.revision, "exists": False},
+                )
+        unchanged = current == content
+        staged[target.display] = StagedFile(
+            target.display,
+            target.path,
+            content,
+            baseline,
+            baseline.mode,
+            action="verify" if unchanged else "write",
+        )
+        operation = "unchanged" if unchanged else ("create" if current is None else "write")
+        ranges: list[dict[str, int]] = (
+            [] if unchanged else changed_ranges_between(current or "", content)
+        )
+        entry = {"path": target.display, "operation": operation, **_patch_evidence(content, ranges)}
+        marker = {"unchanged": "=", "create": "A"}.get(operation, "M")
+        return entry, f"{marker} {target.display}", 0 if unchanged else _count_lines(content), (
+            0 if unchanged or current is None else _count_lines(current)
+        )
+
+    def _stage_edited_file(
+        self, change: ChangeRequest, staged: dict[str, StagedFile]
+    ) -> tuple[dict[str, Any], str, int, int]:
+        """Stage revision-checked line edits and report only the lines that actually changed."""
+        source = self.resolve_file_existing(change.path)
+        if source.path.is_dir():
+            raise ToolFailure("PATCH_FAILED", "Cannot edit a directory.", category="validation")
+        baseline = FileBaseline.capture(source.path)
+        current = baseline.text(source.display)
+        self._check_revision(change, source.display, current)
+        outcome = apply_line_edits(current, change.edits, source.display)
+        unchanged = outcome.content == current
+        staged[source.display] = StagedFile(
+            source.display,
+            source.path,
+            current if unchanged else outcome.content,
+            baseline,
+            baseline.mode,
+            action="verify" if unchanged else "write",
+        )
+        # Count what actually differs: a replace that rewrites a line with its
+        # own text is +0 -0, not +1 -1.
+        added = sum(item["added_lines"] for item in outcome.changed_ranges)
+        removed = sum(item["removed_lines"] for item in outcome.changed_ranges)
+        entry = {
+            "path": source.display,
+            "operation": "unchanged" if unchanged else "edit",
+            **_patch_evidence(outcome.content, outcome.changed_ranges),
+        }
+        return entry, f"{'=' if unchanged else 'M'} {source.display}", added, removed
+
+    def _stage_deleted_file(
+        self, change: ChangeRequest, staged: dict[str, StagedFile]
+    ) -> tuple[dict[str, Any], str, int, int]:
+        target = self.resolve_file_existing(change.path)
+        if target.path.is_dir():
+            raise ToolFailure("PATCH_FAILED", "Cannot delete a directory.", category="validation")
+        baseline = FileBaseline.capture(target.path)
+        self._check_revision(change, target.display, baseline.text(target.display))
+        staged[target.display] = StagedFile(
+            target.display, target.path, None, baseline, baseline.mode, action="delete"
+        )
+        entry = {"path": target.display, "operation": "delete", "total_lines": 0, "changed_ranges": []}
+        return entry, f"D {target.display}", 0, len((baseline.data or b"").splitlines())
+
+    def _stage_relocated_file(
+        self, change: ChangeRequest, staged: dict[str, StagedFile]
+    ) -> tuple[dict[str, Any], str, int, int]:
+        source = self.resolve_file_existing(change.path)
+        if source.path.is_dir():
+            raise ToolFailure("PATCH_FAILED", f"Cannot {change.action} a directory.", category="validation")
+        destination = str(change.destination)
+        dest = self.resolve_file_for_write(destination)
+        if dest.existed:
+            raise ToolFailure(
+                "PATCH_FAILED",
+                f"Cannot {change.action} onto {dest.display}: it already exists.",
+                category="validation",
+            )
+        baseline = FileBaseline.capture(source.path)
+        content = baseline.text(source.display)
+        self._check_revision(change, source.display, content)
+        # A copy must still fail if its source changed underneath us, so the
+        # source is staged as a baseline assertion that writes nothing.
+        staged[source.display] = StagedFile(
+            source.display,
+            source.path,
+            None if change.action == "move" else content,
+            baseline,
+            baseline.mode,
+            action="delete" if change.action == "move" else "verify",
+        )
+        staged[dest.display] = StagedFile(
+            dest.display,
+            dest.path,
+            content,
+            FileBaseline.capture(dest.path),
+            baseline.mode,
+            action="write",
+        )
+        entry = {
+            "path": dest.display,
+            "old_path": source.display,
+            "operation": change.action,
+            **_patch_evidence(content, _whole_file_range(content)),
+        }
+        marker = "R" if change.action == "move" else "C"
+        return entry, f"{marker} {source.display} -> {dest.display}", _count_lines(content), 0
+
+    def _check_revision(self, change: ChangeRequest, display: str, current: str) -> None:
+        """Refuse to write over bytes the caller has not seen.
+
+        The revision is the whole point of the tool: line numbers are only
+        meaningful against a known file version, and a stale request that
+        still parses is exactly the failure this refuses to commit.
+        """
+
+        actual = content_revision(current)
+        if change.revision is None:
+            raise ToolFailure(
+                "REVISION_REQUIRED",
+                f"changes[{change.index}] must carry the revision of {display}. "
+                f"Read the file first; its current revision is {actual}.",
+                category="validation",
+                retryable=True,
+                details={
+                    "path": display,
+                    "current_revision": actual,
+                    "revision_algorithm": REVISION_ALGORITHM,
+                    "next_action": {"tool": "read_file", "arguments": {"path": display}},
+                },
+            )
+        expected = normalize_revision(change.revision, f"changes[{change.index}]")
+        if expected != actual:
+            # The current revision is deliberately withheld: pasted back with
+            # line numbers from the old version, it would pass this check and
+            # edit the wrong lines. read_file returns it together with the
+            # line numbers that belong to it.
+            raise ToolFailure(
+                "REVISION_MISMATCH",
+                f"{display} has changed since revision {expected} was read (by another write, or by "
+                "an earlier apply_changes/apply_patch call). Re-read it with read_file, which returns "
+                "the new revision and the current line numbers, and rebuild the change against those.",
+                category="conflict",
+                retryable=True,
+                details={
+                    "path": display,
+                    "expected_revision": expected,
+                    "revision_algorithm": REVISION_ALGORITHM,
+                    "total_lines": _count_lines(current),
+                    "next_action": {"tool": "read_file", "arguments": {"path": display, "line_numbers": True}},
+                },
+            )
 
     def _validate_patch_path(self, raw_path: str, *, require_existing: bool) -> None:
         if require_existing:
@@ -3356,6 +3716,7 @@ class Runtime:
         timeout_ms: int,
         tty: bool,
         stdin_text: str,
+        keep_stdin_open: bool = False,
         env: Any,
     ) -> str:
         raw_env = env if isinstance(env, dict) else {}
@@ -3365,6 +3726,7 @@ class Runtime:
             "timeout_ms": timeout_ms,
             "tty": tty,
             "stdin": stdin_text,
+            "keep_stdin_open": keep_stdin_open,
             "env": {str(key): str(value) for key, value in sorted(raw_env.items(), key=lambda item: str(item[0]))},
         }
         return hashlib.sha256(json_response_payload(execution)).hexdigest()
@@ -3509,6 +3871,7 @@ class Runtime:
         max_output_bytes = int(args.get("max_output_bytes", 65536))
         tty = bool(args.get("tty", False))
         stdin_text = str(args.get("stdin", ""))
+        keep_stdin_open = bool(args.get("keep_stdin_open", False))
         operation_id = str(args.get("operation_id") or "").strip() or None
         operation_digest = (
             self._exec_operation_digest(
@@ -3517,6 +3880,7 @@ class Runtime:
                 timeout_ms=timeout_ms,
                 tty=tty,
                 stdin_text=stdin_text,
+                keep_stdin_open=keep_stdin_open,
                 env=args.get("env", {}),
             )
             if operation_id is not None
@@ -3680,7 +4044,7 @@ class Runtime:
             if process.poll() is None:
                 raise
         finally:
-            if not tty:
+            if not tty and not keep_stdin_open:
                 command.close_stdin()
         initial_wait = max(0, min(yield_ms, 30000)) / 1000.0
 
@@ -6685,7 +7049,9 @@ def tool_output_properties() -> dict[str, dict[str, Any]]:
             "truncated": boolean,
             "warnings": string_array,
         },
+        "apply_changes": {"dry_run": boolean, "clean": boolean, "already_applied": boolean, "deduplicated": boolean, "revision_algorithm": string, "summary": string, "affected_files": object_array, "additions": integer, "removals": integer, "warnings": string_array},
         "apply_patch": {
+            "already_applied": boolean,
             "dry_run": boolean,
             "clean": boolean,
             "deduplicated": boolean,
@@ -6928,6 +7294,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         "read_file": object_schema(
             {
                 "path": {**string, "minLength": 1},
+                "line_numbers": {**boolean, "default": False},
                 "if_revision": {
                     **string,
                     "minLength": 1,
@@ -7001,6 +7368,32 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             },
             ["query"],
         ),
+        "apply_changes": object_schema(
+            {
+                "changes": {
+                    "type": "array", "maxItems": MAX_CHANGES_PER_CALL,
+                    "items": object_schema({
+                        "action": {**string, "enum": list(CHANGE_ACTIONS)},
+                        "path": {**string, "minLength": 1},
+                        "revision": {**string, "minLength": 1},
+                        "content": string,
+                        "destination": {**string, "minLength": 1},
+                        "edits": {
+                            "type": "array", "minItems": 1, "maxItems": MAX_EDITS_PER_CHANGE,
+                            "items": object_schema({
+                                "op": {**string, "enum": list(EDIT_OPERATIONS)},
+                                "start_line": {**integer, "minimum": 1},
+                                "end_line": {**integer, "minimum": 1},
+                                "line": {**integer, "minimum": 0},
+                                "content": string,
+                            }, ["op"]),
+                        },
+                    }, ["action", "path"]),
+                },
+                "dry_run": {**boolean, "default": False},
+                "idempotency_key": {**string, "minLength": 1, "maxLength": 200},
+            }, ["changes"],
+        ),
         "apply_patch": object_schema(
             {
                 "patch": {**string, "minLength": 1},
@@ -7029,6 +7422,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "verbosity": {**string, "enum": ["summary", "preview", "full"]},
                 "preview_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 4096},
                 "stdin": {**string, "default": ""},
+                "keep_stdin_open": {**boolean, "default": False},
                 "tty": {**boolean, "default": False},
                 "env": {"type": "object", "additionalProperties": {"type": "string"}, "default": {}},
             },

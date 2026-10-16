@@ -8,6 +8,7 @@ migration guides, and archived workflow designs are intentionally not retained.
 - [Quickstart](quickstart.md)
 - [MCP client configuration](mcp-client-config.md)
 - [Remote MCP](remote-mcp.md)
+- [Cloudflare fixed-link setup (简体中文)](cloudflare-fixed-link-guide.zh-CN.md)
 - [Docker](docker.md)
 - [Troubleshooting](troubleshooting.md)
 

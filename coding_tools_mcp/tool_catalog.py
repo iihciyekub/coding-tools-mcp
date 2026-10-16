@@ -23,6 +23,7 @@ _GROUPS: dict[str, tuple[tuple[str, str], ...]] = {
         ("list_dir", "Inspect immediate directory structure; use list_files for glob-based lookup."),
         ("list_files", "Find paths by filename or glob; use search_text for file contents."),
         ("search_text", "Find literal text, an error message, or a regex; this is not semantic reference resolution."),
+        ("apply_changes", "Edit known line ranges using the revision from read_file; group multiple files in one atomic call."),
         ("apply_patch", "Make explicit source edits using unique context; inspect affected files before patching."),
         ("view_image", "Inspect a known image in the bound project when visual evidence is needed."),
     ),

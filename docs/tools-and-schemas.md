@@ -9,7 +9,7 @@ primitives rather than an agent workflow engine or a second tool-discovery layer
 
 ## Fixed inventory
 
-The implementation declares exactly 32 tools as contracts, but the normal macOS
+The implementation declares exactly 33 tools as contracts, but the normal macOS
 project runtime intentionally exposes a smaller model-facing core. Diagnostic
 and Git-history helpers can remain implemented without occupying `tools/list`.
 Gateway mode adds `project_context` and, only when explicit local capability
@@ -26,6 +26,7 @@ roots are configured, three read-only catalog tools. There is no workflow-tool m
 - `list_dir`: **direct** — List directory entries inside the configured file scope.
 - `list_files`: **direct** — List files using `include_globs` / `exclude_globs`. An omitted `path` uses the configured default search folder; an explicit relative path uses the bound Project root.
 - `search_text`: **direct** — Search UTF-8 files for text or regex matches. An omitted `path` uses the configured default search folder; an explicit relative path uses the bound Project root.
+- `apply_changes`: **direct** — Atomically create, write, edit, delete, move, or copy files against the revision returned by `read_file`.
 - `apply_patch`: **direct** — Stage, validate, and atomically apply a patch envelope. Example: *** Begin Patch *** Update File: app.py @@ -old +new *** End Patch
 - `exec_command`: **direct** — Run a bounded command under runtime policy. Pass workdir explicitly for reconnect-safe paths. A still-running command returns command_id. Example: {"cmd":"pytest -q","workdir":".","yield_time_ms":30000}. Retained output is bounded per stream; for very large output redirect to a file (cmd > out.log 2>&1) and page it with read_file or search_text.
 - `get_command`: **direct** — Read or wait for command status without consuming output cursors. Resolve by command_id or operation_id and use `wait_ms` to wait for completion; returned output_refs can be paged with read_output.
@@ -105,11 +106,13 @@ count, dimensions, resize metadata, and warnings, but no base64 or data URL.
 *** End Patch
 ```
 
-All operations are parsed and matched before writes. Context must be unique.
-`@@ <scope>` headers can disambiguate repeated code inside an enclosing
-function/class-like scope, and `*** End of File` can anchor a hunk to the file
-tail. Matching is exact first, then conservatively ignores trailing whitespace;
-indentation is never fuzzed. Successful updates report `match_quality`,
+All operations are parsed and matched before writes. Unanchored context must be unique.
+`@@ <text>` anchors advance a forward cursor; consecutive anchors are found in
+sequence and select the first match after them. `*** End of File` requires the
+file tail. Matching tries exact, trailing-whitespace, then indentation-width
+matching and reports any downgrade. Already-applied detection requires meaningful
+exact or trailing-whitespace evidence; blank and punctuation-only context cannot
+turn a failed patch into success. Successful updates report `match_quality`,
 `changed_ranges`, and the resulting SHA-256 `revision`.
 Files are prepared in their destination directories, fsynced, baseline-checked,
 and installed with atomic replacement. Multi-file failure restores prior files.
@@ -124,7 +127,30 @@ value as `if_revision`; if the file is unchanged, the result sets
 intended for long agent sessions that revisit already-read files.
 `apply_patch.expected_revisions` may bind selected paths to revisions for
 optimistic concurrency. An optional `idempotency_key` makes retries replay the
-original result instead of applying the same patch twice.
+original result instead of applying the same patch twice. Both write tools share
+a 64-entry LRU replay cache per project runtime; dry runs do not enter it. The cache
+is in memory and does not survive runtime restart.
+
+`read_file` pages end on physical LF, CRLF, or CR line boundaries (except an
+oversized first-line preview). Continuations retain the requested end line.
+`line_numbers=true` adds line numbers to model text without changing structured
+file content. Every read exposes its revision in model text.
+
+`apply_changes` uses one entry per resolved file path. Existing-file actions
+require a revision from the same read as their line numbers. A revision mismatch
+returns a re-read action and never supplies a replacement revision for stale edits.
+Create/write use `content`; edit uses `edits` with `replace`, `delete`,
+`insert_before`, or `insert_after` and physical line numbers. Multiple files are
+staged and baseline-checked together; failure leaves all originals intact.
+
+```json
+{"changes":[{"action":"edit","path":"app.py","revision":"<sha256 from read_file>","edits":[{"op":"replace","line":2,"content":"updated line"}]}],"idempotency_key":"edit-001"}
+```
+
+For a pipe-based REPL, `exec_command.keep_stdin_open=true` retains stdin for
+subsequent `write_stdin` calls. The default still closes non-TTY stdin. Commands
+and retained output continue to belong to their project runtime across transport
+reconnects.
 
 ## Model-ready examples
 

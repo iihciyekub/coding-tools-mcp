@@ -146,11 +146,17 @@ def _render_read_file(payload: dict[str, Any]) -> str:
     content = payload.get("content")
     if not isinstance(content, str):
         return ""
+    if payload.get("line_numbers"):
+        start = int(payload.get("start_line", 1))
+        lines = content.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        if lines and not lines[-1]:
+            lines.pop()
+        content = "\n".join(f"{index}: {line}" for index, line in enumerate(lines, start))
     if not payload.get("truncated"):
-        return content
+        return f"[revision={payload['revision']}]\n{content}" if payload.get("revision") else content
     shown = (
         f"Showing lines {payload.get('start_line', '?')}-{payload.get('end_line', '?')}"
-        f" of {payload.get('total_lines', '?')}"
+        f" of {payload.get('total_lines', '?')} revision={payload.get('revision', 'unknown')}"
     )
     next_start = payload.get("next_start_line")
     next_call = _render_next_action(payload)
@@ -232,11 +238,15 @@ def _render_search(payload: dict[str, Any]) -> str:
 
 
 def _render_patch(payload: dict[str, Any]) -> str:
-    prefix = "Patch validated" if payload.get("dry_run") else "Patch applied"
+    prefix = "Patch validated" if payload.get("dry_run") else ("Already applied" if payload.get("already_applied") else "Patch applied")
     files = payload.get("affected_files")
     count = len(files) if isinstance(files, list) else 0
     changes = f" (+{payload.get('additions', 0)} -{payload.get('removals', 0)})"
     summary = str(payload.get("summary") or "").strip()
+    revision_key = "would_be_revision" if payload.get("dry_run") else "revision"
+    evidence = [f"{item.get('path')}: {revision_key}={item['revision']}" for item in (files or []) if isinstance(item, dict) and item.get("revision")]
+    if evidence:
+        summary += "\n" + "\n".join(evidence)
     return f"{prefix} to {count} file{'s' if count != 1 else ''}{changes}." + (
         f"\n{summary}" if summary else ""
     )
@@ -731,6 +741,7 @@ _RENDERERS = {
     "list_files": _render_list,
     "search_text": _render_search,
     "apply_patch": _render_patch,
+    "apply_changes": _render_patch,
     "exec_command": _render_exec,
     "get_command": _render_command_status,
     "list_commands": _render_command_list,

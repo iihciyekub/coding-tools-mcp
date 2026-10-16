@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { WorkspaceProfile } from "./types";
-import { frpSnippet, normalizeDomain, publicEndpoint, recommendedPublicUrl, workspaceHue } from "./utils";
+import { frpSnippet, normalizeDomain, normalizePublicOrigin, publicEndpoint, recommendedPublicUrl, workspaceHue } from "./utils";
 
 const profile: WorkspaceProfile = {
   id: "a".repeat(32),
@@ -22,6 +22,20 @@ const profile: WorkspaceProfile = {
 describe("desktop URL helpers", () => {
   it("builds the public MCP endpoint", () => {
     expect(publicEndpoint(profile)).toBe("https://tax.example.com/mcp");
+  });
+
+  it("accepts a pasted MCP endpoint without duplicating its path", () => {
+    const origin = normalizePublicOrigin(" https://mcp-dev.example.com/mcp/ ");
+    expect(origin).toBe("https://mcp-dev.example.com");
+    const named: WorkspaceProfile = { ...profile, tunnel: { ...profile.tunnel, type: "cloudflare", cloudflare_mode: "named", public_url: origin } };
+    expect(publicEndpoint(named)).toBe("https://mcp-dev.example.com/mcp");
+    expect(normalizePublicOrigin("https://mcp-dev.example.com/")).toBe(origin);
+  });
+
+  it("keeps unsupported endpoint inputs for origin validation", () => {
+    for (const invalid of ["http://example.com/mcp", "https://user:pass@example.com/mcp", "https://example.com/other/mcp", "https://example.com/mcp?project=one", "https://example.com/mcp#section", "not-a-url"]) {
+      expect(normalizePublicOrigin(invalid)).toBe(invalid);
+    }
   });
 
   it("builds a safe FRP snippet", () => {

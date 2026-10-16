@@ -1319,7 +1319,8 @@ Maven home: /usr/share/maven
                 if item.get("type") == "text"
             )
             self.assertEqual(payload["content"], content)
-            self.assertEqual(model_text, content)
+            self.assertTrue(model_text.endswith(content))
+            self.assertIn(f"revision={payload['revision']}", model_text)
             self.assertNotIn("preview truncated", model_text)
 
     def agent_text(self, result: dict[str, object]) -> str:

@@ -37,6 +37,7 @@ export interface GatewayConfig {
   tunnel: TunnelConfig;
   auth: AuthConfig;
   local_capability_roots: string[];
+  auto_start: boolean;
   auto_discover_local_capabilities: boolean;
 }
 

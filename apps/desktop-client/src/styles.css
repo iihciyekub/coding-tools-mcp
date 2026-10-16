@@ -282,3 +282,13 @@ html.project-window-root, html.project-window-root body, html.project-window-roo
 .migration-banner { padding: 7px 11px; color: var(--text); background: var(--hover); border-bottom: 1px solid var(--line); font-size: 10px; line-height: 1.4; }
 
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
+
+.connection-heading { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 3px 7px; border: 0; background: transparent; cursor: pointer; }
+.connection-heading strong { font-size: 11px; font-weight: 600; }
+.connection-heading > span { display: flex; align-items: center; gap: 2px; color: var(--muted); font-size: 11px; }
+.connection-heading .icon { --icon-size: 12px; }
+.connection-field { display: grid; gap: 6px; margin-top: 14px; font-size: 12px; }
+.connection-field input { width: 100%; min-width: 0; padding: 8px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--raised); color: var(--text); font: inherit; user-select: text; }
+.connection-field input:focus-visible { outline: 2px solid var(--focus); outline-offset: -1px; }
+.connection-page > .primary-button { margin-top: 12px; }
+.connection-error { margin: 6px 0 0; color: var(--danger); font-size: 11px; line-height: 1.4; }

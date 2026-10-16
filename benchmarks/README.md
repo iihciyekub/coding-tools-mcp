@@ -15,3 +15,9 @@ This tree owns deterministic dogfood and benchmark/regression harnesses.
 The dogfood runner may start the server and prepare fixtures. It does not use
 direct filesystem, shell, or git operations for the coding loop after the MCP
 server is reachable.
+
+To compare project routing when Workspace discovery becomes due, run
+`PYTHONPATH=. .venv/bin/python -m benchmarks.project_routing --baseline-ref <commit>`.
+The fixture uses 1,200 temporary directories and never starts a project runtime.
+It measures local selector latency; background discovery CPU, network, Cloudflare,
+and model latency are not included. `--report-json <path>` saves the result.

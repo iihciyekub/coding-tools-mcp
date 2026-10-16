@@ -1,0 +1,25 @@
+{
+  "date": "2026-10-16",
+  "baseline_commit": "c8c34bea4997b5e3f8bc76b54a7c5ec3d42d8fcf",
+  "platform": "macOS-27.2-arm64-arm-64bit",
+  "fixture_directories": 1200,
+  "metric": "project selector latency when discovery is due",
+  "results": {
+    "baseline": {
+      "samples": 10,
+      "p50_ms": 59.458,
+      "max_ms": 60.739
+    },
+    "updated": {
+      "samples": 10,
+      "p50_ms": 0.455,
+      "max_ms": 0.495
+    }
+  },
+  "notes": [
+    "Local synthetic warm-filesystem microbenchmark; excludes network, model latency, installed app and Cloudflare.",
+    "Background scanning still performs discovery work; request routing no longer waits for it.",
+    "Force/startup scans remain synchronous. No filesystem cache or revision guarantees were weakened."
+  ],
+  "reproduce": "PYTHONPATH=. .venv/bin/python -m benchmarks.project_routing --baseline-ref c8c34be"
+}

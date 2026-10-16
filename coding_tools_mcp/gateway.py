@@ -171,7 +171,7 @@ class HTTPProjectRuntime:
         retry_safe = (
             name in RETRYABLE_READ_TOOLS
             or (name == "exec_command" and bool(tool_arguments.get("operation_id")))
-            or (name == "apply_patch" and bool(tool_arguments.get("idempotency_key")))
+            or (name in {"apply_patch", "apply_changes"} and bool(tool_arguments.get("idempotency_key")))
         )
         attempts = 2 if retry_safe else 1
         last_error: RuntimeError | None = None
@@ -352,6 +352,10 @@ class ProjectRegistry:
         self._workspaces: dict[str, ProjectDefinition] = dict(self._configured_workspaces)
         self._workspace_projects: dict[str, ProjectDefinition] = {}
         self._last_scan = 0.0
+        self._scan_epoch = 0
+        self._scan_thread: threading.Thread | None = None
+        self._closed = False
+        self._pending_removed: set[str] = set()
         self._definitions: dict[str, ProjectDefinition] = (
             {bootstrap.id: bootstrap} if bootstrap is not None else {}
         )
@@ -473,6 +477,7 @@ class ProjectRegistry:
         with self._lock:
             # Rebuild derived definitions from the authoritative workspace entries.
             # Reusing live paths keeps on-demand directories indexed across scans.
+            self._scan_epoch += 1
             self._workspaces = workspaces
             for definition in self._workspace_projects.values():
                 derived = self._definition_for_path(definition.path)
@@ -504,7 +509,7 @@ class ProjectRegistry:
             self._generation = raw.get("generation")
             if not workspaces:
                 self._workspace_projects = {}
-            return removed | self._refresh_workspace_index(force=True)
+            return removed | self._refresh_workspace_index(force=force)
 
     @staticmethod
     def _workspace_project(workspace: ProjectDefinition, path: Path) -> ProjectDefinition:
@@ -530,16 +535,13 @@ class ProjectRegistry:
         owner = max(owners, key=lambda item: len(item.path.parts))
         return self._workspace_project(owner, resolved)
 
-    def _refresh_workspace_index(self, *, force: bool = False) -> set[str]:
-        """Bounded discovery is an index; access never depends on scan coverage."""
-        if not self._workspaces or (not force and time.monotonic() - self._last_scan < 2):
-            return set()
-        self._last_scan = time.monotonic()
-        discovered: dict[str, ProjectDefinition] = {}
-        candidates = [item.path for item in self._workspace_projects.values()]
+    @staticmethod
+    def _scan_workspace_paths(workspaces: tuple[ProjectDefinition, ...], existing: tuple[Path, ...]) -> dict[str, ProjectDefinition]:
+        """Build an immutable discovery snapshot without holding the routing lock."""
+        candidates = set(existing)
         markers = (".git", "pyproject.toml", "package.json", "Cargo.toml", "Package.swift", "go.mod", "pom.xml")
-        for workspace in self._workspaces.values():
-            candidates.append(workspace.path)
+        for workspace in workspaces:
+            candidates.add(workspace.path)
             pending = [(workspace.path, 0)]
             visited = 0
             while pending and visited < 2000:
@@ -550,29 +552,73 @@ class ProjectRegistry:
                     continue
                 for child in children:
                     visited += 1
-                    if visited > 2000:
-                        break
                     if child.name.startswith(".") or child.name in SKIPPED_CONTEXT_DIRS or child.is_symlink() or not child.is_dir():
                         continue
                     if depth == 0 or any((child / marker).exists() for marker in markers):
-                        candidates.append(child)
+                        candidates.add(child)
                     if depth < 7:
                         pending.append((child, depth + 1))
-        for candidate in candidates:
-            definition = self._definition_for_path(candidate)
-            if definition is not None:
+        discovered: dict[str, ProjectDefinition] = {}
+        for path in candidates:
+            try:
+                resolved = path.resolve(strict=True)
+                if not resolved.is_dir():
+                    continue
+            except (OSError, RuntimeError, ValueError):
+                continue
+            owners = [item for item in workspaces if resolved.is_relative_to(item.path)]
+            if owners:
+                definition = ProjectRegistry._workspace_project(max(owners, key=lambda item: len(item.path.parts)), resolved)
                 discovered[definition.id] = definition
-        removed = set(self._workspace_projects) - set(discovered)
-        for project_id in removed:
-            self._definitions.pop(project_id, None)
-            runtime = self._runtimes.pop(project_id, None)
-            if runtime is not None and project_id in self._owned_runtime_ids:
+        return discovered
+
+    def _refresh_workspace_index(self, *, force: bool = False) -> set[str]:
+        """Only explicit/startup refreshes wait for discovery; requests use a snapshot."""
+        removed = self._pending_removed
+        self._pending_removed = set()
+        if self._closed or not self._workspaces or (not force and time.monotonic() - self._last_scan < 2):
+            return removed
+        if not force and self._scan_thread is not None and self._scan_thread.is_alive():
+            return removed
+        self._last_scan = time.monotonic()
+        if force:
+            self._scan_epoch += 1
+        epoch = self._scan_epoch
+        workspaces = tuple(self._workspaces.values())
+        existing = tuple(item.path for item in self._workspace_projects.values())
+        initial_ids = set(self._workspace_projects)
+
+        def scan() -> None:
+            discovered = self._scan_workspace_paths(workspaces, existing)
+            retired = []
+            with self._lock:
+                if self._closed or epoch != self._scan_epoch:
+                    return
+                # A directory selected while discovery was running is already
+                # authorized and must not disappear when the snapshot arrives.
+                discovered.update({key: item for key, item in self._workspace_projects.items() if key not in initial_ids})
+                missing = set(self._workspace_projects) - set(discovered)
+                for project_id in missing:
+                    self._definitions.pop(project_id, None)
+                    runtime = self._runtimes.pop(project_id, None)
+                    if runtime is not None and project_id in self._owned_runtime_ids:
+                        retired.append(runtime)
+                    self._owned_runtime_ids.discard(project_id)
+                self._workspace_projects = discovered
+                self._definitions.update(discovered)
+                self._pending_removed.update(missing)
+                if self.registry_file is None:
+                    self._default_project_id = next(iter(self._workspaces)) if len(self._workspaces) == 1 else None
+            for runtime in retired:
                 runtime.close()
-            self._owned_runtime_ids.discard(project_id)
-        self._workspace_projects = discovered
-        self._definitions.update(discovered)
-        if self.registry_file is None:
-            self._default_project_id = next(iter(self._workspaces)) if len(self._workspaces) == 1 else None
+
+        if force:
+            scan()
+            removed.update(self._pending_removed)
+            self._pending_removed.clear()
+        else:
+            self._scan_thread = threading.Thread(target=scan, name="project-discovery", daemon=True)
+            self._scan_thread.start()
         return removed
 
     def definitions(self) -> list[ProjectDefinition]:
@@ -656,6 +702,8 @@ class ProjectRegistry:
 
     def close(self) -> None:
         with self._lock:
+            self._closed = True
+            self._scan_epoch += 1
             owned = [
                 runtime
                 for project_id, runtime in self._runtimes.items()

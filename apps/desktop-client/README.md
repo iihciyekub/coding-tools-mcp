@@ -8,18 +8,23 @@ API.
 ## Features
 
 - Compact menu-bar panel with no macOS Dock icon
-- Multiple workspace profiles with one automatically assigned local port per workspace
+- Multiple workspace profiles behind one shared Gateway and one public connection
 - Workspace profiles own access permissions; child projects inherit them and new
   directories can be used immediately without registration. See the authoritative
   [Workspace authorization and Project index contract](../../docs/project-bound-persistent-gateway-spec.zh-CN.md#4-project-registry).
 - Mode-first profile creation: both Standard and Full Access ask for a workspace
   folder so project context is always explicit. Full Access does not synthesize a
   folder allowlist: host-mode file tools and commands can use the host filesystem.
-- One-click OAuth runtime startup through Cloudflare Quick Tunnels
+- OAuth startup with a temporary Quick Tunnel or a fixed Cloudflare Named Tunnel;
+  configure the shared link in **Connection settings**. See the
+  [connection and recovery contract](../../docs/project-bound-persistent-gateway-spec.zh-CN.md#固定公网连接与恢复).
+  For field-by-field setup, see the [Cloudflare fixed-link guide (简体中文)](../../docs/cloudflare-fixed-link-guide.zh-CN.md).
+- Background recovery after runtime/tunnel process failure, optional connection on app
+  launch, and cached public reachability checks independent of panel visibility.
 - A simplified per-workspace access menu: **Standard** maps to the workspace-confined
   trusted runtime, while **Full Access** maps to host mode for agent workflows that
   intentionally need the wider Mac environment. Desktop profiles use only these two modes.
-- **Allowed folders** apply to Standard access: ordinary file tools and `apply_patch`
+- **Allowed folders** apply to Standard access: ordinary file tools, `apply_patch`, and `apply_changes`
   can use the workspace plus explicitly selected folders. In Full Access, file tools
   and host commands can use the host filesystem; relative paths still resolve from
   the selected project directory. Git evidence, LSP, check discovery, and project
@@ -48,8 +53,9 @@ API.
   other agent directories. Additional directories can be added in settings, and
   automatic discovery can be switched off. ChatGPT can search their metadata and read `SKILL.md` files; local plugin
   actions and hooks do not become callable without separate MCP tools.
-- The compact panel surfaces pending approval decisions only when user action is
-  required. Runtime and installation logs remain directly accessible in the same panel.
+- **More** keeps connection settings, environment setup, runtime logs, and language.
+  Workspace settings remain available from the access button on Home or a workspace
+  row; duplicate shortcuts and developer links are omitted from More.
 
 The first launch imports the previous PySide client's `profiles.json`. Legacy
 `secrets.json` values are moved into the system keychain and the plaintext file

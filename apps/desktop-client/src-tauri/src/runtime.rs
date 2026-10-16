@@ -1,4 +1,9 @@
 mod environment;
+mod public_health;
+mod supervisor;
+#[cfg(unix)]
+pub use supervisor::install_termination_handler;
+pub use supervisor::maintain_connection;
 
 use crate::models::{GatewayConfig, LogBundle, RuntimeStatus, WorkspaceProfile, MCP_ENDPOINT_PATH};
 use crate::resource_installer;
@@ -9,12 +14,12 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::hash::{Hash, Hasher};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Seek, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -175,6 +180,13 @@ pub struct RuntimeManager {
     resource_dir: PathBuf,
     data_dir: PathBuf,
     runtime_ready_hint: bool,
+    pub connection_wanted: bool,
+    recovery_after: Option<Instant>,
+    recovery_failures: u32,
+    public_healthy: Option<bool>,
+    public_error: Option<&'static str>,
+    public_checked_at: Option<Instant>,
+    last_gateway_error: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -198,6 +210,13 @@ impl RuntimeManager {
             resource_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources"),
             data_dir: PathBuf::new(),
             runtime_ready_hint: false,
+            connection_wanted: false,
+            recovery_after: None,
+            recovery_failures: 0,
+            public_healthy: None,
+            public_error: None,
+            public_checked_at: None,
+            last_gateway_error: None,
         }
     }
 
@@ -238,6 +257,18 @@ impl RuntimeManager {
         }
         if self.gateway.is_some() {
             return self.gateway_status(profile);
+        }
+        if self.connection_wanted {
+            let mut status = RuntimeStatus::stopped(profile.runtime.local_port);
+            status.state = "starting".into();
+            status.public_message = "Reconnecting automatically".into();
+            return status;
+        }
+        if let Some(error) = &self.last_gateway_error {
+            let mut status = RuntimeStatus::stopped(profile.runtime.local_port);
+            status.state = "error".into();
+            status.public_message = error.clone();
+            return status;
         }
         if self.stopping.contains_key(&profile.id) {
             let mut status = RuntimeStatus::stopped(profile.runtime.local_port);
@@ -339,7 +370,14 @@ impl RuntimeManager {
                 .tunnel
                 .as_mut()
                 .is_some_and(ManagedChild::is_running);
-        let (state, public_message) = if tunnel_ok {
+        let (state, public_message) = if tunnel_ok && self.public_healthy == Some(false) {
+            (
+                "error",
+                self.public_error
+                    .unwrap_or("Public endpoint is unreachable; checking again automatically")
+                    .into(),
+            )
+        } else if tunnel_ok {
             if profile.tunnel.r#type == "cloudflare" && public_url.is_empty() {
                 (
                     "error",
@@ -348,7 +386,14 @@ impl RuntimeManager {
             } else if profile.tunnel.r#type == "frp" {
                 ("running", "External FRP client required".into())
             } else {
-                ("running", public_url.clone())
+                (
+                    if self.public_healthy == Some(true) {
+                        "running"
+                    } else {
+                        "starting"
+                    },
+                    public_url.clone(),
+                )
             }
         } else {
             ("error", "The Cloudflare tunnel is not connected".into())
@@ -376,6 +421,15 @@ pub fn start_gateway(
     profiles: &[WorkspaceProfile],
     gateway_config: &GatewayConfig,
 ) -> Result<RuntimeStatus, String> {
+    start_gateway_inner(manager, profiles, gateway_config, false)
+}
+
+fn start_gateway_inner(
+    manager: &Arc<Mutex<RuntimeManager>>,
+    profiles: &[WorkspaceProfile],
+    gateway_config: &GatewayConfig,
+    recovery: bool,
+) -> Result<RuntimeStatus, String> {
     let gateway_profile = profiles
         .first()
         .cloned()
@@ -386,7 +440,7 @@ pub fn start_gateway(
     }
     let operation = Arc::new(PendingOperation::default());
     let cancelled = &operation.cancelled;
-    let (resources, data) = {
+    let (resources, data, stale) = {
         let mut state = manager
             .lock()
             .map_err(|_| "Runtime manager is unavailable")?;
@@ -396,6 +450,15 @@ pub fn start_gateway(
         if state.gateway_stopping.is_some() {
             return Err("The shared Gateway is still stopping. Please retry shortly.".into());
         }
+        if recovery && !state.connection_wanted {
+            return Ok(RuntimeStatus::stopped(gateway_profile.runtime.local_port));
+        }
+        if !recovery {
+            state.connection_wanted = true;
+            state.last_gateway_error = None;
+            state.recovery_failures = 0;
+            state.recovery_after = None;
+        }
         if state.gateway_is_active() {
             return Ok(state.gateway_status(&gateway_profile));
         }
@@ -403,23 +466,37 @@ pub fn start_gateway(
             return Err("The shared Gateway is already preparing its runtime.".into());
         }
         state.gateway_preparing = Some(Arc::clone(&operation));
-        (state.resource_dir.clone(), state.data_dir.clone())
+        (
+            state.resource_dir.clone(),
+            state.data_dir.clone(),
+            state.gateway.take(),
+        )
     };
+    if let Some(mut stale) = stale {
+        terminate_gateway_session(&mut stale);
+    }
 
     let log_dir = data.join("logs").join("gateway");
-    fs::create_dir_all(&log_dir).map_err(|error| error.to_string())?;
-    let runtime_build_id = environment::runtime_build_id(&resources)?;
-    let registry_path = data
-        .join("gateway")
-        .join(&runtime_build_id)
-        .join("project-registry.json");
-    let resolved = environment::resolve(&resources, &data, &log_dir, &effective_path(), cancelled)
-        .map(|command| ResolvedRuntime {
-            command,
-            build_id: runtime_build_id,
-        });
+    let prepared = (|| {
+        fs::create_dir_all(&log_dir).map_err(|error| error.to_string())?;
+        let runtime_build_id = environment::runtime_build_id(&resources)?;
+        let registry_path = data
+            .join("gateway")
+            .join(&runtime_build_id)
+            .join("project-registry.json");
+        let command =
+            environment::resolve(&resources, &data, &log_dir, &effective_path(), cancelled)?;
+        Ok::<_, String>((
+            ResolvedRuntime {
+                command,
+                build_id: runtime_build_id,
+            },
+            registry_path,
+        ))
+    })();
+    let resolved = prepared;
     let runtime_ready = resolved.is_ok();
-    let startup = resolved.and_then(|resolved| {
+    let startup = resolved.and_then(|(resolved, registry_path)| {
         if gateway_profile.tunnel.r#type == "cloudflare" && resolve_cloudflared(&data).is_err() {
             resource_installer::install("cloudflared", &data, cancelled)?;
         }
@@ -460,8 +537,21 @@ pub fn start_gateway(
     }
     state.gateway_preparing = None;
     operation.finish();
-    let session = startup?;
+    let session = match startup {
+        Ok(session) => session,
+        Err(error) => {
+            if !recovery {
+                state.connection_wanted = false;
+                state.last_gateway_error = Some(error.clone());
+            }
+            return Err(error);
+        }
+    };
     state.gateway = Some(session);
+    state.last_gateway_error = None;
+    state.public_healthy = None;
+    state.public_error = None;
+    state.public_checked_at = None;
     Ok(state.gateway_status(&gateway_profile))
 }
 
@@ -474,6 +564,13 @@ pub fn stop_gateway(
 }
 
 fn stop_gateway_processes(manager: &Arc<Mutex<RuntimeManager>>) -> Result<(), String> {
+    {
+        let mut state = manager
+            .lock()
+            .map_err(|_| "Runtime manager is unavailable")?;
+        state.connection_wanted = false;
+        state.last_gateway_error = None;
+    }
     let existing_stop = {
         let state = manager
             .lock()
@@ -1512,6 +1609,23 @@ fn runtime_environment_variables(
     }
 }
 
+fn cloudflare_command(profile: &WorkspaceProfile, executable: &Path) -> Command {
+    let mut command = Command::new(executable);
+    if profile.tunnel.cloudflare_mode == "named" {
+        command
+            .args(["tunnel", "run"])
+            .env("TUNNEL_TOKEN", profile.tunnel.cloudflare_token.trim())
+            .env_remove("TUNNEL_TOKEN_FILE");
+    } else {
+        command.args([
+            "tunnel",
+            "--url",
+            &format!("http://127.0.0.1:{}", profile.runtime.local_port),
+        ]);
+    }
+    command
+}
+
 fn spawn_cloudflare(
     profile: &WorkspaceProfile,
     log_dir: &Path,
@@ -1520,21 +1634,7 @@ fn spawn_cloudflare(
     cancelled: &AtomicBool,
 ) -> Result<ManagedChild, String> {
     let executable = resolve_cloudflared(data_dir)?;
-    let mut command = Command::new(executable);
-    if profile.tunnel.cloudflare_mode == "named" {
-        command.args([
-            "tunnel",
-            "run",
-            "--token",
-            profile.tunnel.cloudflare_token.trim(),
-        ]);
-    } else {
-        command.args([
-            "tunnel",
-            "--url",
-            &format!("http://127.0.0.1:{}", profile.runtime.local_port),
-        ]);
-    }
+    let mut command = cloudflare_command(profile, &executable);
     command
         .current_dir(&profile.path)
         .env("PATH", effective_path())
@@ -1616,6 +1716,13 @@ fn stream_tunnel_output<R: Read + Send + 'static>(
         let expression = Regex::new(r"https://[a-z0-9-]+\.trycloudflare\.com").unwrap();
         for line in BufReader::new(stream).lines().map_while(Result::ok) {
             if let Ok(mut file) = log.lock() {
+                if file
+                    .metadata()
+                    .is_ok_and(|meta| meta.len() >= 2 * 1024 * 1024)
+                {
+                    let _ = file.set_len(0);
+                    let _ = file.rewind();
+                }
                 let _ = writeln!(file, "{line}");
                 let _ = file.flush();
             }
@@ -1689,20 +1796,25 @@ fn resolve_cloudflared(data_dir: &Path) -> Result<PathBuf, String> {
 }
 
 fn effective_path() -> String {
-    let current = std::env::var("PATH").unwrap_or_default();
-    #[cfg(target_os = "macos")]
-    {
-        if let Ok(output) = Command::new("/bin/zsh")
-            .args(["-lic", "printf %s \"$PATH\""])
-            .output()
-        {
-            let login = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !login.is_empty() {
-                return format!("{login}:{current}");
+    static LOGIN_PATH: OnceLock<String> = OnceLock::new();
+    LOGIN_PATH
+        .get_or_init(|| {
+            let current = std::env::var("PATH").unwrap_or_default();
+            #[cfg(target_os = "macos")]
+            {
+                if let Ok(output) = Command::new("/bin/zsh")
+                    .args(["-lic", "printf %s \"$PATH\""])
+                    .output()
+                {
+                    let login = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !login.is_empty() {
+                        return format!("{login}:{current}");
+                    }
+                }
             }
-        }
-    }
-    current
+            current
+        })
+        .clone()
 }
 
 fn effective_ssh_auth_sock() -> Option<String> {
@@ -1833,6 +1945,143 @@ while True:
             ManagedChild { child, group_id },
             port.trim().parse().unwrap(),
         )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "isolated subprocess fixture for the termination-signal test"]
+    fn termination_signal_fixture() {
+        assert_eq!(
+            std::env::var("CODING_TOOLS_MCP_SIGNAL_FIXTURE").unwrap(),
+            "1"
+        );
+        let manager = Arc::new(Mutex::new(RuntimeManager::new()));
+        install_termination_handler(Arc::clone(&manager), || std::process::exit(0)).unwrap();
+        let (runtime, runtime_port) = direct_listener();
+        let (tunnel, tunnel_port) = direct_listener();
+        let (project, project_port) = direct_listener();
+        let ids = [
+            runtime.group_id,
+            runtime_port as u32,
+            tunnel.group_id,
+            tunnel_port as u32,
+            project.group_id,
+            project_port as u32,
+        ];
+        manager.lock().unwrap().gateway = Some(ManagedGatewaySession {
+            gateway: ManagedSession {
+                runtime,
+                tunnel: Some(tunnel),
+                public_url: Arc::new(Mutex::new(String::new())),
+                server_name: "fixture".into(),
+            },
+            projects: HashMap::from([(
+                "signal-fixture".into(),
+                ManagedProjectRuntime {
+                    runtime: project,
+                    port: project_port,
+                    fingerprint: "fixture".into(),
+                    build_id: "fixture".into(),
+                },
+            )]),
+            registry_path: PathBuf::new(),
+            resolved_runtime: ResolvedRuntime {
+                command: (PathBuf::new(), vec![]),
+                build_id: "fixture".into(),
+            },
+        });
+        println!("SIGNAL_FIXTURE {}", serde_json::to_string(&ids).unwrap());
+        loop {
+            thread::park();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn termination_signals_reap_owned_runtime_and_tunnel() {
+        for signal in [libc::SIGTERM, libc::SIGINT] {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "runtime::tests::termination_signal_fixture",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("CODING_TOOLS_MCP_SIGNAL_FIXTURE", "1")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null());
+            configure_process_group(&mut command);
+            let child = command.spawn().unwrap();
+            let group_id = child.id();
+            let mut fixture = ManagedChild { child, group_id };
+            let mut output = BufReader::new(fixture.child.stdout.take().unwrap());
+            let ids: Vec<u32> = loop {
+                let mut line = String::new();
+                assert_ne!(
+                    output.read_line(&mut line).unwrap(),
+                    0,
+                    "fixture failed to start"
+                );
+                if let Some((_, json)) = line.split_once("SIGNAL_FIXTURE ") {
+                    break serde_json::from_str(json.trim()).unwrap();
+                }
+            };
+            assert!(port_is_listening(ids[1] as u16));
+            assert!(port_is_listening(ids[3] as u16));
+            assert!(port_is_listening(ids[5] as u16));
+            unsafe {
+                libc::kill(group_id as i32, signal);
+            }
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let exit = loop {
+                if let Some(status) = fixture.child.try_wait().unwrap() {
+                    break Some(status);
+                }
+                if Instant::now() >= deadline {
+                    break None;
+                }
+                thread::sleep(Duration::from_millis(25));
+            };
+            let released = [ids[1], ids[3], ids[5]]
+                .iter()
+                .all(|port| !port_is_listening(*port as u16));
+            // Clean up our fixture descendants even when a regression makes an
+            // assertion fail. No live app or user runtime participates here.
+            for pid in [ids[0], ids[2], ids[4]] {
+                unsafe {
+                    libc::kill(-(pid as i32), libc::SIGKILL);
+                }
+            }
+            assert!(
+                exit.is_some_and(|status| status.success()),
+                "signal {signal} bypassed graceful shutdown"
+            );
+            assert!(released, "signal {signal} left an owned listener behind");
+        }
+    }
+
+    #[test]
+    fn occupied_gateway_port_is_rejected_without_stopping_its_listener() {
+        let temporary = tempfile::tempdir().unwrap();
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let profile =
+            WorkspaceProfile::new(temporary.path().to_string_lossy().into_owned(), port).unwrap();
+        let result = start_gateway_session(
+            std::slice::from_ref(&profile),
+            (&profile, &GatewayConfig::from_workspace_profile(&profile)),
+            &temporary.path().join("registry.json"),
+            &temporary.path().join("logs"),
+            ResolvedRuntime {
+                command: (PathBuf::new(), vec![]),
+                build_id: "test".into(),
+            },
+            temporary.path(),
+            &AtomicBool::new(false),
+        );
+        assert!(matches!(result, Err(error) if error.contains("already in use")));
+        assert!(port_is_listening(port));
     }
 
     #[test]

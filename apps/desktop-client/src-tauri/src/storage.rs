@@ -327,14 +327,9 @@ impl ProfileStore {
     }
 
     pub fn update(&mut self, mut profile: WorkspaceProfile) -> Result<WorkspaceProfile, String> {
+        self.gateway.apply_to_workspace_profile(&mut profile);
         profile.validate()?;
         validate_profile_uniqueness(&self.profiles, &profile)?;
-        let mut gateway = GatewayConfig::from_workspace_profile(&profile);
-        gateway.local_capability_roots = self.gateway.local_capability_roots.clone();
-        gateway.auto_discover_local_capabilities = self.gateway.auto_discover_local_capabilities;
-        save_gateway_secrets(&gateway)?;
-        self.gateway = gateway;
-        self.gateway.apply_to_workspace_profile(&mut profile);
         let target = self
             .profiles
             .iter_mut()
@@ -344,6 +339,30 @@ impl ProfileStore {
         *target = profile.clone();
         self.persist()?;
         Ok(profile)
+    }
+
+    pub fn set_connection(
+        &mut self,
+        tunnel: crate::models::TunnelConfig,
+        auto_start: bool,
+    ) -> Result<GatewayConfig, String> {
+        let mut profile = self
+            .profiles()
+            .into_iter()
+            .next()
+            .ok_or("Add a workspace before configuring the connection.")?;
+        profile.tunnel = tunnel;
+        profile.validate()?;
+        let mut gateway = self.gateway.clone();
+        gateway.tunnel = profile.tunnel;
+        gateway.auto_start = auto_start;
+        save_gateway_secrets(&gateway)?;
+        self.gateway = gateway;
+        for profile in &mut self.profiles {
+            self.gateway.apply_to_workspace_profile(profile);
+        }
+        self.persist()?;
+        Ok(self.gateway.clone())
     }
 
     pub fn set_local_capability_roots(

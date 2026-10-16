@@ -1,6 +1,29 @@
 export type Language = "en" | "zh-CN";
 
 const zh: Record<string, string> = {
+  "Connection settings": "连接设置",
+  "Connection link": "连接链接",
+  "Shared by all workspaces.": "所有工作区共用。",
+  "Temporary link": "临时链接",
+  "Fixed link": "固定链接",
+  "Connected": "已连接",
+  "Connecting…": "连接中…",
+  "Start to get a connection link": "启动后获取连接地址",
+  "Public address": "公网地址",
+  "Enter the domain only. /mcp is added automatically.": "填写 HTTPS 域名即可，/mcp 会自动添加。",
+  "Public URL must be an HTTPS origin without a path.": "公网地址请填写 HTTPS 域名，不含路径，例如 https://mcp.example.com。",
+  "Tunnel token": "隧道 Token",
+  "Create a named tunnel in Cloudflare and point its public hostname to:": "在 Cloudflare 创建命名隧道，将公网域名指向：",
+  "A temporary address changes when the connection restarts.": "临时地址在连接重启后会变化。",
+  "Connect when the app opens": "打开 App 时自动连接",
+  "Reconnect automatically after a process failure.": "进程意外退出后自动重连。",
+  "Stop the connection before changing its settings.": "请先停止连接，再修改设置。",
+  "Connection details": "连接详情",
+  "The fixed address stays the same. Your Mac must be awake and online.": "固定地址保持不变；Mac 需保持唤醒并联网。",
+  "Public endpoint is unreachable; checking again automatically": "公网暂时不可达，正在自动重试",
+  "Domain lookup failed; check DNS or wait for it to update": "域名解析未生效，请检查 DNS 或等待缓存更新",
+  "Quit": "退出",
+
   "Approval needed": "待授权",
   "Choose a project folder instead of the filesystem root.": "请选择项目文件夹，不能将磁盘根目录用作工作区。",
   "Choose a project folder inside your home directory instead of the home directory itself.": "请选择主目录内的项目文件夹，不能将整个用户主目录用作工作区。",
@@ -125,7 +148,6 @@ const zh: Record<string, string> = {
   "Domain": "域名",
   "Public URL (editable)": "公网 URL（可编辑）",
   "Recommended from the workspace name and domain. You can edit it.": "根据工作区名称和域名自动推荐，你也可以自行修改。",
-  "Tunnel token": "隧道令牌",
   "Paste the eyJ… token": "粘贴 eyJ… 令牌",
   "Cloudflare published route": "Cloudflare 公布路由",
   "Use the eyJ… value from Cloudflare's tunnel installation command as the Tunnel Token.": "把 Cloudflare 隧道安装命令中以 eyJ… 开头的值填入隧道令牌。",
@@ -235,7 +257,6 @@ const zh: Record<string, string> = {
   "Prepare runtime": "准备运行时",
   "Repair runtime": "修复运行时",
   "Repair uv & cloudflared": "修复 uv 与 cloudflared",
-  "Connected": "已连接",
   "Installed": "已安装",
   "GitHub source": "GitHub 源码",
   "Quit Coding Tools MCP": "退出 Coding Tools MCP",
@@ -293,5 +314,10 @@ export function detectLanguage(): Language {
 }
 
 export function translator(language: Language) {
-  return (text: string) => (language === "zh-CN" ? zh[text] ?? text : text);
+  return (text: string) => {
+    if (language !== "zh-CN") return text;
+    const portConflict = text.match(/^Gateway local port (\d+) is already in use\. Stop the existing process or choose another port\.$/);
+    if (portConflict) return `本地端口 ${portConflict[1]} 已被占用，请先停止占用该端口的进程后重试。`;
+    return zh[text] ?? text;
+  };
 }
