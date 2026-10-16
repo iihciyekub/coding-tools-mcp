@@ -8,14 +8,12 @@
   revision-bound atomic `apply_changes`, a shared 64-entry write replay cache, and
   explicit `keep_stdin_open` for pipe-based interactive commands.
 
-## Desktop 0.5.5 (development)
+## Desktop 0.5.5 - 2026-10-16
 
 - Recheck resolver-only failures through Cloudflare DNS-over-HTTPS within the
   existing public health-check time budget. Preserve TLS certificate and Gateway
   identity verification while avoiding false offline status from stale VPN DNS.
 - Distinguish unresolved domains from other public endpoint failures in Chinese.
-
-## Desktop 0.5.4 (development)
 
 - Added fixed Cloudflare Named Tunnel settings without overwriting them on start,
   optional connection on app launch, background recovery with bounded backoff, and
