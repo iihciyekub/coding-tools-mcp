@@ -77,7 +77,7 @@ html.project-window-root, html.project-window-root body, html.project-window-roo
 .panel-header strong, .subpage-header strong { font-size: 14px; font-weight: 650; }
 .panel-header small, .subpage-header .app-version { margin-left: auto; flex-shrink: 0; color: var(--muted); font-size: 11px; }
 .brand-mark { display: grid; width: 22px; height: 22px; place-items: center; color: var(--text); }
-.brand-mark svg { display: block; width: 22px; height: 22px; fill: currentColor; }
+.app-mark-icon { display: block; width: 22px; height: 22px; background: currentColor; -webkit-mask: url("../src-tauri/icons/tray-template.svg") center / contain no-repeat; mask: url("../src-tauri/icons/tray-template.svg") center / contain no-repeat; }
 .subpage-header { gap: 4px; padding-left: 6px; }
 .subpage-header .icon-button { width: 32px; height: 32px; }
 
@@ -112,7 +112,6 @@ html.project-window-root, html.project-window-root body, html.project-window-roo
 .connection-block { padding: 7px 12px; border-bottom: 1px solid var(--line); }
 .authorization-validity { display: flex; align-items: baseline; gap: 6px; padding: 0 3px 5px; color: var(--muted); font-size: 11px; }
 .authorization-validity strong { color: var(--text); font-weight: 600; }
-.connection-activity { padding: 0 3px 4px; color: var(--muted); font-size: 11px; }
 .gateway-label { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 5px 3px 7px; }
 .gateway-label strong { font-size: 11px; font-weight: 650; color: var(--text); }
 .gateway-label small { min-width: 0; color: var(--muted); font-size: 9px; text-align: right; line-height: 1.25; }

@@ -1,5 +1,12 @@
 # Changelog
 
+## Desktop 0.5.9 - 2026-10-17
+
+- Replace app, menu-bar and panel artwork with the supplied IconKitchen design;
+  adapt the macOS menu-bar mark to light and dark backgrounds using template tinting.
+- Show a concise Running status and remove tool-call activity messages from Home.
+- Keep Connection settings on Home and remove the duplicate entry from More.
+
 ## Desktop 0.5.8 - 2026-10-17
 
 - Keep tray-click toggling stable when a menu-bar press blurs the panel before

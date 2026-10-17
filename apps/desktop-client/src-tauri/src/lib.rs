@@ -700,90 +700,16 @@ fn open_path(path: &Path) -> Result<(), String> {
         .map_err(|error| format!("Could not open the folder: {error}"))
 }
 
-fn draw_stroke(rgba: &mut [u8], size: u32, from: (f32, f32), to: (f32, f32), thickness: f32) {
-    let radius = thickness / 2.0;
-    let min_x = (from.0.min(to.0) - radius).floor().max(0.0) as u32;
-    let max_x = (from.0.max(to.0) + radius)
-        .ceil()
-        .min(size.saturating_sub(1) as f32) as u32;
-    let min_y = (from.1.min(to.1) - radius).floor().max(0.0) as u32;
-    let max_y = (from.1.max(to.1) + radius)
-        .ceil()
-        .min(size.saturating_sub(1) as f32) as u32;
-    let delta_x = to.0 - from.0;
-    let delta_y = to.1 - from.1;
-    let length_squared = delta_x * delta_x + delta_y * delta_y;
-
-    for y in min_y..=max_y {
-        for x in min_x..=max_x {
-            let pixel_x = x as f32 + 0.5;
-            let pixel_y = y as f32 + 0.5;
-            let projection = if length_squared == 0.0 {
-                0.0
-            } else {
-                (((pixel_x - from.0) * delta_x + (pixel_y - from.1) * delta_y) / length_squared)
-                    .clamp(0.0, 1.0)
-            };
-            let closest_x = from.0 + projection * delta_x;
-            let closest_y = from.1 + projection * delta_y;
-            let distance_x = pixel_x - closest_x;
-            let distance_y = pixel_y - closest_y;
-            if distance_x * distance_x + distance_y * distance_y <= radius * radius {
-                let offset = ((y * size + x) * 4) as usize;
-                rgba[offset..offset + 4].copy_from_slice(&[0, 0, 0, 255]);
-            }
-        }
+fn tray_icon() -> Image<'static> {
+    #[cfg(target_os = "macos")]
+    {
+        // macOS tints this transparent alpha mask for light/dark menu bars.
+        tauri::include_image!("./icons/tray-template.png")
     }
-}
-
-fn draw_polyline(rgba: &mut [u8], size: u32, points: &[(f32, f32)], thickness: f32) {
-    for pair in points.windows(2) {
-        draw_stroke(rgba, size, pair[0], pair[1], thickness);
+    #[cfg(not(target_os = "macos"))]
+    {
+        tauri::include_image!("./icons/32x32.png")
     }
-}
-
-fn tray_template_icon() -> Image<'static> {
-    const SIZE: u32 = 32;
-    const STROKE: f32 = 3.6;
-    let mut rgba = vec![0; (SIZE * SIZE * 4) as usize];
-    let cloud = [
-        (11.0, 20.0),
-        (7.0, 20.0),
-        (4.5, 18.0),
-        (4.5, 15.0),
-        (6.5, 12.0),
-        (9.5, 11.0),
-        (11.5, 11.0),
-        (12.5, 8.0),
-        (15.5, 6.0),
-        (19.0, 6.0),
-        (22.0, 8.0),
-        (23.0, 11.0),
-        (26.0, 12.0),
-        (28.0, 15.0),
-        (28.0, 18.0),
-        (25.5, 20.0),
-        (21.0, 20.0),
-    ];
-    draw_polyline(&mut rgba, SIZE, &cloud, STROKE);
-    draw_polyline(
-        &mut rgba,
-        SIZE,
-        &[
-            (12.0, 19.0),
-            (12.0, 22.0),
-            (14.0, 24.0),
-            (18.0, 24.0),
-            (20.0, 22.0),
-            (20.0, 19.0),
-        ],
-        STROKE,
-    );
-    draw_stroke(&mut rgba, SIZE, (12.0, 19.0), (20.0, 19.0), STROKE);
-    draw_stroke(&mut rgba, SIZE, (14.0, 15.5), (14.0, 19.0), STROKE);
-    draw_stroke(&mut rgba, SIZE, (18.0, 15.5), (18.0, 19.0), STROKE);
-    draw_stroke(&mut rgba, SIZE, (16.0, 24.0), (16.0, 28.0), STROKE);
-    Image::new_owned(rgba, SIZE, SIZE)
 }
 
 fn running_indicator_icon() -> Image<'static> {
@@ -1947,7 +1873,7 @@ pub fn run() {
             #[cfg(not(target_os = "linux"))]
             let _ = fallback_menu;
             let tray_builder = TrayIconBuilder::with_id(TRAY_ID)
-                .icon(tray_template_icon())
+                .icon(tray_icon())
                 .icon_as_template(cfg!(target_os = "macos"))
                 .tooltip(format!("Coding Tools MCP {}", env!("CARGO_PKG_VERSION")));
             #[cfg(target_os = "linux")]
@@ -2014,6 +1940,26 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn tray_icon_is_a_transparent_monochrome_template() {
+        let icon = tray_icon();
+        assert_eq!((icon.width(), icon.height()), (36, 36));
+        let pixels = icon.rgba();
+        assert!(pixels.chunks_exact(4).all(|pixel| pixel[..3] == [0, 0, 0]));
+        assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] == 255));
+        assert!(pixels
+            .chunks_exact(4)
+            .any(|pixel| (1..255).contains(&pixel[3])));
+        for y in 0..36 {
+            for x in 0..36 {
+                if !(2..34).contains(&x) || !(2..34).contains(&y) {
+                    assert_eq!(pixels[(y * 36 + x) * 4 + 3], 0);
+                }
+            }
+        }
+    }
 
     #[test]
     fn desktop_access_has_two_modes() {

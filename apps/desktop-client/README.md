@@ -47,9 +47,8 @@ API.
 - Home shows authorization validity above the Server URL, using the same lifetime
   passed to the runtime. New authorizations default to **No expiration**; finite
   lifetimes display their duration. See [OAuth lifetime and upgrade behavior](../../docs/remote-mcp.md#oauth-configuration).
-- **Service reachable** reports the public endpoint check. A separate timestamp
-  shows the last successful client tool call, or that the app is waiting for one;
-  public reachability alone does not establish client authorization.
+- Home shows **Running** when the service is ready; client call activity is not
+  shown in the compact panel.
 - Visible-panel refreshes omit unused approval database reads. Dependency checks
   are cached for 30 seconds and invalidated during dependency setup and repair;
   operator approvals remain available in the native workspace menu.
@@ -63,8 +62,8 @@ API.
   other agent directories. Additional directories can be added in settings, and
   automatic discovery can be switched off. ChatGPT can search their metadata and read `SKILL.md` files; local plugin
   actions and hooks do not become callable without separate MCP tools.
-- **More** keeps connection settings, environment setup, runtime logs, and language.
-  Workspace settings remain available from the access button on Home or a workspace
+- **More** keeps environment setup, runtime logs, and language. Connection settings
+  are available from Home. Workspace settings remain available from the access button on Home or a workspace
   row; duplicate shortcuts and developer links are omitted from More.
 
 The first launch imports the previous PySide client's `profiles.json`. Legacy
