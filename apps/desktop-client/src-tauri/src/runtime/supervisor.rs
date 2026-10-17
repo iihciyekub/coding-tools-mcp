@@ -138,8 +138,71 @@ pub fn maintain_connection(
         record_recovery(manager, &outcome);
         outcome?;
     }
+    check_local_activity(manager, profile);
     check_public_endpoint(manager);
     Ok(())
+}
+
+fn check_local_activity(manager: &Arc<Mutex<RuntimeManager>>, profile: &WorkspaceProfile) {
+    let target = {
+        let mut state = manager.lock().unwrap_or_else(|e| e.into_inner());
+        if state
+            .local_health_checked_at
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(5))
+        {
+            return;
+        }
+        let Some(session) = state.gateway.as_ref() else {
+            return;
+        };
+        let pid = session.gateway.runtime.child.id();
+        state.local_health_checked_at = Some(Instant::now());
+        (pid, profile.runtime.local_port)
+    };
+    let activity = local_activity(target.1, &profile.auth.bearer_token);
+    let mut state = manager.lock().unwrap_or_else(|e| e.into_inner());
+    if state
+        .gateway
+        .as_ref()
+        .is_some_and(|session| session.gateway.runtime.child.id() == target.0)
+    {
+        if let Some(activity) = activity {
+            state.last_tool_call_at = activity;
+        }
+    }
+}
+
+// Outer None is an unavailable probe; Some(None) is a fresh runtime with no calls.
+fn local_activity(port: u16, token: &str) -> Option<Option<f64>> {
+    if token.is_empty() || token.contains(['\r', '\n']) {
+        return None;
+    }
+    let mut stream = TcpStream::connect_timeout(
+        &SocketAddr::from(([127, 0, 0, 1], port)),
+        Duration::from_millis(200),
+    )
+    .ok()?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .ok()?;
+    stream
+        .set_write_timeout(Some(Duration::from_millis(200)))
+        .ok()?;
+    write!(stream, "GET /health HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n").ok()?;
+    let mut body = String::new();
+    stream.take(8192).read_to_string(&mut body).ok()?;
+    if !body.starts_with("HTTP/1.0 200 ") && !body.starts_with("HTTP/1.1 200 ") {
+        return None;
+    }
+    let (_, json) = body.split_once("\r\n\r\n")?;
+    let payload: serde_json::Value = serde_json::from_str(json).ok()?;
+    let value = payload.get("last_tool_call_at")?;
+    if value.is_null() {
+        return Some(None);
+    }
+    Some(Some(
+        value.as_f64().filter(|at| at.is_finite() && *at > 0.0)?,
+    ))
 }
 
 fn record_recovery(manager: &Arc<Mutex<RuntimeManager>>, result: &Result<(), String>) {
@@ -267,6 +330,52 @@ fn check_public_endpoint_for_operation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_activity_requires_authenticated_successful_health_response() {
+        for (status, expected) in [("200 OK", Some(Some(1234.0))), ("401 Unauthorized", None)] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let worker = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = String::new();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    request.push_str(&line);
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                assert!(request.contains("Authorization: Bearer synthetic-only\r\n"));
+                let body = "{\"last_tool_call_at\":1234}";
+                write!(
+                    stream,
+                    "HTTP/1.0 {status}\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            });
+            assert_eq!(local_activity(port, "synthetic-only"), expected);
+            worker.join().unwrap();
+        }
+        assert_eq!(local_activity(1, "injected\r\nHeader: value"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_activity_probe_keeps_last_confirmed_success() {
+        let (manager, mut profile) = gateway_fixture();
+        profile.runtime.local_port = 1;
+        manager.lock().unwrap().last_tool_call_at = Some(42.0);
+        check_local_activity(&manager, &profile);
+        assert_eq!(manager.lock().unwrap().last_tool_call_at, Some(42.0));
+        shutdown(&manager).unwrap();
+    }
     #[cfg(unix)]
     fn gateway_fixture() -> (Arc<Mutex<RuntimeManager>>, WorkspaceProfile) {
         let path = std::env::temp_dir().to_string_lossy().into_owned();
@@ -453,6 +562,9 @@ mod tests {
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
         let mut profile =
             WorkspaceProfile::new(data.to_string_lossy().into_owned(), 28766).unwrap();
+        let isolated_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        profile.runtime.local_port = isolated_listener.local_addr().unwrap().port();
+        drop(isolated_listener);
         profile.tunnel.cloudflare_mode = "named".into();
         profile.tunnel.cloudflare_token = "synthetic-token".into();
         profile.tunnel.public_url = "https://example.test".into();

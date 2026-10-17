@@ -5,16 +5,16 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { api } from "./api";
 import { detectLanguage, translator, type Language } from "./i18n";
 import type { DependencyStatus, GatewayConfig, LogBundle, PermissionMode, RuntimeStatus, TunnelConfig, WorkspaceProfile } from "./types";
-import { normalizePublicOrigin, publicEndpoint, workspaceHue } from "./utils";
+import { authorizationValidity, normalizePublicOrigin, publicEndpoint, workspaceHue } from "./utils";
 
 const PANEL_WIDTH = 420;
-const APP_VERSION = "0.5.7";
+const APP_VERSION = "0.5.8";
 type Page = "home" | "new-access" | "workspaces" | "environment" | "logs" | "settings" | "more" | "connection";
 type CopyAction = "server-name" | "server-url" | "credential" | "logs";
 type ConfirmAction = { kind: "stop"; profileId: string } | { kind: "stop-all" } | { kind: "quit" } | null;
 type WorkspaceAction = { state: "starting" | "stopping" };
 
-const stoppedStatus = (port: number): RuntimeStatus => ({ state: "stopped", pid: null, server_name: "", local_message: "Not running", public_message: "Unknown", public_url: "", local_url: `http://127.0.0.1:${port}/mcp`, local_dns_error: false, dns_repairing: false, can_repair_dns: false });
+const stoppedStatus = (port: number): RuntimeStatus => ({ state: "stopped", pid: null, server_name: "", local_message: "Not running", public_message: "Unknown", public_url: "", local_url: `http://127.0.0.1:${port}/mcp`, local_dns_error: false, dns_repairing: false, can_repair_dns: false, last_tool_call_at: null });
 const shortPath = (path: string) => path.split(/[\\/]/).filter(Boolean).slice(-2).join(" / ") || path;
 
 function App() {
@@ -388,12 +388,14 @@ function App() {
     {page === "home" && <>
       <section className={`workspace-hero ${selected ? "tinted" : ""}`} style={selected ? { "--workspace-hue": workspaceHue(selectedPosition) } as React.CSSProperties : undefined}>
         <div className="workspace-picker-row"><button className="workspace-picker" type="button" disabled={!profiles.length || projectWindow} onClick={() => setPage("workspaces")}>{selected?.runtime.permission_mode === "host" ? <ShieldIcon /> : <FolderIcon />}<span><strong>{selected ? t(selected.name) : t(projectWindow ? "Project unavailable" : "No access profile")}</strong><small>{selectedSubtitle}</small></span>{profiles.length > 1 && !projectWindow && <SwitchIcon />}</button>{!projectWindow && <button className="icon-button" type="button" aria-label={t("Add access profile")} onClick={() => setPage("new-access")}><PlusIcon /></button>}</div>
-        {selected && <div className="status-row"><span className="status-copy"><i className={`status-dot ${status?.local_dns_error ? "dns-warning" : status?.state ?? "stopped"}`} />{profiles.length > 1 && <b className="status-index">[{selectedPosition}/{profiles.length}]</b>}{starting ? t(status?.pid ? "Connecting…" : "Starting…") : stopping ? t("Stopping…") : status?.local_dns_error ? t("Local DNS issue") : status?.state === "running" ? t("Connected") : status?.state === "error" ? t("Connection error") : t("Workspace stopped")}</span><button className={`power-button ${running && !starting ? "danger" : ""} ${confirmAction?.kind === "stop" && confirmAction.profileId === selected.id ? "confirm" : ""}`} type="button" disabled={stopping} onClick={toggleWorkspace}>{starting || stopping ? <SpinnerIcon /> : null}{stopping ? t("Stopping…") : starting ? t("Cancel startup") : confirmAction?.kind === "stop" && confirmAction.profileId === selected.id ? t("Click again to stop") : t(running ? "Stop" : "Start")}</button></div>}
+        {selected && <div className="status-row"><span className="status-copy"><i className={`status-dot ${status?.local_dns_error ? "dns-warning" : status?.state ?? "stopped"}`} />{profiles.length > 1 && <b className="status-index">[{selectedPosition}/{profiles.length}]</b>}{starting ? t(status?.pid ? "Connecting…" : "Starting…") : stopping ? t("Stopping…") : status?.local_dns_error ? t("Local DNS issue") : status?.state === "running" ? t("Service reachable") : status?.state === "error" ? t("Connection error") : t("Workspace stopped")}</span><button className={`power-button ${running && !starting ? "danger" : ""} ${confirmAction?.kind === "stop" && confirmAction.profileId === selected.id ? "confirm" : ""}`} type="button" disabled={stopping} onClick={toggleWorkspace}>{starting || stopping ? <SpinnerIcon /> : null}{stopping ? t("Stopping…") : starting ? t("Cancel startup") : confirmAction?.kind === "stop" && confirmAction.profileId === selected.id ? t("Click again to stop") : t(running ? "Stop" : "Start")}</button></div>}
         {status?.state === "error" && <p className="connection-error">{t(status.public_message)}</p>}
         {status?.local_dns_error && <div className="dns-recovery" role="status"><p>{t("Public service is reachable, but local DNS is failing. Checking again automatically.")}</p>{status.can_repair_dns && <><button type="button" className="secondary-button" disabled={Boolean(busy) || status.dns_repairing} onClick={() => void repairLocalDns()}>{busy === "dns-repair" || status.dns_repairing ? <SpinnerIcon /> : <RepairIcon />}{t(busy === "dns-repair" || status.dns_repairing ? "Repairing DNS…" : "Repair local DNS")}</button><small>{t("macOS will ask for an administrator password to refresh its DNS cache.")}</small></>}</div>}
       </section>
       {selected && <section className="connection-block">
         <button className="connection-heading" type="button" onClick={() => openSubpage("connection", "home")}><strong>{t(gateway?.tunnel.cloudflare_mode === "named" ? "Fixed link" : "Temporary link")}</strong><span>{t("Connection settings")}<ChevronIcon /></span></button>
+        {gateway && <div className="authorization-validity" title={t("Applies to new authorizations. Earlier authorizations keep their original expiry.")}><span>{t("Authorization validity")}</span><strong>{authorizationValidity(gateway.auth, language)}</strong></div>}
+        {status?.state === "running" && <div className="connection-activity">{status.last_tool_call_at ? `${t("Last successful tool call")}: ${new Intl.DateTimeFormat(language, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(status.last_tool_call_at * 1000))}` : t("Waiting for a successful client tool call")}</div>}
         <ValueButton label={t("Server URL")} copyLabel={t("Copy")} value={serverUrl || t("Start to get a connection link")} disabled={!serverUrl} copied={copied === "server-url"} onClick={() => void copy(serverUrl, "server-url")} />
         <ValueButton label={t("Authorization passcode")} copyLabel={t("Copy")} value={revealCredential ? credential : "••••••••••••"} disabled={!credential} copied={copied === "credential"} onClick={() => void copy(credential, "credential")} after={<button className="reveal-button" type="button" aria-label={t(revealCredential ? "Hide authorization passcode" : "Show authorization passcode")} onClick={() => setRevealCredential((current) => !current)}>{revealCredential ? <EyeOffIcon /> : <EyeIcon />}</button>} />
       </section>}

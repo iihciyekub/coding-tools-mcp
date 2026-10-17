@@ -511,6 +511,7 @@ fn gateway_settings_differ(gateway: &GatewayConfig, profile: &WorkspaceProfile) 
         || gateway.auth.r#type != profile.auth.r#type
         || gateway.auth.oauth_password != profile.auth.oauth_password
         || gateway.auth.oauth_token_secret != profile.auth.oauth_token_secret
+        || gateway.auth.oauth_token_ttl_seconds != profile.auth.oauth_token_ttl_seconds
         || gateway.auth.bearer_token != profile.auth.bearer_token
 }
 

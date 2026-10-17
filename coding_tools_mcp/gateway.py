@@ -28,7 +28,12 @@ from .project_context import SKIPPED_CONTEXT_DIRS
 from .tool_results import make_tool_result
 
 
-DEFAULT_SESSION_TTL_SECONDS = 24 * 60 * 60
+DEFAULT_SESSION_TTL_SECONDS = 0
+DEFAULT_MAX_SESSIONS = 4096
+
+
+class SessionCapacityExceeded(RuntimeError):
+    pass
 
 RETRYABLE_READ_TOOLS = frozenset({
     "server_info", "read_file", "read_files", "list_dir", "list_files", "search_text",
@@ -151,26 +156,6 @@ class HTTPProjectRuntime:
         tool_arguments = dict(arguments or {})
         if self.definition.workspace_root is not None:
             tool_arguments["project"] = str(self.definition.path)
-        try:
-            self._validate_runtime_build()
-        except ProjectRuntimeBuildMismatch as exc:
-            self._set_state("unreachable")
-            payload = {
-                "ok": False,
-                "error": {
-                    "code": "PROJECT_RUNTIME_VERSION_MISMATCH",
-                    "message": str(exc),
-                    "category": "runtime",
-                    "retryable": True,
-                    "details": {
-                        "project_id": self.definition.id,
-                        "endpoint": self.endpoint,
-                        "expected_runtime_build_id": exc.expected,
-                        "actual_runtime_build_id": exc.actual,
-                    },
-                },
-            }
-            return make_tool_result(name, payload, is_error=True)
         retry_safe = (
             name in RETRYABLE_READ_TOOLS
             or (name == "exec_command" and bool(tool_arguments.get("operation_id")))
@@ -182,12 +167,24 @@ class HTTPProjectRuntime:
             if attempt:
                 self._set_state("recovering")
             try:
+                self._validate_runtime_build()
                 result = self._rpc(
                     "tools/call",
                     {"name": name, "arguments": tool_arguments},
                 )
                 self._set_state("ready")
                 return result
+            except ProjectRuntimeBuildMismatch as exc:
+                self._set_state("unreachable")
+                return make_tool_result(name, {
+                    "ok": False,
+                    "error": {
+                        "code": "PROJECT_RUNTIME_VERSION_MISMATCH", "message": str(exc),
+                        "category": "runtime", "retryable": True,
+                        "details": {"project_id": self.definition.id, "endpoint": self.endpoint,
+                                    "expected_runtime_build_id": exc.expected, "actual_runtime_build_id": exc.actual},
+                    },
+                }, is_error=True)
             except RuntimeError as exc:
                 last_error = exc
                 self._set_state("unreachable")
@@ -281,8 +278,10 @@ class SessionContext:
 class SessionRegistry:
     """In-memory MCP session routing state only."""
 
-    def __init__(self, *, ttl_seconds: int = DEFAULT_SESSION_TTL_SECONDS) -> None:
-        self.ttl_seconds = max(60, int(ttl_seconds))
+    def __init__(self, *, ttl_seconds: int = DEFAULT_SESSION_TTL_SECONDS, max_sessions: int = DEFAULT_MAX_SESSIONS) -> None:
+        self.ttl_seconds = 0 if int(ttl_seconds) == 0 else max(60, int(ttl_seconds))
+        self.max_sessions = max(1, int(max_sessions))
+        self._rejected = 0
         self._items: dict[str, SessionContext] = {}
         self._lock = threading.RLock()
 
@@ -296,6 +295,9 @@ class SessionRegistry:
         )
         with self._lock:
             self._prune_locked(now)
+            if len(self._items) >= self.max_sessions:
+                self._rejected += 1
+                raise SessionCapacityExceeded("Gateway session capacity reached; close an unused session with DELETE /mcp")
             self._items[context.session_id] = context
         return context
 
@@ -320,6 +322,12 @@ class SessionRegistry:
         with self._lock:
             return self._items.pop(session_id, None) is not None
 
+    def statistics(self) -> dict[str, int]:
+        with self._lock:
+            self._prune_locked(time.time())
+            return {"active": len(self._items), "capacity": self.max_sessions, "rejected": self._rejected,
+                    "idle_ttl_seconds": self.ttl_seconds}
+
     def clear_project(self, project_id: str) -> None:
         with self._lock:
             for context in self._items.values():
@@ -327,6 +335,8 @@ class SessionRegistry:
                     context.selected_project_id = None
 
     def _prune_locked(self, now: float) -> None:
+        if self.ttl_seconds == 0:
+            return
         expired = [
             session_id
             for session_id, context in self._items.items()
@@ -991,6 +1001,7 @@ class BoundGatewayRuntime:
             "current": current,
             "default_project_id": self.gateway.projects.default_project_id,
             "registry_generation": self.gateway.projects.generation,
+            "session_stats": self.gateway.sessions.statistics(),
         }
         if action == "list":
             payload["projects"] = projects

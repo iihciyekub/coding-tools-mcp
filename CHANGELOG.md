@@ -1,6 +1,26 @@
 # Changelog
 
-## Unreleased
+## Desktop 0.5.8 - 2026-10-17
+
+- Keep tray-click toggling stable when a menu-bar press blurs the panel before
+  mouse-up; clicks outside the panel still dismiss it.
+- Show authorization validity and the last successful client tool call; distinguish
+  public service reachability from client authorization.
+- Remove unused approval database reads from frontend polling and cache dependency
+  checks for 30 seconds, invalidating them during setup and repair.
+- Default newly issued OAuth credentials and Gateway bindings to no time expiry.
+
+## 0.4.6 - 2026-10-17
+
+- Persist operation acceptance and terminal execution receipts to prevent duplicate
+  commands after a restart; refuse to replay an operation with an unknown outcome.
+- Include initial Project Runtime build checks in safe retries and return structured
+  unavailable/version-mismatch results.
+- Bound retained Gateway sessions to 4096 without evicting existing connections,
+  expose session statistics, and keep explicit DELETE session cleanup available.
+- Add an authenticated health endpoint reporting successful tool-call activity.
+- Support non-expiring OAuth access tokens and retain configurable finite lifetimes.
+
 
 - Moved recurring Workspace discovery out of project tool calls, while preserving
   dynamic path selection, Workspace permissions, and stale-scan rejection.

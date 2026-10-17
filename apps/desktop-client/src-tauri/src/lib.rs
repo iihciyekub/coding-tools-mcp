@@ -1,10 +1,12 @@
 mod models;
+mod panel;
 mod resource_installer;
 mod runtime;
 mod runtime_state;
 mod storage;
 
 use models::{GatewayConfig, LogBundle, ProjectProfile, RuntimeStatus, WorkspaceProfile};
+use panel::{pointer_over_tray, visibility_after_event, PanelEvent};
 use resource_installer::managed_version;
 use runtime::{
     maintain_connection, prepare_runtime as prepare_runtime_environment, read_gateway_project_logs,
@@ -53,7 +55,6 @@ struct DesktopSnapshot {
     profiles: Vec<WorkspaceProfile>,
     statuses: HashMap<String, RuntimeStatus>,
     dependencies: DependencyStatus,
-    runtime_state: HashMap<String, RuntimeStateSnapshot>,
 }
 
 #[tauri::command]
@@ -83,16 +84,7 @@ fn desktop_snapshot(state: tauri::State<'_, DesktopState>) -> Result<DesktopSnap
         .map(|profile| (profile.id.clone(), runtime.status(profile)))
         .collect();
     let dependencies = runtime.dependency_status();
-    let runtime_state_root = runtime.runtime_state_root();
     drop(runtime);
-    let runtime_state = profiles
-        .iter()
-        .map(|profile| {
-            let snapshot = read_runtime_snapshot(&runtime_state_root, Path::new(&profile.path))
-                .unwrap_or_else(RuntimeStateSnapshot::failure);
-            (profile.id.clone(), snapshot)
-        })
-        .collect();
     let discovered_local_capability_roots = if gateway.auto_discover_local_capabilities {
         models::discovered_local_capability_roots()
     } else {
@@ -109,7 +101,6 @@ fn desktop_snapshot(state: tauri::State<'_, DesktopState>) -> Result<DesktopSnap
         profiles,
         statuses,
         dependencies,
-        runtime_state,
     })
 }
 
@@ -588,6 +579,11 @@ fn open_resource(target: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn install_resource(app: AppHandle, target: String) -> Result<String, String> {
+    app.state::<DesktopState>()
+        .runtime
+        .lock()
+        .map_err(|_| "Runtime manager is unavailable")?
+        .invalidate_dependency_cache();
     if !matches!(target.as_str(), "uv" | "cloudflared") {
         return Err("Only uv and cloudflared are managed by the desktop installer.".into());
     }
@@ -596,6 +592,11 @@ async fn install_resource(app: AppHandle, target: String) -> Result<String, Stri
     tauri::async_runtime::spawn_blocking(move || {
         let cancelled = std::sync::atomic::AtomicBool::new(false);
         let path = resource_installer::install(&target, &data_dir, &cancelled)?;
+        app.state::<DesktopState>()
+            .runtime
+            .lock()
+            .map_err(|_| "Runtime manager is unavailable")?
+            .invalidate_dependency_cache();
         let version = managed_version(&target).unwrap_or("managed");
         Ok::<String, String>(format!(
             "Installed {target_for_result} {version} at {}",
@@ -608,11 +609,21 @@ async fn install_resource(app: AppHandle, target: String) -> Result<String, Stri
 
 #[tauri::command]
 async fn repair_dependencies(app: AppHandle) -> Result<String, String> {
+    app.state::<DesktopState>()
+        .runtime
+        .lock()
+        .map_err(|_| "Runtime manager is unavailable")?
+        .invalidate_dependency_cache();
     let data_dir = app.path().app_local_data_dir().map_err(|e| e.to_string())?;
     tauri::async_runtime::spawn_blocking(move || {
         let cancelled = std::sync::atomic::AtomicBool::new(false);
         resource_installer::install("uv", &data_dir, &cancelled)?;
         resource_installer::install("cloudflared", &data_dir, &cancelled)?;
+        app.state::<DesktopState>()
+            .runtime
+            .lock()
+            .map_err(|_| "Runtime manager is unavailable")?
+            .invalidate_dependency_cache();
         Ok::<String, String>("Managed dependencies repaired.".into())
     })
     .await
@@ -624,6 +635,11 @@ async fn prepare_runtime(
     repair: bool,
     state: tauri::State<'_, DesktopState>,
 ) -> Result<String, String> {
+    state
+        .runtime
+        .lock()
+        .map_err(|_| "Runtime manager is unavailable")?
+        .invalidate_dependency_cache();
     let runtime = Arc::clone(&state.runtime);
     tauri::async_runtime::spawn_blocking(move || prepare_runtime_environment(&runtime, repair))
         .await
@@ -1783,7 +1799,10 @@ fn toggle_panel(app: &AppHandle, tray_rect: Rect) -> Result<(), String> {
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "Desktop panel is unavailable.".to_string())?;
-    if window.is_visible().map_err(menu_error)? {
+    if !visibility_after_event(
+        window.is_visible().map_err(menu_error)?,
+        PanelEvent::TrayClick,
+    ) {
         window.hide().map_err(menu_error)?;
         return Ok(());
     }
@@ -1881,7 +1900,15 @@ pub fn run() {
                     .build()?;
             let focus_panel = panel.clone();
             panel.on_window_event(move |event| {
-                if !cfg!(debug_assertions) && matches!(event, WindowEvent::Focused(false)) {
+                if !cfg!(debug_assertions)
+                    && matches!(event, WindowEvent::Focused(false))
+                    && !visibility_after_event(
+                        focus_panel.is_visible().unwrap_or(false),
+                        PanelEvent::FocusLost {
+                            pointer_over_tray: pointer_over_tray(focus_panel.app_handle(), TRAY_ID),
+                        },
+                    )
+                {
                     let _ = focus_panel.hide();
                 }
             });

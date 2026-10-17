@@ -808,6 +808,35 @@ class MCPContractTests(ComplianceTestCase):
         finally:
             self.stop_process(process)
 
+    def test_health_requires_auth_and_tracks_only_successful_tool_calls(self) -> None:
+        port = free_port()
+        base_url = f"http://127.0.0.1:{port}"
+        env = self.oauth_server_env(
+            CODING_TOOLS_MCP_OAUTH_PASSWORD="test-password",
+            CODING_TOOLS_MCP_AUTH_TOKEN="test-health-token",
+        )
+        process = self.start_oauth_server(port, env)
+        headers = {"Authorization": "Bearer test-health-token", "MCP-Protocol-Version": "2025-06-18"}
+        try:
+            self.wait_for_json(f"{base_url}/.well-known/oauth-authorization-server")
+            status, _, _ = self.raw_base_http_request(base_url, "GET", "/health")
+            self.assertEqual(status, 401)
+            status, _, body = self.raw_base_http_request(base_url, "GET", "/health", headers=headers)
+            self.assertEqual(status, 200)
+            self.assertIsNone(json.loads(body)["last_tool_call_at"])
+            request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "server_info", "arguments": {}}}
+            status, _, _ = self.raw_base_http_request(base_url, "POST", "/mcp", body=json.dumps(request).encode(), headers={**headers, "Content-Type": "application/json"})
+            self.assertEqual(status, 200)
+            _, _, body = self.raw_base_http_request(base_url, "GET", "/health", headers=headers)
+            last = json.loads(body)["last_tool_call_at"]
+            self.assertGreater(last, 0)
+            request["params"]["name"] = "missing_tool"
+            self.raw_base_http_request(base_url, "POST", "/mcp", body=json.dumps(request).encode(), headers={**headers, "Content-Type": "application/json"})
+            _, _, body = self.raw_base_http_request(base_url, "GET", "/health", headers=headers)
+            self.assertEqual(json.loads(body)["last_tool_call_at"], last)
+        finally:
+            self.stop_process(process)
+
     def test_oauth_public_client_pkce_flow_succeeds(self) -> None:
         port = free_port()
         base_url = f"http://127.0.0.1:{port}"
@@ -868,7 +897,7 @@ class MCPContractTests(ComplianceTestCase):
             code = self.oauth_authorization_code(base_url, client_id, "test-password", verifier)
             token_status, token_response = self.oauth_token_request(base_url, client_id, code, verifier)
             self.assertEqual(token_status, 200)
-            self.assertEqual(token_response.get("expires_in"), 24 * 60 * 60)
+            self.assertNotIn("expires_in", token_response)
             access_token = token_response.get("access_token")
             self.assertIsInstance(access_token, str)
 
@@ -882,6 +911,34 @@ class MCPContractTests(ComplianceTestCase):
             self.assertEqual(bad.get("error"), "invalid_grant")
         finally:
             self.stop_process(process)
+
+    def test_oauth_explicit_token_lifetimes(self) -> None:
+        for ttl in (0, 604800):
+            with self.subTest(ttl=ttl):
+                port = free_port()
+                base_url = f"http://127.0.0.1:{port}"
+                env = self.oauth_server_env(
+                    CODING_TOOLS_MCP_OAUTH_PASSWORD="test-password",
+                    CODING_TOOLS_MCP_OAUTH_TOKEN_TTL=str(ttl),
+                )
+                process = self.start_oauth_server(port, env)
+                try:
+                    self.wait_for_json(f"{base_url}/.well-known/oauth-authorization-server")
+                    client_id = self.oauth_register_client(base_url, f"Token Lifetime {ttl}")
+                    verifier = "t" * 43
+                    code = self.oauth_authorization_code(base_url, client_id, "test-password", verifier)
+                    status, response = self.oauth_token_request(base_url, client_id, code, verifier)
+                    self.assertEqual(status, 200, response)
+                    if ttl:
+                        self.assertEqual(response.get("expires_in"), ttl)
+                    else:
+                        self.assertNotIn("expires_in", response)
+                    status, result = self.raw_post_to_auth_server(
+                        f"{base_url}/mcp", token=response.get("access_token")
+                    )
+                    self.assertEqual(status, 200, result)
+                finally:
+                    self.stop_process(process)
 
     def test_oauth_dynamic_client_and_access_token_survive_server_restart(self) -> None:
         port = free_port()

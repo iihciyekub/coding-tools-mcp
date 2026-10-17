@@ -193,6 +193,9 @@ pub struct RuntimeManager {
     dns_repair: Option<Arc<PendingOperation>>,
     public_probe_generation: u64,
     last_gateway_error: Option<String>,
+    dependency_cache: Option<(Instant, DependencyStatus)>,
+    last_tool_call_at: Option<f64>,
+    local_health_checked_at: Option<Instant>,
 }
 
 #[derive(Clone, Serialize)]
@@ -227,15 +230,31 @@ impl RuntimeManager {
             dns_repair: None,
             public_probe_generation: 0,
             last_gateway_error: None,
+            dependency_cache: None,
+            last_tool_call_at: None,
+            local_health_checked_at: None,
         }
     }
 
     pub fn configure_environment(&mut self, resources: PathBuf, data: PathBuf) {
         self.resource_dir = resources;
         self.data_dir = data;
+        self.dependency_cache = None;
     }
 
-    pub fn dependency_status(&self) -> DependencyStatus {
+    pub fn invalidate_dependency_cache(&mut self) {
+        self.dependency_cache = None;
+    }
+
+    pub fn dependency_status(&mut self) -> DependencyStatus {
+        if let Some((at, cached)) = &self.dependency_cache {
+            if at.elapsed() < Duration::from_secs(30) {
+                let mut result = cached.clone();
+                result.runtime_ready |=
+                    self.runtime_ready_hint || self.gateway.is_some() || !self.sessions.is_empty();
+                return result;
+            }
+        }
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let (managed_runtime_ready, runtime_version) =
             environment::readiness(&self.resource_dir, &self.data_dir, &effective_path());
@@ -243,13 +262,15 @@ impl RuntimeManager {
             || self.runtime_ready_hint
             || self.gateway.is_some()
             || !self.sessions.is_empty();
-        DependencyStatus {
+        let result = DependencyStatus {
             uv: resource_installer::is_managed_installed("uv", &self.data_dir)
                 || which::which_in("uv", Some(effective_path()), &cwd).is_ok(),
             cloudflared: resolve_cloudflared(&self.data_dir).is_ok(),
             runtime_ready,
             runtime_version,
-        }
+        };
+        self.dependency_cache = Some((Instant::now(), result.clone()));
+        result
     }
 
     pub fn status(&mut self, profile: &WorkspaceProfile) -> RuntimeStatus {
@@ -334,6 +355,7 @@ impl RuntimeManager {
             local_dns_error: false,
             dns_repairing: false,
             can_repair_dns: false,
+            last_tool_call_at: None,
             local_message: format!("Listening on 127.0.0.1:{}", profile.runtime.local_port),
             public_message,
             public_url,
@@ -418,6 +440,7 @@ impl RuntimeManager {
             local_dns_error: tunnel_ok && self.local_dns_error,
             dns_repairing: self.dns_repair.is_some(),
             can_repair_dns: cfg!(target_os = "macos") && tunnel_ok && self.local_dns_error,
+            last_tool_call_at: self.last_tool_call_at,
             local_message: format!(
                 "Shared Gateway listening on 127.0.0.1:{}",
                 profile.runtime.local_port
@@ -568,6 +591,8 @@ fn start_gateway_inner(
     state.public_healthy = None;
     state.public_error = None;
     state.public_checked_at = None;
+    state.local_health_checked_at = None;
+    state.last_tool_call_at = None;
     state.local_dns_error = false;
     state.dns_refresh_attempted = false;
     Ok(state.gateway_status(&gateway_profile))
@@ -1215,10 +1240,15 @@ fn spawn_gateway_runtime(
         command.env_remove(name);
     }
     command.env("CODING_TOOLS_MCP_SERVER_NAME", server_name);
+    command.env("CODING_TOOLS_MCP_AUTH_TOKEN", &profile.auth.bearer_token);
     match profile.auth.r#type.as_str() {
         "oauth" => {
             command
                 .arg("--oauth-mode")
+                .env(
+                    "CODING_TOOLS_MCP_OAUTH_TOKEN_TTL",
+                    profile.auth.oauth_token_ttl_seconds.to_string(),
+                )
                 .env(
                     "CODING_TOOLS_MCP_OAUTH_PASSWORD",
                     &profile.auth.oauth_password,
@@ -1608,6 +1638,10 @@ fn spawn_runtime(
         "oauth" => {
             command
                 .arg("--oauth-mode")
+                .env(
+                    "CODING_TOOLS_MCP_OAUTH_TOKEN_TTL",
+                    profile.auth.oauth_token_ttl_seconds.to_string(),
+                )
                 .env(
                     "CODING_TOOLS_MCP_OAUTH_PASSWORD",
                     &profile.auth.oauth_password,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { WorkspaceProfile } from "./types";
-import { frpSnippet, normalizeDomain, normalizePublicOrigin, publicEndpoint, recommendedPublicUrl, workspaceHue } from "./utils";
+import { authorizationValidity, frpSnippet, normalizeDomain, normalizePublicOrigin, publicEndpoint, recommendedPublicUrl, workspaceHue } from "./utils";
 
 const profile: WorkspaceProfile = {
   id: "a".repeat(32),
@@ -15,9 +15,27 @@ const profile: WorkspaceProfile = {
     cloudflare_mode: "quick",
     cloudflare_token: "",
   },
-  auth: { type: "oauth", oauth_password: "pw", oauth_token_secret: "secret", bearer_token: "token" },
+  auth: { type: "oauth", oauth_password: "pw", oauth_token_secret: "secret", oauth_token_ttl_seconds: 0, bearer_token: "token" },
   runtime: { server_name_prefix: "www", local_port: 28767, permission_mode: "trusted", file_access_scope: "workspace", allowed_paths: [], default_search_path: "", environment_variables: [] },
 };
+
+describe("authorization validity", () => {
+  it("shows unlimited authorization in both languages", () => {
+    expect(authorizationValidity(profile.auth, "zh-CN")).toBe("不限时");
+    expect(authorizationValidity(profile.auth, "en")).toBe("No expiration");
+  });
+
+  it("shows the configured duration without rounding it", () => {
+    expect(authorizationValidity({ ...profile.auth, oauth_token_ttl_seconds: 604800 }, "en")).toBe("7 days");
+    expect(authorizationValidity({ ...profile.auth, oauth_token_ttl_seconds: 86400 }, "zh-CN")).toBe("1天");
+    expect(authorizationValidity({ ...profile.auth, oauth_token_ttl_seconds: 5400 }, "en")).toBe("90 minutes");
+    expect(authorizationValidity({ ...profile.auth, oauth_token_ttl_seconds: 61 }, "en")).toBe("61 seconds");
+  });
+
+  it("keeps static bearer authorization unlimited", () => {
+    expect(authorizationValidity({ ...profile.auth, type: "bearer", oauth_token_ttl_seconds: 86400 }, "en")).toBe("No expiration");
+  });
+});
 
 describe("desktop URL helpers", () => {
   it("builds the public MCP endpoint", () => {

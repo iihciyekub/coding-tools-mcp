@@ -103,6 +103,28 @@ class _FakeHTTPResponse:
 
 
 class GatewayUnitTests(unittest.TestCase):
+    def test_default_session_retains_project_after_long_inactivity(self) -> None:
+        sessions = SessionRegistry()
+        with mock.patch("coding_tools_mcp.gateway.time.time", return_value=1000):
+            session = sessions.create(selected_project_id="project")
+        with mock.patch("coding_tools_mcp.gateway.time.time", return_value=1000 + 365 * 86400):
+            retained = sessions.get(session.session_id)
+            self.assertIsNotNone(retained)
+            self.assertEqual(retained.selected_project_id, "project")
+            self.assertTrue(sessions.delete(session.session_id))
+            self.assertIsNone(sessions.get(session.session_id))
+
+    def test_explicit_session_idle_expiry_extends_with_activity(self) -> None:
+        sessions = SessionRegistry(ttl_seconds=86400)
+        with mock.patch("coding_tools_mcp.gateway.time.time", return_value=1000):
+            session = sessions.create(selected_project_id="project")
+        with mock.patch("coding_tools_mcp.gateway.time.time", return_value=1000 + 86399):
+            self.assertIsNotNone(sessions.get(session.session_id))
+        with mock.patch("coding_tools_mcp.gateway.time.time", return_value=1000 + 2 * 86399):
+            self.assertIsNotNone(sessions.get(session.session_id))
+        with mock.patch("coding_tools_mcp.gateway.time.time", return_value=1000 + 2 * 86399 + 86401):
+            self.assertIsNone(sessions.get(session.session_id))
+
     def test_registry_discovers_direct_child_git_projects_without_registry_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

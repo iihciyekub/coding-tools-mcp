@@ -18,7 +18,8 @@ import jwt
 
 
 OAUTH_CODE_TTL_SECONDS = 300
-OAUTH_TOKEN_TTL_SECONDS = 24 * 60 * 60
+# Zero disables expiration for newly issued access tokens.
+OAUTH_TOKEN_TTL_SECONDS = 0
 OAUTH_MAX_BODY_BYTES = 8_192
 OAUTH_GRANT_TYPE_AUTHORIZATION_CODE = "authorization_code"
 # Advertised in AS metadata and used to narrow DCR requests. The token endpoint
@@ -313,16 +314,18 @@ def valid_pkce_challenge(code_challenge: str) -> bool:
 
 def create_access_token(config: OAuthConfig, server_url: str, *, client_id: str) -> str:
     now = int(time.time())
+    claims = {
+        "iss": server_url,
+        "aud": server_url,
+        "sub": client_id,
+        "client_id": client_id,
+        "iat": now,
+        "scope": "mcp",
+    }
+    if config.token_ttl > 0:
+        claims["exp"] = now + config.token_ttl
     return jwt.encode(
-        {
-            "iss": server_url,
-            "aud": server_url,
-            "sub": client_id,
-            "client_id": client_id,
-            "iat": now,
-            "exp": now + config.token_ttl,
-            "scope": "mcp",
-        },
+        claims,
         config.token_secret,
         algorithm="HS256",
     )

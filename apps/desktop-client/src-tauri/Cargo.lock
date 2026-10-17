@@ -373,13 +373,14 @@ dependencies = [
 
 [[package]]
 name = "coding-tools-mcp-desktop"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "chrono",
  "fs2",
  "keyring",
  "libc",
  "objc2-app-kit",
+ "objc2-foundation",
  "objc2-quartz-core",
  "rand",
  "regex",

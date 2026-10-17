@@ -1,6 +1,6 @@
 [package]
 name = "coding-tools-mcp-desktop"
-version = "0.5.7"
+version = "0.5.8"
 description = "Cross-platform desktop control plane for Coding Tools MCP"
 authors = ["Coding Tools MCP Contributors"]
 license = "Apache-2.0"
@@ -41,4 +41,5 @@ signal-hook = { version = "0.3", default-features = false, features = ["iterator
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSView", "objc2-quartz-core"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std"] }
 objc2-quartz-core = { version = "0.3", features = ["CALayer"] }

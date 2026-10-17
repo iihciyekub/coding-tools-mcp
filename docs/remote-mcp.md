@@ -67,8 +67,10 @@ Registration rules:
   and single-use.
 
 Authorization codes are single-use and expire after five minutes. Access tokens
-default to 24 hours and are bound to the registered client and exact MCP
-resource URL.
+do not expire by default and are bound to the registered client and exact MCP
+resource URL. An optional finite lifetime remains available. The server does
+not issue refresh tokens; finite access tokens require authorization again
+after expiry.
 
 ## OAuth configuration
 
@@ -83,8 +85,9 @@ CODING_TOOLS_MCP_SERVER_URL=https://mcp.example.com
 # server creates and securely persists a per-workspace signing key:
 CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET=<hex-key>
 
-# Optional token lifetime in seconds; default 86400:
-CODING_TOOLS_MCP_OAUTH_TOKEN_TTL=86400
+# Optional token lifetime in seconds; 0 (default) means no expiration.
+# Set 60–604800 for a finite lifetime, up to seven days:
+CODING_TOOLS_MCP_OAUTH_TOKEN_TTL=0
 ```
 
 With an ephemeral tunnel, omit `CODING_TOOLS_MCP_SERVER_URL`; the server derives
@@ -104,6 +107,16 @@ next to that registry with user-only permissions. Keeping the same workspace
 state and public resource URL allows already-issued access tokens and registered
 clients to survive a server restart.
 
+Non-expiring tokens omit the JWT `exp` claim and the token response's
+`expires_in` field, both of which are optional in
+[JWT](https://www.rfc-editor.org/rfc/rfc7519#section-4.1.4) and
+[OAuth](https://www.rfc-editor.org/rfc/rfc6749#section-5.1), respectively.
+Changing the lifetime affects newly issued tokens only;
+previously issued tokens retain their original expiration. After upgrading
+from the 24-hour default, authorize once more to obtain a non-expiring token.
+Tokens still require the original signing key, registered client, and resource
+URL; rotating that key invalidates tokens signed with the old key.
+
 ### Optional pre-registered client
 
 Dynamic registration is the default. An operator may additionally pre-register
@@ -120,7 +133,7 @@ configuration; do not rely on the loopback fallback for a production client.
 
 ## HTTP session behavior
 
-There are none. Since 0.3.0 this endpoint is stateless: no response carries an
+In single-workspace mode, this endpoint is stateless: no response carries an
 `Mcp-Session-Id`, an `Mcp-Session-Id` a client kept from an older server is
 ignored rather than refused, and `DELETE /mcp` returns `405` with `Allow: POST`
 because there is nothing to terminate. Every request is answered by the one
@@ -129,6 +142,29 @@ or run beside another client without losing anything. Commands are workspace
 resources with their own timeout, count, output, and retention limits: any
 authenticated client of the workspace can continue one with the `command_id`
 that `exec_command` returned.
+
+Project Gateway mode uses `Mcp-Session-Id` to retain each client's selected
+project. These in-memory bindings have no idle expiration by default. Set
+`--gateway-session-ttl` or `CODING_TOOLS_MCP_GATEWAY_SESSION_TTL` to a positive
+number of seconds to enable idle expiry (minimum 60 seconds), or `0` to disable
+it. An expired binding returns HTTP 404 and requires a new MCP session, without
+requiring OAuth authorization again if the access token is still valid.
+Gateway restarts clear these in-memory bindings, so clients must establish a
+new session after a restart even when their OAuth token remains valid.
+
+The Gateway retains at most 4096 sessions. Reaching capacity rejects only new
+session creation with HTTP 503 and `Retry-After`; existing connections remain
+valid. Clients should release unused bindings with `DELETE /mcp` and their
+`Mcp-Session-Id`. `project_context` returns `session_stats` with active count,
+capacity, rejected creation count, and the configured idle lifetime.
+
+`GET /health` uses the same authentication as MCP calls and reports
+`last_tool_call_at` only after a successful tool response (not a ping, failed
+call, or public server-card probe). It also reports Gateway session statistics.
+Desktop uses this endpoint over loopback with an internal bearer credential
+kept in Keychain and the child environment. The public server card remains a
+reachability check; it does not assert that a particular client's OAuth token
+is valid. Tool-call activity is process-local and resets after a restart.
 
 A handshake-era client needs no change for this. It still sends `initialize`,
 still gets the same `InitializeResult`, and simply has no session header to

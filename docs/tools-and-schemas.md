@@ -203,6 +203,22 @@ anchored to the bound Project root.
 
 ## Command and output behavior
 
+An `exec_command` `operation_id` is scoped to the canonical workspace and recorded
+before spawning the command. Reusing it with different execution parameters
+returns `OPERATION_CONFLICT`. A completed operation can return its saved terminal
+receipt after a server restart, with `deduplicated: true`,
+`recovered_from_journal: true`, and `output_available: false`. Receipts contain
+bounded completion metadata, not command text, environment values, or output;
+old process handles and output references cannot be used after a restart.
+`get_command` can recover this receipt by `operation_id` as well.
+
+If the previous process accepted an operation but never saved its completion,
+the server returns `OPERATION_OUTCOME_UNKNOWN` without starting another process.
+Inspect the operation's effects before explicitly choosing a new operation ID.
+This is duplicate-execution protection, not a guarantee that an interrupted
+external action completed successfully. Keep the workspace's state directory
+to retain this protection across restarts.
+
 `exec_command` defaults `yield_time_ms` to `10000`. Short commands ordinarily
 return `status: "exited"` in one call. A still-running command returns a
 `command_id` and a machine-readable `next_action` for `get_command` with

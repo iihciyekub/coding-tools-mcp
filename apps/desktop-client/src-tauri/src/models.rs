@@ -155,6 +155,8 @@ pub struct AuthConfig {
     pub oauth_password: String,
     #[serde(default = "new_oauth_token_secret")]
     pub oauth_token_secret: String,
+    #[serde(default)]
+    pub oauth_token_ttl_seconds: u32,
     #[serde(default = "new_secret")]
     pub bearer_token: String,
 }
@@ -172,6 +174,7 @@ impl Default for AuthConfig {
             r#type: default_auth_type(),
             oauth_password: new_secret(),
             oauth_token_secret: new_oauth_token_secret(),
+            oauth_token_ttl_seconds: 0,
             bearer_token: new_secret(),
         }
     }
@@ -489,6 +492,13 @@ impl WorkspaceProfile {
         if self.auth.r#type == "oauth" && self.auth.oauth_password.trim().is_empty() {
             return Err("OAuth mode requires an authorization password.".into());
         }
+        if self.auth.oauth_token_ttl_seconds != 0
+            && !(60..=604_800).contains(&self.auth.oauth_token_ttl_seconds)
+        {
+            return Err(
+                "Authorization validity must be unlimited or between 60 seconds and 7 days.".into(),
+            );
+        }
         if self.auth.r#type == "bearer" && self.auth.bearer_token.trim().is_empty() {
             return Err("Bearer mode requires a token.".into());
         }
@@ -565,6 +575,7 @@ pub struct RuntimeStatus {
     pub local_dns_error: bool,
     pub dns_repairing: bool,
     pub can_repair_dns: bool,
+    pub last_tool_call_at: Option<f64>,
 }
 
 impl RuntimeStatus {
@@ -584,6 +595,7 @@ impl RuntimeStatus {
             local_dns_error: false,
             dns_repairing: false,
             can_repair_dns: false,
+            last_tool_call_at: None,
         }
     }
 }
@@ -802,6 +814,21 @@ mod tests {
         .unwrap();
         profile.runtime.permission_mode = "host".into();
         assert!(profile.validate().is_ok());
+    }
+
+    #[test]
+    fn legacy_auth_defaults_to_no_expiration_without_rotating_credentials() {
+        let original = AuthConfig::default();
+        let mut value = serde_json::to_value(&original).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("oauth_token_ttl_seconds");
+        let restored: AuthConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.oauth_token_ttl_seconds, 0);
+        assert_eq!(restored.oauth_password, original.oauth_password);
+        assert_eq!(restored.oauth_token_secret, original.oauth_token_secret);
+        assert_eq!(restored.bearer_token, original.bearer_token);
     }
 
     #[test]

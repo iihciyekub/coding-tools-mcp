@@ -18,6 +18,7 @@ export interface AuthConfig {
   type: AuthType;
   oauth_password: string;
   oauth_token_secret: string;
+  oauth_token_ttl_seconds: number;
   bearer_token: string;
 }
 
@@ -76,6 +77,7 @@ export interface RuntimeStatus {
   local_dns_error: boolean;
   dns_repairing: boolean;
   can_repair_dns: boolean;
+  last_tool_call_at: number | null;
 }
 
 export interface DesktopSnapshot {
@@ -88,7 +90,6 @@ export interface DesktopSnapshot {
   profiles: WorkspaceProfile[];
   statuses: Record<string, RuntimeStatus>;
   dependencies: DependencyStatus;
-  runtime_state: Record<string, RuntimeStateSnapshot>;
 }
 
 export interface RuntimeApproval {

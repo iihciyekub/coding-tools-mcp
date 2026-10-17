@@ -7,7 +7,8 @@ API.
 
 ## Features
 
-- Compact menu-bar panel with no macOS Dock icon
+- Compact menu-bar panel with no macOS Dock icon. Click the icon to open or hide
+  the panel; clicking outside dismisses it without stopping background services.
 - Multiple workspace profiles behind one shared Gateway and one public connection
 - Workspace profiles own access permissions; child projects inherit them and new
   directories can be used immediately without registration. See the authoritative
@@ -43,6 +44,15 @@ API.
   Stop and Quit, so multiple workspaces are easier to distinguish and accidental
   shutdowns are less likely.
 - Live runtime/tunnel status with copyable Server URL and OAuth authorization passcode
+- Home shows authorization validity above the Server URL, using the same lifetime
+  passed to the runtime. New authorizations default to **No expiration**; finite
+  lifetimes display their duration. See [OAuth lifetime and upgrade behavior](../../docs/remote-mcp.md#oauth-configuration).
+- **Service reachable** reports the public endpoint check. A separate timestamp
+  shows the last successful client tool call, or that the app is waiting for one;
+  public reachability alone does not establish client authorization.
+- Visible-panel refreshes omit unused approval database reads. Dependency checks
+  are cached for 30 seconds and invalidated during dependency setup and repair;
+  operator approvals remain available in the native workspace menu.
 - Secrets stored in the operating-system keychain
 - English and Simplified Chinese UI, including the fixed menu-bar panel with a persisted language selector
 - Native process-group cleanup when the app exits

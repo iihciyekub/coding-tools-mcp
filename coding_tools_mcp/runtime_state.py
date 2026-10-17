@@ -27,11 +27,11 @@ def default_state_root() -> Path:
 
 
 class RuntimeStateStore:
-    """Small cross-process store for explicit operator approvals.
+    """Small cross-process store for approvals and execution deduplication.
 
     Planning, reviews, checks, checkpoints, worktree workflow, and conversation
-    memory belong to the model/client. The MCP persists only state required to
-    enforce a local security decision.
+    memory belong to the model/client. Only security decisions and execution
+    receipts needed to prevent duplicate side effects are persisted here.
     """
 
     def __init__(self, workspace: Path, state_root: Path | None = None) -> None:
@@ -67,6 +67,13 @@ class RuntimeStateStore:
                 );
                 CREATE INDEX IF NOT EXISTS approvals_status_created
                     ON approvals(status, created_at DESC);
+                CREATE TABLE IF NOT EXISTS executions (
+                    operation_id TEXT PRIMARY KEY,
+                    digest TEXT NOT NULL,
+                    owner TEXT NOT NULL,
+                    accepted_at REAL NOT NULL,
+                    receipt_json TEXT
+                );
                 """
             )
             db.commit()
@@ -81,6 +88,29 @@ class RuntimeStateStore:
                 yield db
         finally:
             db.close()
+
+    def execution(self, operation_id: str) -> dict[str, Any] | None:
+        with self._lock, self._connection() as db:
+            row = db.execute("SELECT * FROM executions WHERE operation_id=?", (operation_id,)).fetchone()
+            return dict(row) if row is not None else None
+
+    def reserve_execution(self, operation_id: str, digest: str, owner: str) -> bool:
+        with self._lock, self._connection() as db:
+            return db.execute(
+                "INSERT OR IGNORE INTO executions(operation_id,digest,owner,accepted_at) VALUES(?,?,?,?)",
+                (operation_id, digest, owner, time.time()),
+            ).rowcount == 1
+
+    def forget_unstarted_execution(self, operation_id: str, owner: str) -> None:
+        with self._lock, self._connection() as db:
+            db.execute("DELETE FROM executions WHERE operation_id=? AND owner=? AND receipt_json IS NULL", (operation_id, owner))
+
+    def finish_execution(self, operation_id: str, owner: str, receipt: dict[str, Any]) -> None:
+        with self._lock, self._connection() as db:
+            db.execute(
+                "UPDATE executions SET receipt_json=? WHERE operation_id=? AND owner=?",
+                (json.dumps(receipt, ensure_ascii=True), operation_id, owner),
+            )
 
     def create_approval(
         self,

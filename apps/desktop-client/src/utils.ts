@@ -1,4 +1,12 @@
-import type { WorkspaceProfile } from "./types";
+import type { AuthConfig, WorkspaceProfile } from "./types";
+
+export function authorizationValidity(auth: AuthConfig, language: "en" | "zh-CN"): string {
+  const seconds = auth.type === "bearer" ? 0 : auth.oauth_token_ttl_seconds;
+  if (seconds === 0) return language === "zh-CN" ? "不限时" : "No expiration";
+  const units = [[86400, "day"], [3600, "hour"], [60, "minute"], [1, "second"]] as const;
+  const [divisor, unit] = units.find(([size]) => seconds % size === 0)!;
+  return new Intl.NumberFormat(language, { style: "unit", unit, unitDisplay: "long" }).format(seconds / divisor);
+}
 
 export function normalizePublicOrigin(value: string): string {
   const trimmed = value.trim().replace(/\/+$/, "");

@@ -49,6 +49,7 @@ from .gateway import (
     HTTPProjectRuntime,
     ProjectDefinition,
     ProjectRegistry,
+    SessionCapacityExceeded,
     SessionRegistry,
 )
 from .landlock_exec import libc_syscall
@@ -3778,6 +3779,7 @@ class Runtime:
         elif command.stdout_total_bytes or command.stderr_total_bytes:
             stream = "stdout" if command.stdout_total_bytes else "stderr"
             payload["next_action"] = read_output_action(output_refs[stream])
+        self._save_execution_receipt(command, payload)
         return payload
 
     @staticmethod
@@ -3817,6 +3819,30 @@ class Runtime:
         payload["deduplicated"] = True
         payload["message"] = "Existing execution returned for this operation_id; no new process was started."
         return payload
+
+    def _durable_operation_replay(self, operation_id: str, digest: str | None = None) -> dict[str, Any] | None:
+        record = self.runtime_state.execution(operation_id)
+        if record is None:
+            return None
+        if digest is not None and record["digest"] != digest:
+            raise ToolFailure("OPERATION_CONFLICT", "operation_id was already used with different execution parameters.", category="validation")
+        if record["receipt_json"] is None:
+            raise ToolFailure(
+                "OPERATION_OUTCOME_UNKNOWN",
+                "This operation was already accepted, but its final result is unavailable. Verify its effects before submitting a new operation_id; it will not be executed again automatically.",
+                category="runtime", retryable=False,
+                details={"operation_id": operation_id, "accepted_at": record["accepted_at"]},
+            )
+        return {**json.loads(record["receipt_json"]), "deduplicated": True, "recovered_from_journal": True,
+                "output_available": False,
+                "message": "Recovered the completed execution receipt; no process was started. Prior process handles and output references are no longer available."}
+
+    def _save_execution_receipt(self, command: CommandRun, payload: dict[str, Any]) -> None:
+        if command.operation_id and command.process.poll() is not None:
+            # Persist bounded metadata, never command text, environment or output.
+            keys = ("ok", "command_id", "operation_id", "workdir", "status", "exit_code", "signal", "timed_out", "started_at", "completed_at", "output_refs")
+            receipt = {key: payload[key] for key in keys if key in payload}
+            self.runtime_state.finish_execution(command.operation_id, self.command_manager.server_instance_id, receipt)
 
     def _existing_operation_replay(
         self,
@@ -3893,6 +3919,8 @@ class Runtime:
         )
         if operation_id is not None and operation_digest is not None:
             replay = self._existing_operation_replay(operation_id, operation_digest)
+            if replay is None:
+                replay = self._durable_operation_replay(operation_id, operation_digest)
             if replay is not None:
                 return replay
         self._check_command_policy(cmd, args)
@@ -3981,6 +4009,21 @@ class Runtime:
                     details={"max_active_commands": MAX_ACTIVE_COMMANDS},
                 )
             else:
+                if operation_id is not None and operation_digest is not None:
+                    try:
+                        claimed = self.runtime_state.reserve_execution(operation_id, operation_digest, self.command_manager.server_instance_id)
+                    except Exception:
+                        self.command_manager.operations.pop(operation_id, None)
+                        if landlock_fd is not None:
+                            os.close(landlock_fd)
+                        raise
+                    if not claimed:
+                        self.command_manager.operations.pop(operation_id, None)
+                        if landlock_fd is not None:
+                            os.close(landlock_fd)
+                        replay = self._durable_operation_replay(operation_id, operation_digest)
+                        assert replay is not None
+                        return replay
                 self.starting_commands += 1
         if existing_operation_command is not None:
             if landlock_fd is not None:
@@ -4032,6 +4075,8 @@ class Runtime:
                         self.command_manager.operations.pop(operation_id, None)
             if process is not None and process.poll() is None:
                 terminate_process_group(process, signal.SIGTERM)
+            if process is None and operation_reserved and operation_id is not None:
+                self.runtime_state.forget_unstarted_execution(operation_id, self.command_manager.server_instance_id)
             raise
         finally:
             if landlock_fd is not None:
@@ -4060,7 +4105,9 @@ class Runtime:
             payload.update(self._command_activity_payload(command))
             payload["elapsed_ms"] = int((time.time() - start) * 1000)
             self._add_exec_diagnostics(payload)
-            return self._format_command_output(command, payload, args)
+            result = self._format_command_output(command, payload, args)
+            self._save_execution_receipt(command, result)
+            return result
 
         while True:
             if process.poll() is not None:
@@ -4583,6 +4630,9 @@ class Runtime:
                 with self.commands_lock:
                     record = self.command_manager.operations.get(operation_id)
                     if record is None:
+                        replay = self._durable_operation_replay(operation_id)
+                        if replay is not None:
+                            return replay
                         raise ToolFailure(
                             "OPERATION_NOT_FOUND",
                             "operation_id is not known or has expired.",
@@ -7909,6 +7959,12 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if normalized == "/oauth/authorize" and not head_only:
             self.handle_oauth_authorize_get()
             return
+        if normalized == "/health":
+            if not self.is_authorized():
+                self.send_unauthorized(head_only=head_only)
+                return
+            self.send_json(cast(RuntimeHTTPServer, self.server).connection_health(), head_only=head_only)
+            return
         if normalized == MCP_ENDPOINT_PATH:
             origin = self.headers.get("Origin")
             if origin and not is_allowed_origin(origin):
@@ -8031,9 +8087,14 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                     )
                     return
             elif self._request_establishes_gateway_session(method, params):
-                context = self.runtime.sessions.create(
-                    selected_project_id=self.runtime.projects.default_project_id
-                )
+                try:
+                    context = self.runtime.sessions.create(
+                        selected_project_id=self.runtime.projects.default_project_id
+                    )
+                except SessionCapacityExceeded as exc:
+                    self.send_rpc_error(-32000, str(exc), status=503, request_id=response_id(request),
+                                        data=self.runtime.sessions.statistics(), extra_headers={"Retry-After": "1"})
+                    return
                 session_id = context.session_id
                 response_session_id = session_id
         era = request_era(method, params)
@@ -8153,7 +8214,12 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         )
         try:
             runtime = self.runtime.bind(session_id) if isinstance(self.runtime, GatewayRuntime) else self.runtime
-            return dispatch_rpc(runtime, request, transport_protocol_version=legacy_version)
+            response = dispatch_rpc(runtime, request, transport_protocol_version=legacy_version)
+            if request.get("method") == "tools/call" and isinstance(response, dict):
+                result = response.get("result")
+                if isinstance(result, dict) and result.get("isError") is not True:
+                    cast(RuntimeHTTPServer, self.server).record_tool_success()
+            return response
         except Exception as exc:  # noqa: BLE001 - HTTP must always answer with JSON-RPC
             return jsonrpc_error(response_id(request), -32603, str(exc))
 
@@ -8484,7 +8550,10 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
 
         server_url = resource
         access_token = create_access_token(cfg, server_url, client_id=client_id)
-        self.send_json({"access_token": access_token, "token_type": "Bearer", "expires_in": cfg.token_ttl})
+        response: dict[str, Any] = {"access_token": access_token, "token_type": "Bearer"}
+        if cfg.token_ttl > 0:
+            response["expires_in"] = cfg.token_ttl
+        self.send_json(response)
 
     def handle_oauth_register(self) -> None:
         cfg = self.runtime.oauth_config
@@ -8566,6 +8635,19 @@ class RuntimeHTTPServer(http.server.ThreadingHTTPServer):
         super().__init__(address, handler)
         self.runtime = runtime
         self._request_slots = threading.BoundedSemaphore(MAX_HTTP_CONCURRENT_REQUESTS)
+        self._health_lock = threading.Lock()
+        self._last_tool_call_at: float | None = None
+
+    def record_tool_success(self) -> None:
+        with self._health_lock:
+            self._last_tool_call_at = time.time()
+
+    def connection_health(self) -> dict[str, Any]:
+        with self._health_lock:
+            result: dict[str, Any] = {"last_tool_call_at": self._last_tool_call_at}
+        if isinstance(self.runtime, GatewayRuntime):
+            result["sessions"] = self.runtime.sessions.statistics()
+        return result
 
     def process_request(self, request: Any, client_address: Any) -> None:
         if not self._request_slots.acquire(blocking=False):
@@ -8782,8 +8864,11 @@ def run_http(args: argparse.Namespace) -> int:
         except ValueError:
             print(f"ERROR: {ENV_PREFIX}_OAUTH_TOKEN_TTL must be an integer.", file=sys.stderr)
             return 2
-        if not 60 <= token_ttl <= 604_800:
-            print(f"ERROR: {ENV_PREFIX}_OAUTH_TOKEN_TTL must be between 60 and 604800 seconds.", file=sys.stderr)
+        if token_ttl != 0 and not 60 <= token_ttl <= 604_800:
+            print(
+                f"ERROR: {ENV_PREFIX}_OAUTH_TOKEN_TTL must be 0 (no expiration) or between 60 and 604800 seconds.",
+                file=sys.stderr,
+            )
             return 2
         registry = OAuthClientRegistry(oauth_registry_storage_path(Path(args.workspace)))
         if registry.load_warning:
@@ -9021,7 +9106,7 @@ def build_parser() -> argparse.ArgumentParser:
             DEFAULT_GATEWAY_SESSION_TTL_SECONDS,
         ),
         help=(
-            "seconds to retain inactive gateway project bindings; defaults to "
+            "seconds to retain inactive gateway project bindings; 0 disables expiration; defaults to "
             f"{DEFAULT_GATEWAY_SESSION_TTL_SECONDS}"
         ),
     )

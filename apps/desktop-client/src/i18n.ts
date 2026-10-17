@@ -2,11 +2,17 @@ export type Language = "en" | "zh-CN";
 
 const zh: Record<string, string> = {
   "Connection settings": "连接设置",
+  "Authorization validity": "授权有效期",
+  "Applies to new authorizations. Earlier authorizations keep their original expiry.": "适用于新授权；已有授权保留原到期时间。",
+  "Authorization validity must be unlimited or between 60 seconds and 7 days.": "授权有效期应为不限时，或 60 秒至 7 天。",
   "Connection link": "连接链接",
   "Shared by all workspaces.": "所有工作区共用。",
   "Temporary link": "临时链接",
   "Fixed link": "固定链接",
   "Connected": "已连接",
+  "Service reachable": "服务可达",
+  "Last successful tool call": "最近成功调用",
+  "Waiting for a successful client tool call": "等待客户端成功调用",
   "Connecting…": "连接中…",
   "Start to get a connection link": "启动后获取连接地址",
   "Public address": "公网地址",
