@@ -8,7 +8,7 @@ import type { DependencyStatus, GatewayConfig, LogBundle, PermissionMode, Runtim
 import { authorizationValidity, normalizePublicOrigin, publicEndpoint, workspaceHue } from "./utils";
 
 const PANEL_WIDTH = 420;
-const APP_VERSION = "0.5.9";
+const APP_VERSION = "0.8.0";
 type Page = "home" | "new-access" | "workspaces" | "environment" | "logs" | "settings" | "more" | "connection";
 type CopyAction = "server-name" | "server-url" | "credential" | "logs";
 type ConfirmAction = { kind: "stop"; profileId: string } | { kind: "stop-all" } | { kind: "quit" } | null;

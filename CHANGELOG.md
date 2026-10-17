@@ -1,5 +1,13 @@
 # Changelog
 
+## Desktop 0.8.0 - 2026-10-17
+
+- Add explicit macOS App icon appearances: white mark on black in dark mode,
+  black mark on white in light mode, with the same foreground alignment.
+- Bundle the native appearance catalog and declare its icon name so Finder and
+  launchers use the intended artwork instead of automatically darkening a flat
+  light icon. Keep an aligned ICNS fallback for older macOS releases.
+
 ## Desktop 0.5.9 - 2026-10-17
 
 - Replace app, menu-bar and panel artwork with the supplied IconKitchen design;
