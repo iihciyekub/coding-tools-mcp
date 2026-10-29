@@ -100,6 +100,33 @@ fn system_tool(name: &str) -> PathBuf {
     }
 }
 
+fn unpack_archive(
+    archive: &Path,
+    destination: &Path,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    let command = {
+        let mut command = Command::new(system_tool("WindowsPowerShell/v1.0/powershell"));
+        // Keep Unicode paths out of the script text and the ANSI tar interface.
+        // Only this fixed command is executed; paths are passed as environment data.
+        command.args([
+            "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+            "$ErrorActionPreference = 'Stop'; Expand-Archive -LiteralPath $env:CODING_TOOLS_MCP_DOWNLOAD_ARCHIVE -DestinationPath $env:CODING_TOOLS_MCP_DOWNLOAD_DESTINATION",
+        ]);
+        command.env("CODING_TOOLS_MCP_DOWNLOAD_ARCHIVE", archive);
+        command.env("CODING_TOOLS_MCP_DOWNLOAD_DESTINATION", destination);
+        command
+    };
+    #[cfg(not(windows))]
+    let command = {
+        let mut command = Command::new(system_tool("tar"));
+        command.arg("-xf").arg(archive).arg("-C").arg(destination);
+        command
+    };
+    run_cancellable(command, cancelled)
+}
+
 pub(crate) fn is_managed_installed(tool: &str, data_dir: &Path) -> bool {
     let path = managed_path(tool, data_dir);
     if !path.is_file() {
@@ -270,9 +297,8 @@ pub(crate) fn install(
             archive
         } else {
             fs::create_dir_all(&extracted).map_err(|e| e.to_string())?;
-            let mut tar = Command::new(system_tool("tar"));
-            tar.arg("-xf").arg(&archive).arg("-C").arg(&extracted);
-            run_cancellable(tar, cancelled).map_err(|e| format!("Could not unpack {tool}: {e}"))?;
+            unpack_archive(&archive, &extracted, cancelled)
+                .map_err(|e| format!("Could not unpack {tool}: {e}"))?;
             find_named(
                 &extracted,
                 &format!("{tool}{}", std::env::consts::EXE_SUFFIX),
