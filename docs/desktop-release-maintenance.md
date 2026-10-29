@@ -233,6 +233,11 @@ pinned Windows uv/cloudflared downloads, and verify uninstallation
 before uploading it. This is an additional maintainer build artifact; it does
 not change stable release asset names, existing tags, macOS or Homebrew.
 
+For a maintainer-requested build-only artifact, dispatch `windows-artifact`
+with `verify_windows=false`. This skips installation, Runtime and panel checks;
+the resulting installer must be described as unverified. The default remains
+`true`, and stable release behavior is unchanged.
+
 The `production-release` Environment requires these secrets. Their values MUST
 never be committed:
 
