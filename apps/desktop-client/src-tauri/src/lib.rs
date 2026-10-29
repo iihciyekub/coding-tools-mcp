@@ -6,7 +6,10 @@ mod runtime_state;
 mod storage;
 
 use models::{GatewayConfig, LogBundle, ProjectProfile, RuntimeStatus, WorkspaceProfile};
-use panel::{pointer_over_tray, visibility_after_event, PanelEvent};
+use panel::{
+    panel_bounds, pointer_over_tray, visibility_after_event, PanelEvent, PANEL_MAX_HEIGHT,
+    PANEL_WIDTH,
+};
 use resource_installer::managed_version;
 use runtime::{
     maintain_connection, prepare_runtime as prepare_runtime_environment, read_gateway_project_logs,
@@ -27,9 +30,7 @@ use storage::ProfileStore;
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{
-    AppHandle, Manager, PhysicalPosition, Rect, WebviewUrl, WebviewWindowBuilder, WindowEvent,
-};
+use tauri::{AppHandle, Manager, Rect, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::{
     DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
@@ -1721,19 +1722,39 @@ fn handle_tray_menu_event(app: &AppHandle, id: &str) {
     }
 }
 
-fn toggle_panel(app: &AppHandle, tray_rect: Rect) -> Result<(), String> {
+#[derive(Serialize)]
+struct PanelLimits {
+    max_width: f64,
+    max_height: f64,
+}
+
+#[tauri::command]
+fn resize_panel(app: AppHandle, height: f64) -> Result<PanelLimits, String> {
+    if !height.is_finite() {
+        return Err("Invalid panel height.".into());
+    }
+    position_panel(&app, None, Some(height.clamp(166.0, PANEL_MAX_HEIGHT)))
+}
+
+fn position_panel(
+    app: &AppHandle,
+    tray_rect: Option<Rect>,
+    height: Option<f64>,
+) -> Result<PanelLimits, String> {
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "Desktop panel is unavailable.".to_string())?;
-    if !visibility_after_event(
-        window.is_visible().map_err(menu_error)?,
-        PanelEvent::TrayClick,
-    ) {
-        window.hide().map_err(menu_error)?;
-        return Ok(());
-    }
-
     let scale_factor = window.scale_factor().map_err(menu_error)?;
+    let tray_rect = tray_rect.or_else(|| {
+        app.tray_by_id(TRAY_ID)
+            .and_then(|tray| tray.rect().ok().flatten())
+    });
+    let Some(tray_rect) = tray_rect else {
+        return Ok(PanelLimits {
+            max_width: PANEL_WIDTH,
+            max_height: PANEL_MAX_HEIGHT,
+        });
+    };
     let tray_position = tray_rect.position.to_physical::<f64>(scale_factor);
     let tray_size = tray_rect.size.to_physical::<f64>(scale_factor);
     let window_size = window.outer_size().map_err(menu_error)?;
@@ -1752,23 +1773,58 @@ fn toggle_panel(app: &AppHandle, tray_rect: Rect) -> Result<(), String> {
                 && tray_center_y < f64::from(position.y) + f64::from(size.height)
         });
 
-    let mut x = tray_center_x - f64::from(window_size.width) / 2.0;
-    let mut y = tray_position.y + tray_size.height + 6.0;
-    if let Some(monitor) = monitor {
-        let position = monitor.position();
-        let size = monitor.size();
-        let min_x = f64::from(position.x) + 8.0;
-        let max_x =
-            f64::from(position.x) + f64::from(size.width) - f64::from(window_size.width) - 8.0;
-        x = x.clamp(min_x, max_x.max(min_x));
-        let monitor_mid_y = f64::from(position.y) + f64::from(size.height) / 2.0;
-        if tray_center_y > monitor_mid_y {
-            y = tray_position.y - f64::from(window_size.height) - 6.0;
-        }
+    let monitor = monitor
+        .or(window.current_monitor().map_err(menu_error)?)
+        .or(window.primary_monitor().map_err(menu_error)?);
+    let Some(monitor) = monitor else {
+        return Ok(PanelLimits {
+            max_width: PANEL_WIDTH,
+            max_height: PANEL_MAX_HEIGHT,
+        });
+    };
+    let scale = monitor.scale_factor();
+    let work = monitor.work_area();
+    let requested_height = height.unwrap_or(f64::from(window_size.height) / scale_factor);
+    let bounds = panel_bounds(
+        (
+            tray_position.x,
+            tray_position.y,
+            tray_size.width,
+            tray_size.height,
+        ),
+        (
+            f64::from(work.position.x),
+            f64::from(work.position.y),
+            f64::from(work.size.width),
+            f64::from(work.size.height),
+        ),
+        (PANEL_WIDTH * scale, requested_height * scale),
+        scale,
+    );
+    if window.outer_position().map_err(menu_error)? != bounds.position {
+        window.set_position(bounds.position).map_err(menu_error)?;
     }
-    window
-        .set_position(PhysicalPosition::new(x.round() as i32, y.round() as i32))
-        .map_err(menu_error)?;
+    if window.outer_size().map_err(menu_error)? != bounds.size {
+        window.set_size(bounds.size).map_err(menu_error)?;
+    }
+    Ok(PanelLimits {
+        max_width: PANEL_WIDTH.min((f64::from(work.size.width) / scale - 16.0).max(1.0)),
+        max_height: PANEL_MAX_HEIGHT.min((f64::from(work.size.height) / scale - 16.0).max(1.0)),
+    })
+}
+
+fn toggle_panel(app: &AppHandle, tray_rect: Rect) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or("Desktop panel is unavailable.")?;
+    if !visibility_after_event(
+        window.is_visible().map_err(menu_error)?,
+        PanelEvent::TrayClick,
+    ) {
+        window.hide().map_err(menu_error)?;
+        return Ok(());
+    }
+    position_panel(app, Some(tray_rect), None)?;
     window.show().map_err(menu_error)?;
     window.set_focus().map_err(menu_error)
 }
@@ -1810,7 +1866,7 @@ pub fn run() {
             let panel =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                     .title("Coding Tools MCP")
-                    .inner_size(420.0, 374.0)
+                    .inner_size(PANEL_WIDTH, 374.0)
                     .minimizable(false)
                     .maximizable(false)
                     .closable(false)
@@ -1826,6 +1882,13 @@ pub fn run() {
                     .build()?;
             let focus_panel = panel.clone();
             panel.on_window_event(move |event| {
+                if matches!(
+                    event,
+                    WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }
+                ) && focus_panel.is_visible().unwrap_or(false)
+                {
+                    let _ = position_panel(focus_panel.app_handle(), None, None);
+                }
                 if !cfg!(debug_assertions)
                     && matches!(event, WindowEvent::Focused(false))
                     && !visibility_after_event(
@@ -1901,6 +1964,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             desktop_snapshot,
+            resize_panel,
             decide_approval,
             create_profile,
             create_full_access_profile,

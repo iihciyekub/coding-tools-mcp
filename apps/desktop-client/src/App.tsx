@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { LogicalSize } from "@tauri-apps/api/dpi";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { api } from "./api";
@@ -7,7 +6,6 @@ import { detectLanguage, translator, type Language } from "./i18n";
 import type { DependencyStatus, GatewayConfig, LogBundle, PermissionMode, RuntimeStatus, TunnelConfig, WorkspaceProfile } from "./types";
 import { authorizationValidity, normalizePublicOrigin, publicEndpoint, workspaceHue } from "./utils";
 
-const PANEL_WIDTH = 420;
 const APP_VERSION = "0.8.0";
 type Page = "home" | "new-access" | "workspaces" | "environment" | "logs" | "settings" | "more" | "connection";
 type CopyAction = "server-name" | "server-url" | "credential" | "logs";
@@ -129,7 +127,15 @@ function App() {
     const panel = panelRef.current;
     if (projectWindow || !panel || typeof ResizeObserver === "undefined") return;
     let frame = 0;
-    const resize = () => { window.cancelAnimationFrame(frame); frame = window.requestAnimationFrame(() => void getCurrentWindow().setSize(new LogicalSize(PANEL_WIDTH, Math.min(544, Math.max(166, Math.ceil(panel.scrollHeight)))))); };
+    const resize = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        void api.resizePanel(Math.ceil(panel.scrollHeight)).then((limits) => {
+          panel.style.width = `${limits.max_width}px`;
+          panel.style.maxHeight = `${limits.max_height}px`;
+        }).catch(() => { /* The window may be closing. */ });
+      });
+    };
     const observer = new ResizeObserver(resize); observer.observe(panel); resize();
     return () => { window.cancelAnimationFrame(frame); observer.disconnect(); };
   }, [projectWindow]);

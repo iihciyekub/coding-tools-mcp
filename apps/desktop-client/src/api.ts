@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { DesktopSnapshot, GatewayConfig, LogBundle, RuntimeStatus, TunnelConfig, WorkspaceProfile } from "./types";
 
 export const api = {
+  resizePanel: (height: number) => invoke<{ max_width: number; max_height: number }>("resize_panel", { height }),
   snapshot: () => invoke<DesktopSnapshot>("desktop_snapshot"),
   decideApproval: (profileId: string, approvalId: string, approved: boolean) =>
     invoke<void>("decide_approval", { profileId, approvalId, approved }),
