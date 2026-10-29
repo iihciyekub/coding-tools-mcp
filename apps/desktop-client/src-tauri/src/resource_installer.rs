@@ -87,7 +87,7 @@ pub(crate) fn managed_path(tool: &str, data_dir: &Path) -> PathBuf {
     tools_bin(data_dir).join(format!("{tool}{}", std::env::consts::EXE_SUFFIX))
 }
 
-fn system_tool(name: &str) -> PathBuf {
+pub(crate) fn system_tool(name: &str) -> PathBuf {
     #[cfg(windows)]
     {
         PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()))

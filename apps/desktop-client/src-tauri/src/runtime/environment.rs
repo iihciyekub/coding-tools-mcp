@@ -486,6 +486,12 @@ mod tests {
     #[cfg(windows)]
     #[ignore = "downloads Windows uv, Python and runtime dependencies without system installers"]
     fn prepare_windows_runtime_without_system_installers() {
+        let curl = Command::new(resource_installer::system_tool("curl"))
+            .arg("--version")
+            .output()
+            .unwrap();
+        assert!(curl.status.success());
+        assert!(String::from_utf8_lossy(&curl.stdout).contains("https"));
         let resources = std::env::var_os("CODING_TOOLS_MCP_TEST_RUNTIME_RESOURCES")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources"));

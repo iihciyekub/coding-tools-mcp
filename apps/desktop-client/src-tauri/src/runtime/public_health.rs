@@ -54,7 +54,7 @@ pub(super) fn probe_cancellable(origin: &str, name: &str, cancelled: &AtomicBool
         // All attempts share a five-second budget. Keep ordinary TLS/hostname
         // verification, including when --resolve supplies a fresh DNS answer.
         let limit = format!("{:.3}", remaining.as_secs_f64().min(3.0));
-        let mut command = Command::new("/usr/bin/curl");
+        let mut command = Command::new(resource_installer::system_tool("curl"));
         command.args([
             "--disable",
             "--silent",
