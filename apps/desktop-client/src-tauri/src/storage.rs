@@ -107,8 +107,7 @@ pub struct ProfileStore {
 
 impl ProfileStore {
     pub fn open_default() -> Result<Self, String> {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
+        let home = user_home_directory()
             .ok_or("Could not resolve the user home directory.")?
             .join(storage_directory_name());
         Self::open(home)

@@ -306,10 +306,30 @@ jobs:
         working-directory: apps/desktop-client
         run: npm run tauri build -- --no-bundle --ci
 
+      - name: Restore Windows compiler cache
+        if: needs.validate.outputs.mode == 'windows-artifact'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/desktop-client/src-tauri/target
+          key: windows-desktop-rust-${{ hashFiles('apps/desktop-client/src-tauri/Cargo.lock') }}
+
       - name: Build Windows installer
         if: needs.validate.outputs.mode == 'windows-artifact'
         working-directory: apps/desktop-client
         run: npm run tauri build -- --bundles nsis --ci
+
+      - name: Save Windows compiler cache
+        if: needs.validate.outputs.mode == 'windows-artifact'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/desktop-client/src-tauri/target
+          key: windows-desktop-rust-${{ hashFiles('apps/desktop-client/src-tauri/Cargo.lock') }}
 
       - name: Verify and stage Windows installer
         if: needs.validate.outputs.mode == 'windows-artifact'
