@@ -27,6 +27,11 @@ on:
         options:
           - windows-artifact
           - release
+      verify_windows:
+        description: Run Windows installation, runtime and panel checks for artifact builds
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -264,7 +269,7 @@ jobs:
           rm -f "$RUNNER_TEMP/coding-tools-developer-id.p12" "$RUNNER_TEMP"/AuthKey_*.p8 || true
 
   windows:
-    name: Windows x64 · portable ZIP and test installer
+    name: Windows x64 · installer and portable ZIP
     needs: validate
     if: needs.validate.outputs.windows == 'true'
     runs-on: windows-2025
@@ -331,7 +336,7 @@ jobs:
             apps/desktop-client/src-tauri/target
           key: windows-desktop-rust-${{ hashFiles('apps/desktop-client/src-tauri/Cargo.lock') }}
 
-      - name: Verify and stage Windows installer
+      - name: Stage Windows installer
         if: needs.validate.outputs.mode == 'windows-artifact'
         shell: pwsh
         working-directory: apps/desktop-client
@@ -339,7 +344,9 @@ jobs:
           $ErrorActionPreference = "Stop"
           $installers = @(Get-ChildItem "src-tauri/target/release/bundle/nsis/*-setup.exe")
           if ($installers.Count -ne 1) { throw "Expected exactly one Windows installer" }
-          ./test-windows-installer.ps1 -Installer $installers[0].FullName
+          if ('${{ inputs.verify_windows }}' -eq 'true') {
+            ./test-windows-installer.ps1 -Installer $installers[0].FullName
+          }
           $outDir = Join-Path $env:RUNNER_TEMP "release-assets"
           New-Item -ItemType Directory -Force -Path $outDir | Out-Null
           $name = "Coding-Tools-MCP-${{ needs.validate.outputs.version }}-win-x64-setup.exe"
