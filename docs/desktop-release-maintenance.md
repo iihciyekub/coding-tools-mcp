@@ -227,7 +227,9 @@ An explicit `windows-artifact` build also produces an NSIS installer named
 `desktop-windows-x64-installer` Actions artifact (retained for 30 days). It offers
 Simplified Chinese and English, installs for the current user, and supports
 uninstallation. The Windows runner must install it in a Unicode path, verify
-the runtime resources, launch the installed app and verify uninstallation
+the runtime resources, launch the installed app, prepare its MCP Runtime without
+system Python/uv on the discovery path, complete an MCP handshake, verify the
+pinned Windows uv/cloudflared downloads, and verify uninstallation
 before uploading it. This is an additional maintainer build artifact; it does
 not change stable release asset names, existing tags, macOS or Homebrew.
 

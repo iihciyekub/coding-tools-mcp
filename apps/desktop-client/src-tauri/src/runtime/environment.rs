@@ -196,9 +196,8 @@ pub(super) fn resolve(
     }
     let package_dir = resources.join("runtime");
     let package = Package::read(&package_dir)?;
-    let managed_bin = resource_installer::tools_bin(data);
     let find = |name: &str| {
-        let managed = managed_bin.join(name);
+        let managed = resource_installer::managed_path(name, data);
         if managed.is_file() {
             Some(managed)
         } else {
@@ -434,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_installers_offer_setup_instead_of_starting_an_old_runtime() {
+    fn cancelled_setup_without_installers_does_not_start_an_old_runtime() {
         let temporary = tempfile::tempdir().unwrap();
         let resources = temporary.path().join("resources");
         let package = resources.join("runtime");
@@ -447,10 +446,10 @@ mod tests {
             temporary.path(),
             temporary.path(),
             "",
-            &AtomicBool::new(false),
+            &AtomicBool::new(true),
         )
         .unwrap_err();
-        assert!(error.contains("Install uv"));
+        assert!(error.contains("cancelled"));
     }
 
     #[cfg(unix)]
@@ -481,6 +480,62 @@ mod tests {
         assert!(result.0.starts_with(temporary.path().join("runtimes")));
         let installed = fs::read_to_string(logs.join("setup.log")).unwrap();
         assert!(installed.contains("Successfully installed"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "downloads Windows uv, Python and runtime dependencies without system installers"]
+    fn prepare_windows_runtime_without_system_installers() {
+        let resources = std::env::var_os("CODING_TOOLS_MCP_TEST_RUNTIME_RESOURCES")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources"));
+        let temporary = tempfile::tempdir().unwrap();
+        let data = temporary.path().join("用户数据");
+        let logs = data.join("logs");
+        fs::create_dir_all(&logs).unwrap();
+        // Exclude the runner's Python and uv from discovery, as on a new PC.
+        let path = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+        let cancelled = AtomicBool::new(false);
+        let first = resolve(&resources, &data, &logs, path.to_str().unwrap(), &cancelled)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{error}\n{}",
+                    fs::read_to_string(logs.join("setup.log")).unwrap_or_default()
+                )
+            });
+        assert!(first.0.starts_with(data.join("runtimes")));
+        assert!(resource_installer::is_managed_installed("uv", &data));
+        assert!(readiness(&resources, &data, "").0);
+        let second = resolve(&resources, &data, &logs, "", &cancelled).unwrap();
+        assert_eq!(first, second);
+
+        let mut handshake = Command::new(&first.0);
+        handshake.args(["-I", "-c", r#"
+import json, os, subprocess, sys
+requests = [
+    {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"windows-install-test","version":"1"}}},
+    {"jsonrpc":"2.0","method":"notifications/initialized"},
+    {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+]
+result = subprocess.run([sys.executable, '-I', '-m', 'coding_tools_mcp', '--stdio', '--workspace', sys.argv[1]], input=''.join(json.dumps(x)+'\n' for x in requests), text=True, capture_output=True, timeout=15, env={k:v for k,v in os.environ.items() if not k.startswith('CODING_TOOLS_MCP_')})
+assert result.returncode == 0, result.stderr
+responses = [json.loads(line) for line in result.stdout.splitlines()]
+catalog = next(x['result']['tools'] for x in responses if x.get('id') == 2)
+assert any(x['name'] == 'read_files' for x in catalog)
+print('Windows MCP handshake passed')
+"#]).arg(temporary.path());
+        let result = handshake.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let cloudflared = resource_installer::install("cloudflared", &data, &cancelled).unwrap();
+        assert!(cloudflared.is_file());
+        assert!(resource_installer::is_managed_installed(
+            "cloudflared",
+            &data
+        ));
     }
 
     #[test]

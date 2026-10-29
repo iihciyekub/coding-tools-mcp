@@ -50,6 +50,16 @@ try {
     $appProcess.WaitForExit()
     $appProcess = $null
 
+    $env:CODING_TOOLS_MCP_TEST_RUNTIME_RESOURCES = $installDir
+    Push-Location (Join-Path $PSScriptRoot "src-tauri")
+    try {
+        cargo test prepare_windows_runtime_without_system_installers -- --ignored --nocapture
+        if ($LASTEXITCODE -ne 0) { throw "Installed MCP Runtime preparation failed" }
+    } finally {
+        Pop-Location
+        Remove-Item Env:CODING_TOOLS_MCP_TEST_RUNTIME_RESOURCES
+    }
+
     $uninstaller = Join-Path $installDir "uninstall.exe"
     if (-not (Test-Path $uninstaller)) { throw "Uninstaller is missing" }
     # _?= keeps NSIS in this process so the test can wait for removal.
@@ -58,7 +68,7 @@ try {
     Wait-ForExit $remove "Uninstallation"
     if (Test-Path $binary) { throw "Uninstallation left the app executable behind" }
     if (Test-Path $manifest) { throw "Uninstallation left runtime resources behind" }
-    Write-Host "Windows installer passed installation, startup and uninstallation checks."
+    Write-Host "Windows installer passed installation, startup, MCP Runtime and uninstallation checks."
 } finally {
     if ($null -ne $appProcess -and -not $appProcess.HasExited) {
         Stop-Process -Id $appProcess.Id -Force

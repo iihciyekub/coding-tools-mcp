@@ -1852,7 +1852,7 @@ fn resolve_cloudflared(data_dir: &Path) -> Result<PathBuf, String> {
     if let Ok(explicit) = std::env::var("CODING_TOOLS_MCP_DESKTOP_CLOUDFLARED") {
         return Ok(PathBuf::from(explicit));
     }
-    let managed = resource_installer::tools_bin(data_dir).join("cloudflared");
+    let managed = resource_installer::managed_path("cloudflared", data_dir);
     if managed.is_file() {
         return Ok(managed);
     }

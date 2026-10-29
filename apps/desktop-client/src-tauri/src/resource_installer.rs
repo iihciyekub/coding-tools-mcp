@@ -47,10 +47,27 @@ fn asset(tool: &str) -> Result<Asset, String> {
             _ => Err(format!("Unknown managed resource {tool:?}.")),
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    {
+        match tool {
+            "uv" => Ok(Asset {
+                url: "https://github.com/astral-sh/uv/releases/download/0.11.28/uv-x86_64-pc-windows-msvc.zip",
+                sha256: "0a23463216d09c6a72ff80ef5dc5a795f07dc1575cb84d24596c2f124a441b7b",
+            }),
+            "cloudflared" => Ok(Asset {
+                url: "https://github.com/cloudflare/cloudflared/releases/download/2026.8.3/cloudflared-windows-amd64.exe",
+                sha256: "83e726ed18ea78c5ad5213c4c3a3a27051393950d2bc8ed4de69bec12d14eaae",
+            }),
+            _ => Err(format!("Unknown managed resource {tool:?}.")),
+        }
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        all(target_os = "windows", target_arch = "x86_64")
+    )))]
     {
         let _ = tool;
-        Err("Automatic uv/cloudflared installation is currently provided by the macOS desktop app. Install the tool with your platform package manager and retry.".into())
+        Err("Automatic uv/cloudflared installation is unavailable on this platform. Install the tool with your platform package manager and retry.".into())
     }
 }
 
@@ -67,7 +84,20 @@ pub(crate) fn managed_version(tool: &str) -> Option<&'static str> {
 }
 
 pub(crate) fn managed_path(tool: &str, data_dir: &Path) -> PathBuf {
-    tools_bin(data_dir).join(tool)
+    tools_bin(data_dir).join(format!("{tool}{}", std::env::consts::EXE_SUFFIX))
+}
+
+fn system_tool(name: &str) -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()))
+            .join("System32")
+            .join(format!("{name}.exe"))
+    }
+    #[cfg(not(windows))]
+    {
+        Path::new("/usr/bin").join(name)
+    }
 }
 
 pub(crate) fn is_managed_installed(tool: &str, data_dir: &Path) -> bool {
@@ -203,9 +233,15 @@ pub(crate) fn install(
             .join("staging")
             .join(format!("{}-{}", tool, Uuid::new_v4()));
     fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
-    let archive = staging.join("download.tar.gz");
+    let archive = staging.join(if asset.url.ends_with(".zip") {
+        "download.zip"
+    } else if asset.url.ends_with(".exe") {
+        "download.exe"
+    } else {
+        "download.tar.gz"
+    });
     let result = (|| {
-        let mut curl = Command::new("/usr/bin/curl");
+        let mut curl = Command::new(system_tool("curl"));
         curl.args([
             "--fail",
             "--location",
@@ -230,19 +266,28 @@ pub(crate) fn install(
         }
 
         let extracted = staging.join("extracted");
-        fs::create_dir_all(&extracted).map_err(|e| e.to_string())?;
-        let mut tar = Command::new("/usr/bin/tar");
-        tar.arg("-xzf").arg(&archive).arg("-C").arg(&extracted);
-        run_cancellable(tar, cancelled).map_err(|e| format!("Could not unpack {tool}: {e}"))?;
-
-        let source = find_named(&extracted, tool).ok_or_else(|| {
-            format!("Downloaded {tool} archive did not contain the expected executable.")
-        })?;
-        let destination = tools_bin(data_dir).join(tool);
+        let source = if asset.url.ends_with(".exe") {
+            archive
+        } else {
+            fs::create_dir_all(&extracted).map_err(|e| e.to_string())?;
+            let mut tar = Command::new(system_tool("tar"));
+            tar.arg("-xf").arg(&archive).arg("-C").arg(&extracted);
+            run_cancellable(tar, cancelled).map_err(|e| format!("Could not unpack {tool}: {e}"))?;
+            find_named(
+                &extracted,
+                &format!("{tool}{}", std::env::consts::EXE_SUFFIX),
+            )
+            .ok_or_else(|| {
+                format!("Downloaded {tool} archive did not contain the expected executable.")
+            })?
+        };
+        let destination = managed_path(tool, data_dir);
         install_binary(&source, &destination)?;
         if tool == "uv" {
-            if let Some(uvx) = find_named(&extracted, "uvx") {
-                install_binary(&uvx, &tools_bin(data_dir).join("uvx"))?;
+            if let Some(uvx) =
+                find_named(&extracted, &format!("uvx{}", std::env::consts::EXE_SUFFIX))
+            {
+                install_binary(&uvx, &managed_path("uvx", data_dir))?;
             }
         }
         fs::create_dir_all(data_dir.join("tools").join("versions")).map_err(|e| e.to_string())?;
@@ -274,7 +319,7 @@ mod tests {
         assert_eq!(tools_bin(Path::new("data")), Path::new("data/tools/bin"));
         assert_eq!(
             managed_path("uv", Path::new("data")),
-            Path::new("data/tools/bin/uv")
+            Path::new("data/tools/bin").join(format!("uv{}", std::env::consts::EXE_SUFFIX))
         );
     }
 
