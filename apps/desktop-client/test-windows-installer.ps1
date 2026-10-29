@@ -54,8 +54,9 @@ public static class DesktopPanelTest {
     public struct Rect { public int Left, Top, Right, Bottom; }
     [StructLayout(LayoutKind.Sequential)]
     public struct MonitorInfo { public int Size; public Rect Monitor, Work; public uint Flags; }
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    public static extern IntPtr FindWindow(string className, string title);
+    public delegate bool WindowCallback(IntPtr window, IntPtr parameter);
+    [DllImport("user32.dll")]
+    public static extern bool EnumWindows(WindowCallback callback, IntPtr parameter);
     [DllImport("user32.dll")]
     public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
     [DllImport("user32.dll")]
@@ -68,15 +69,32 @@ public static class DesktopPanelTest {
     public static extern IntPtr MonitorFromWindow(IntPtr window, uint flags);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
+    public static IntPtr FindPanel(uint processId) {
+        IntPtr result = IntPtr.Zero;
+        EnumWindows((window, parameter) => {
+            uint owner;
+            Rect bounds;
+            GetWindowThreadProcessId(window, out owner);
+            if (owner == processId && GetWindowRect(window, out bounds) &&
+                bounds.Right - bounds.Left > 100 && bounds.Bottom - bounds.Top > 100) {
+                result = window;
+                return false;
+            }
+            return true;
+        }, IntPtr.Zero);
+        return result;
+    }
 }
 "@
-    $panel = [DesktopPanelTest]::FindWindow($null, "Coding Tools MCP")
-    $ownerId = [uint32]0
-    [void][DesktopPanelTest]::GetWindowThreadProcessId($panel, [ref]$ownerId)
-    if ($panel -eq [IntPtr]::Zero -or $ownerId -ne $appProcess.Id) {
+    $panel = [DesktopPanelTest]::FindPanel([uint32]$appProcess.Id)
+    for ($attempt = 0; $panel -eq [IntPtr]::Zero -and $attempt -lt 10; $attempt++) {
+        Start-Sleep -Seconds 1
+        $panel = [DesktopPanelTest]::FindPanel([uint32]$appProcess.Id)
+    }
+    if ($panel -eq [IntPtr]::Zero) {
         throw "Installed desktop panel window was not found"
     }
-    [void][DesktopPanelTest]::ShowWindow($panel, 4)
+    [void][DesktopPanelTest]::ShowWindow($panel, 5)
     foreach ($height in @(200, 544)) {
         if (-not [DesktopPanelTest]::SetWindowPos($panel, [IntPtr]::Zero, 0, 0, 420, $height, 0x16)) {
             throw "Could not resize the desktop panel"
