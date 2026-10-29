@@ -35,10 +35,15 @@ try {
         throw "Installed runtime requirements are missing"
     }
 
-    $appProcess = Start-Process -FilePath $binary -PassThru
+    $stdout = Join-Path $testRoot "startup.stdout.log"
+    $stderr = Join-Path $testRoot "startup.stderr.log"
+    $env:RUST_BACKTRACE = "1"
+    $appProcess = Start-Process -FilePath $binary -PassThru `
+        -RedirectStandardOutput $stdout -RedirectStandardError $stderr
     Start-Sleep -Seconds 10
     $appProcess.Refresh()
     if ($appProcess.HasExited) {
+        Get-Content $stdout, $stderr | Write-Host
         throw "Installed desktop exited during startup: $($appProcess.ExitCode)"
     }
     Stop-Process -Id $appProcess.Id -Force
