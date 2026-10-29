@@ -84,12 +84,13 @@ public static class DesktopPanelTest {
         Start-Sleep -Seconds 1
         $bounds = New-Object DesktopPanelTest+Rect
         $monitor = New-Object DesktopPanelTest+MonitorInfo
-        $monitor.Size = [Runtime.InteropServices.Marshal]::SizeOf($monitor)
+        $monitor.Size = 40 # Win32 MONITORINFO size, independent of pointer width.
         $screen = [DesktopPanelTest]::MonitorFromWindow($panel, 2)
         if (-not [DesktopPanelTest]::GetWindowRect($panel, [ref]$bounds) -or
             -not [DesktopPanelTest]::GetMonitorInfo($screen, [ref]$monitor)) {
             throw "Could not inspect desktop panel bounds"
         }
+        Write-Host "Panel bounds: $($bounds.Left),$($bounds.Top),$($bounds.Right),$($bounds.Bottom); work area: $($monitor.Work.Left),$($monitor.Work.Top),$($monitor.Work.Right),$($monitor.Work.Bottom)"
         if ($bounds.Left -lt $monitor.Work.Left -or $bounds.Top -lt $monitor.Work.Top -or
             $bounds.Right -gt $monitor.Work.Right -or $bounds.Bottom -gt $monitor.Work.Bottom) {
             throw "Desktop panel extends outside the Windows work area"
@@ -119,9 +120,13 @@ public static class DesktopPanelTest {
     if (Test-Path $binary) { throw "Uninstallation left the app executable behind" }
     if (Test-Path $manifest) { throw "Uninstallation left runtime resources behind" }
     Write-Host "Windows installer passed installation, startup, MCP Runtime and uninstallation checks."
+} catch {
+    Write-Host ($_ | Out-String)
+    throw
 } finally {
     if ($null -ne $appProcess -and -not $appProcess.HasExited) {
         Stop-Process -Id $appProcess.Id -Force
+        [void]$appProcess.WaitForExit(10000)
     }
-    if (Test-Path $testRoot) { Remove-Item $testRoot -Recurse -Force }
+    if (Test-Path $testRoot) { Remove-Item $testRoot -Recurse -Force -ErrorAction Continue }
 }
