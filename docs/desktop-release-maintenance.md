@@ -222,6 +222,15 @@ assets are published, the `release.published` trigger or a manual dispatch of
 
 The platform selector is an additive release-contract change: tag names, macOS asset URLs and Homebrew behavior remain unchanged. For macOS-only versions, Windows users keep using the last version that includes a portable ZIP. Explicit `windows-artifact` dispatches remain available for maintainers independently of the stable release platform selector.
 
+An explicit `windows-artifact` build also produces an NSIS installer named
+`Coding-Tools-MCP-<version>-win-x64-setup.exe`, with a SHA-256 checksum, in the
+`desktop-windows-x64-installer` Actions artifact (retained for 30 days). It offers
+Simplified Chinese and English, installs for the current user, and supports
+uninstallation. The Windows runner must install it in a Unicode path, verify
+the runtime resources, launch the installed app and verify uninstallation
+before uploading it. This is an additional maintainer build artifact; it does
+not change stable release asset names, existing tags, macOS or Homebrew.
+
 The `production-release` Environment requires these secrets. Their values MUST
 never be committed:
 

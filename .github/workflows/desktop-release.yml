@@ -264,10 +264,11 @@ jobs:
           rm -f "$RUNNER_TEMP/coding-tools-developer-id.p12" "$RUNNER_TEMP"/AuthKey_*.p8 || true
 
   windows:
-    name: Windows x64 · portable ZIP
+    name: Windows x64 · portable ZIP and test installer
     needs: validate
     if: needs.validate.outputs.windows == 'true'
     runs-on: windows-2025
+    timeout-minutes: 60
     steps:
       - name: Check out release source
         uses: actions/checkout@v6.0.2
@@ -301,8 +302,42 @@ jobs:
         run: npm run check
 
       - name: Build portable executable
+        if: needs.validate.outputs.mode == 'release'
         working-directory: apps/desktop-client
         run: npm run tauri build -- --no-bundle --ci
+
+      - name: Build Windows installer
+        if: needs.validate.outputs.mode == 'windows-artifact'
+        working-directory: apps/desktop-client
+        run: npm run tauri build -- --bundles nsis --ci
+
+      - name: Verify and stage Windows installer
+        if: needs.validate.outputs.mode == 'windows-artifact'
+        shell: pwsh
+        working-directory: apps/desktop-client
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installers = @(Get-ChildItem "src-tauri/target/release/bundle/nsis/*-setup.exe")
+          if ($installers.Count -ne 1) { throw "Expected exactly one Windows installer" }
+          ./test-windows-installer.ps1 -Installer $installers[0].FullName
+          $outDir = Join-Path $env:RUNNER_TEMP "release-assets"
+          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+          $name = "Coding-Tools-MCP-${{ needs.validate.outputs.version }}-win-x64-setup.exe"
+          $destination = Join-Path $outDir $name
+          Copy-Item $installers[0].FullName $destination
+          $hash = (Get-FileHash $destination -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $name" | Set-Content -Encoding ascii (Join-Path $outDir "SHA256SUMS-windows-installer.txt")
+
+      - name: Upload Windows installer
+        if: needs.validate.outputs.mode == 'windows-artifact'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: desktop-windows-x64-installer
+          path: |
+            ${{ runner.temp }}/release-assets/Coding-Tools-MCP-${{ needs.validate.outputs.version }}-win-x64-setup.exe
+            ${{ runner.temp }}/release-assets/SHA256SUMS-windows-installer.txt
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Assemble portable ZIP
         shell: pwsh
